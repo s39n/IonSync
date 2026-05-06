@@ -7,14 +7,33 @@ import type { SyncPeer } from "../peer.js";
 const UPLOAD_BATCH = 10;
 
 export function handleSync(ctx: SyncContext, peer: SyncPeer, msg: SyncMsg): void {
-  const clientMap = new Map<string, FileEntry>(msg.files.map((f: FileEntry) => [f.path, f]));
+  // On the first chunk of a sync session, initialise state and start accumulating.
+  // Use a local variable so TypeScript can track narrowing across the function.
+  let clientMap: Map<string, FileEntry>;
+  if (!peer.syncClientMap) {
+    clientMap = new Map();
+    peer.syncClientMap = clientMap;
+    peer.pendingUploads.clear();
+    peer.uploadQueue = [];
+    peer.pushQueue = [];
+    peer.syncSessionActive = true;
+  } else {
+    clientMap = peer.syncClientMap;
+  }
+
+  // Accumulate client file entries across chunks.
+  for (const f of msg.files) {
+    clientMap.set(f.path, f);
+  }
+
+  // msg.last is undefined for old single-chunk clients → treat as true (backward-compat).
+  if (msg.last === false) return;
+
+  // Final chunk received — now do the full comparison and populate queues.
+  delete peer.syncClientMap;
+
   const serverFiles = ctx.db.getAllFiles();
   const serverMap = new Map<string, FileEntry>(serverFiles.map((f: FileEntry) => [f.path, f]));
-
-  peer.pendingUploads.clear();
-  peer.uploadQueue = [];
-  peer.pushQueue = [];
-  peer.syncSessionActive = true;
 
   const toRequest: string[] = [];
 
@@ -39,7 +58,7 @@ export function handleSync(ctx: SyncContext, peer: SyncPeer, msg: SyncMsg): void
     }
   }
 
-  // Request first upload batch — rest wait in uploadQueue
+  // Request first upload batch — rest wait in uploadQueue.
   for (const path of toRequest) {
     if (peer.pendingUploads.size < UPLOAD_BATCH) {
       peer.pendingUploads.add(path);
@@ -49,19 +68,34 @@ export function handleSync(ctx: SyncContext, peer: SyncPeer, msg: SyncMsg): void
     }
   }
 
-  // Drain pushes one-at-a-time via setImmediate so the GC can breathe
+  // Drain server→client pushes with callback-based backpressure.
   drainPushQueue(ctx, peer);
 }
 
-/** Read and send one server-newer file per event-loop tick. */
+/**
+ * Send one server-newer file, then recurse inside the ws.send() callback.
+ * The callback fires only after the payload has been flushed to the TCP socket,
+ * so the send buffer never accumulates more than one large file at a time.
+ */
 export function drainPushQueue(ctx: SyncContext, peer: SyncPeer): void {
   if (peer.pushQueue.length === 0) {
     checkSyncDone(peer);
     return;
   }
+  if (peer.ws.readyState !== peer.ws.OPEN) return;
+
   const file = peer.pushQueue.shift()!;
-  pushFile(ctx, peer, file);
-  setImmediate(() => drainPushQueue(ctx, peer));
+  let content = "";
+  if (file.action === "active" && file.fileType === "file") {
+    const buf = ctx.storage.readLatest(file.path);
+    content = buf ? buf.toString("base64") : "";
+  }
+
+  const payload = JSON.stringify({ type: "file_push" as const, file, content });
+  peer.ws.send(payload, (err?: Error) => {
+    if (err) return; // connection closed — abandon the queue
+    drainPushQueue(ctx, peer);
+  });
 }
 
 /** Send sync_done once all uploads and server-side pushes are finished. */
@@ -75,15 +109,6 @@ export function checkSyncDone(peer: SyncPeer): void {
     peer.syncSessionActive = false;
     peer.send({ type: "sync_done" });
   }
-}
-
-function pushFile(ctx: SyncContext, peer: SyncPeer, file: FileEntry): void {
-  let content = "";
-  if (file.action === "active" && file.fileType === "file") {
-    const buf = ctx.storage.readLatest(file.path);
-    content = buf ? buf.toString("base64") : "";
-  }
-  peer.send({ type: "file_push", file, content });
 }
 
 export function broadcastToPeers(ctx: SyncContext, sourcePeer: SyncPeer, file: FileEntry): void {

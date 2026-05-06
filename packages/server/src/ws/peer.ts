@@ -17,6 +17,8 @@ export interface SyncPeer {
   pushQueue: import("@ionsync/protocol").FileEntry[];
   /** True while a sync session is in progress (used to gate sync_done). */
   syncSessionActive: boolean;
+  /** Accumulates client FileEntry records across chunked sync messages. Cleared after last chunk. */
+  syncClientMap?: Map<string, import("@ionsync/protocol").FileEntry>;
   /** Whether auto-sync (live broadcast from other peers) is enabled. */
   autoSync: boolean;
   /** Nonce sent during challenge — kept for token validation. */

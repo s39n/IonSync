@@ -221,13 +221,19 @@ export class XSync {
 
       this.plugin.log(`Syncing ${files.length} files`);
 
-      // Always send at least one sync message (triggers sync_done for empty vault)
+      // Always send at least one sync message (triggers sync_done for empty vault).
+      // Multi-chunk syncs: mark every chunk except the last with last:false so the
+      // server accumulates all entries before processing. The final chunk is last:true
+      // (or omitted, which the server also treats as true for backward-compat).
       if (files.length === 0) {
-        this.ws.send({ type: "sync", files: [] });
+        this.ws.send({ type: "sync", files: [], last: true });
       } else {
+        const chunkCount = Math.ceil(files.length / CHUNK_SIZE);
         for (let i = 0; i < files.length; i += CHUNK_SIZE) {
           await new Promise<void>((r) => setTimeout(r, 0));
-          this.ws.send({ type: "sync", files: files.slice(i, i + CHUNK_SIZE) });
+          const chunkIndex = Math.floor(i / CHUNK_SIZE);
+          const isLast = chunkIndex === chunkCount - 1;
+          this.ws.send({ type: "sync", files: files.slice(i, i + CHUNK_SIZE), last: isLast });
         }
       }
     } catch (e) {

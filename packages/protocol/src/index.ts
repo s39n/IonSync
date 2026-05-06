@@ -35,6 +35,11 @@ export interface VersionCheckMsg {
 export interface SyncMsg {
   type: "sync";
   files: FileEntry[];
+  /**
+   * True on the final chunk of a multi-chunk sync message.
+   * Undefined is treated as true for backward compatibility with single-chunk clients.
+   */
+  last?: boolean;
 }
 
 /**
