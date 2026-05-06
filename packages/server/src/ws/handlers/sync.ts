@@ -3,22 +3,25 @@ import { compareFiles } from "@ionsync/protocol";
 import type { SyncContext } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 
+// Max files requested from client at once — keeps in-flight memory bounded.
+const UPLOAD_BATCH = 10;
+
 export function handleSync(ctx: SyncContext, peer: SyncPeer, msg: SyncMsg): void {
   const clientMap = new Map<string, FileEntry>(msg.files.map((f: FileEntry) => [f.path, f]));
   const serverFiles = ctx.db.getAllFiles();
   const serverMap = new Map<string, FileEntry>(serverFiles.map((f: FileEntry) => [f.path, f]));
 
   peer.pendingUploads.clear();
+  peer.uploadQueue = [];
+
+  const toRequest: string[] = [];
 
   // Files the server knows about
   for (const serverFile of serverFiles) {
     const clientFile = clientMap.get(serverFile.path);
 
     if (!clientFile) {
-      // Server has it, client doesn't know about it — push if active
-      if (serverFile.action === "active") {
-        pushFile(ctx, peer, serverFile);
-      }
+      if (serverFile.action === "active") pushFile(ctx, peer, serverFile);
       continue;
     }
 
@@ -28,20 +31,28 @@ export function handleSync(ctx: SyncContext, peer: SyncPeer, msg: SyncMsg): void
     if (result === "server_newer") {
       pushFile(ctx, peer, serverFile);
     } else {
-      peer.pendingUploads.add(serverFile.path);
-      peer.send({ type: "file_event_result", path: serverFile.path, result: "client_newer" });
+      toRequest.push(serverFile.path);
     }
   }
 
   // Files client has that server has never seen
   for (const [filePath, clientFile] of clientMap) {
     if (!serverMap.has(filePath) && clientFile.action === "active") {
-      peer.pendingUploads.add(filePath);
-      peer.send({ type: "file_event_result", path: filePath, result: "client_newer" });
+      toRequest.push(filePath);
     }
   }
 
-  if (peer.pendingUploads.size === 0) {
+  // Request the first batch now; the rest wait in uploadQueue
+  for (const path of toRequest) {
+    if (peer.pendingUploads.size < UPLOAD_BATCH) {
+      peer.pendingUploads.add(path);
+      peer.send({ type: "file_event_result", path, result: "client_newer" });
+    } else {
+      peer.uploadQueue.push(path);
+    }
+  }
+
+  if (peer.pendingUploads.size === 0 && peer.uploadQueue.length === 0) {
     peer.send({ type: "sync_done" });
   }
 }

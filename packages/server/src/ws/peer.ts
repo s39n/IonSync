@@ -9,8 +9,10 @@ export interface SyncPeer {
   deviceId?: string;
   /** Whether this peer has authenticated. */
   authed: boolean;
-  /** Paths the server is waiting for the client to upload (client_newer). */
+  /** Paths actively requested from the client right now (in-flight). */
   pendingUploads: Set<string>;
+  /** Paths waiting to be requested once in-flight slots free up. */
+  uploadQueue: string[];
   /** Whether auto-sync (live broadcast from other peers) is enabled. */
   autoSync: boolean;
   /** Nonce sent during challenge — kept for token validation. */
@@ -26,6 +28,7 @@ export function createPeer(id: string, nonce: string, ws: WebSocket): SyncPeer {
     ws,
     authed: false,
     pendingUploads: new Set(),
+    uploadQueue: [],
     autoSync: true,
 
     send(msg) {

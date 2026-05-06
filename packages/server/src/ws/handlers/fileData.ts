@@ -37,8 +37,15 @@ export function handleFileUpload(
   const wasPending = peer.pendingUploads.has(file.path);
   peer.pendingUploads.delete(file.path);
 
-  // Only send sync_done when this upload was part of a sync session and the last one arrived
-  if (wasPending && peer.pendingUploads.size === 0) {
+  // Drain one from the queue now that a slot has opened up
+  if (peer.uploadQueue.length > 0) {
+    const next = peer.uploadQueue.shift()!;
+    peer.pendingUploads.add(next);
+    peer.send({ type: "file_event_result", path: next, result: "client_newer" });
+  }
+
+  // Send sync_done only when in-flight and queued uploads are both exhausted
+  if (wasPending && peer.pendingUploads.size === 0 && peer.uploadQueue.length === 0) {
     peer.send({ type: "sync_done" });
   }
 
