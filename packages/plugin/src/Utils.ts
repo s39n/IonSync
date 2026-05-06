@@ -44,17 +44,17 @@ class Utils {
     return BINARY_EXTS.has(ext);
   }
 
-  /** SHA-256 of a UTF-8 string (returns hex string, or null for empty input) */
+  /** SHA-1 of a UTF-8 string (returns hex string, or null for empty input) */
   async getSHA(data: string | null | undefined): Promise<string | null> {
     if (!data) return null;
-    const digest = await crypto.subtle.digest("SHA-256", Utils._encoder.encode(data));
+    const digest = await crypto.subtle.digest("SHA-1", Utils._encoder.encode(data));
     return bufToHex(new Uint8Array(digest));
   }
 
-  /** SHA-256 of raw binary data */
+  /** SHA-1 of raw binary data */
   async getSHABinary(data: ArrayBuffer | null | undefined): Promise<string | null> {
     if (!data) return null;
-    const digest = await crypto.subtle.digest("SHA-256", data);
+    const digest = await crypto.subtle.digest("SHA-1", data);
     return bufToHex(new Uint8Array(digest));
   }
 
