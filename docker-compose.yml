@@ -7,7 +7,7 @@ services:
     ports:
       - "${IONSYNC_PORT:-3000}:3000"
     volumes:
-      - ionsync_data:/data
+      - ${IONSYNC_DATA:-ionsync_data}:/data
       # Mount a hand-written config instead of env vars:
       # - ./config.js:/app/config.js:ro
       # TLS certificates (also set tls: {} in config.js):
@@ -28,5 +28,3 @@ services:
       retries: 3
       start_period: 10s
 
-volumes:
-  ionsync_data:
