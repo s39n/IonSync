@@ -17,6 +17,14 @@ export function attachWebSocketServer(
 ): WebSocketServer {
   const wss = new WebSocketServer({ server: httpServer });
 
+  // Ping every 30s so reverse-proxy idle timeouts don't kill long uploads
+  const pingInterval = setInterval(() => {
+    for (const peer of ctx.peers.values()) {
+      if (peer.ws.readyState === peer.ws.OPEN) peer.ws.ping();
+    }
+  }, 30_000);
+  wss.on("close", () => clearInterval(pingInterval));
+
   wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
     const peerId = uuidv4();
     const nonce = uuidv4();

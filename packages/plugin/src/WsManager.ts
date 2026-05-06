@@ -117,9 +117,13 @@ export class WsManager {
 
   private _openSocket(): void {
     if (!this.isEnabled) return;
-    const { host, port } = this.settings;
+    const host = this.settings.host.replace(/\/+$/, ""); // strip any trailing slashes
+    const { port } = this.settings;
     const scheme = this.settings.tls ? "wss" : "ws";
-    const url = `${scheme}://${host}:${port}`;
+    const defaultPort = this.settings.tls ? 443 : 80;
+    const url = port && port !== defaultPort
+      ? `${scheme}://${host}:${port}`
+      : `${scheme}://${host}`;
     this.log("Opening WebSocket to:", url);
 
     try {

@@ -134,7 +134,8 @@ export class Storage {
         if (!stat) return;
         const mtime = stat.mtime;
         const stored = this.readMetadata(path);
-        if (stored && stored.mtime === mtime && stored.sha1) {
+        // 40 chars = SHA-1 (current). 64 chars = old SHA-256 (stale) → recompute.
+        if (stored && stored.mtime === mtime && stored.sha1 && stored.sha1.length === 40) {
           this.tree[path] = stored;
           return;
         }

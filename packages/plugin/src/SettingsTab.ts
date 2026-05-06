@@ -20,20 +20,24 @@ export class IonSyncSettingsTab extends PluginSettingTab {
       .addText((t) =>
         t.setPlaceholder("192.168.1.100")
           .setValue(this.plugin.settings.host)
-          .onChange(async (v) => { this.plugin.settings.host = v.trim(); await this.plugin.saveSettings(); })
+          .onChange(async (v) => { this.plugin.settings.host = v.trim().replace(/\/+$/, ""); await this.plugin.saveSettings(); })
       );
 
     new Setting(containerEl)
       .setName("Server port")
-      .setDesc("Port your sync server listens on")
-      .addText((t) =>
-        t.setPlaceholder("3000")
-          .setValue(String(this.plugin.settings.port))
-          .onChange(async (v) => {
-            const n = parseInt(v, 10);
-            if (!isNaN(n)) { this.plugin.settings.port = n; await this.plugin.saveSettings(); }
-          })
-      );
+      .setDesc("Port your sync server listens on (leave blank to use the default: 80 for ws, 443 for wss)")
+      .addText((t) => {
+        t.setPlaceholder("default")
+          .setValue(this.plugin.settings.port ? String(this.plugin.settings.port) : "");
+        t.inputEl.addEventListener("blur", async () => {
+          const v = t.inputEl.value.trim();
+          const n = parseInt(v, 10);
+          this.plugin.settings.port = (!v || isNaN(n) || n <= 0) ? 0 : n;
+          t.inputEl.value = this.plugin.settings.port ? String(this.plugin.settings.port) : "";
+          await this.plugin.saveSettings();
+        });
+        return t;
+      });
 
     new Setting(containerEl)
       .setName("Password")
