@@ -1,7 +1,7 @@
 import type { FileDataUploadMsg, FileDataRequestMsg } from "@ionsync/protocol";
 import type { SyncContext } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
-import { broadcastToPeers } from "./sync.js";
+import { broadcastToPeers, checkSyncDone } from "./sync.js";
 import { sha1 } from "../../crypto.js";
 
 /**
@@ -33,21 +33,17 @@ export function handleFileUpload(
   // Update the DB record
   ctx.db.upsertFile(file);
 
-  // Mark pending upload as resolved — only counts if it was part of a sync session
-  const wasPending = peer.pendingUploads.has(file.path);
+  // Mark pending upload as resolved and open a slot for the next queued path
   peer.pendingUploads.delete(file.path);
 
-  // Drain one from the queue now that a slot has opened up
   if (peer.uploadQueue.length > 0) {
     const next = peer.uploadQueue.shift()!;
     peer.pendingUploads.add(next);
     peer.send({ type: "file_event_result", path: next, result: "client_newer" });
   }
 
-  // Send sync_done only when in-flight and queued uploads are both exhausted
-  if (wasPending && peer.pendingUploads.size === 0 && peer.uploadQueue.length === 0) {
-    peer.send({ type: "sync_done" });
-  }
+  // Check whether sync is fully complete (uploads + server pushes both done)
+  checkSyncDone(peer);
 
   // Broadcast to other connected peers (live sync)
   broadcastToPeers(ctx, peer, file);

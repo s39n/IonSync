@@ -3,7 +3,7 @@ import { compareFiles } from "@ionsync/protocol";
 import type { SyncContext } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 
-// Max files requested from client at once — keeps in-flight memory bounded.
+/** Max files requested from client simultaneously — bounds server-side buffer memory. */
 const UPLOAD_BATCH = 10;
 
 export function handleSync(ctx: SyncContext, peer: SyncPeer, msg: SyncMsg): void {
@@ -13,36 +13,33 @@ export function handleSync(ctx: SyncContext, peer: SyncPeer, msg: SyncMsg): void
 
   peer.pendingUploads.clear();
   peer.uploadQueue = [];
+  peer.pushQueue = [];
+  peer.syncSessionActive = true;
 
   const toRequest: string[] = [];
 
-  // Files the server knows about
   for (const serverFile of serverFiles) {
     const clientFile = clientMap.get(serverFile.path);
-
     if (!clientFile) {
-      if (serverFile.action === "active") pushFile(ctx, peer, serverFile);
+      if (serverFile.action === "active") peer.pushQueue.push(serverFile);
       continue;
     }
-
     const result = compareFiles(clientFile, serverFile);
     if (result === null) continue;
-
     if (result === "server_newer") {
-      pushFile(ctx, peer, serverFile);
+      peer.pushQueue.push(serverFile);
     } else {
       toRequest.push(serverFile.path);
     }
   }
 
-  // Files client has that server has never seen
   for (const [filePath, clientFile] of clientMap) {
     if (!serverMap.has(filePath) && clientFile.action === "active") {
       toRequest.push(filePath);
     }
   }
 
-  // Request the first batch now; the rest wait in uploadQueue
+  // Request first upload batch — rest wait in uploadQueue
   for (const path of toRequest) {
     if (peer.pendingUploads.size < UPLOAD_BATCH) {
       peer.pendingUploads.add(path);
@@ -52,7 +49,30 @@ export function handleSync(ctx: SyncContext, peer: SyncPeer, msg: SyncMsg): void
     }
   }
 
-  if (peer.pendingUploads.size === 0 && peer.uploadQueue.length === 0) {
+  // Drain pushes one-at-a-time via setImmediate so the GC can breathe
+  drainPushQueue(ctx, peer);
+}
+
+/** Read and send one server-newer file per event-loop tick. */
+export function drainPushQueue(ctx: SyncContext, peer: SyncPeer): void {
+  if (peer.pushQueue.length === 0) {
+    checkSyncDone(peer);
+    return;
+  }
+  const file = peer.pushQueue.shift()!;
+  pushFile(ctx, peer, file);
+  setImmediate(() => drainPushQueue(ctx, peer));
+}
+
+/** Send sync_done once all uploads and server-side pushes are finished. */
+export function checkSyncDone(peer: SyncPeer): void {
+  if (
+    peer.syncSessionActive &&
+    peer.pendingUploads.size === 0 &&
+    peer.uploadQueue.length === 0 &&
+    peer.pushQueue.length === 0
+  ) {
+    peer.syncSessionActive = false;
     peer.send({ type: "sync_done" });
   }
 }

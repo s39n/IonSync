@@ -13,6 +13,10 @@ export interface SyncPeer {
   pendingUploads: Set<string>;
   /** Paths waiting to be requested once in-flight slots free up. */
   uploadQueue: string[];
+  /** Server-newer files waiting to be pushed to the client one at a time. */
+  pushQueue: import("@ionsync/protocol").FileEntry[];
+  /** True while a sync session is in progress (used to gate sync_done). */
+  syncSessionActive: boolean;
   /** Whether auto-sync (live broadcast from other peers) is enabled. */
   autoSync: boolean;
   /** Nonce sent during challenge — kept for token validation. */
@@ -29,6 +33,8 @@ export function createPeer(id: string, nonce: string, ws: WebSocket): SyncPeer {
     authed: false,
     pendingUploads: new Set(),
     uploadQueue: [],
+    pushQueue: [],
+    syncSessionActive: false,
     autoSync: true,
 
     send(msg) {
