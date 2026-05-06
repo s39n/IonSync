@@ -1,0 +1,14 @@
+{
+  "name": "ionsync-v2",
+  "private": true,
+  "version": "0.0.1",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "npm run build --workspace=packages/protocol && npm run build --workspace=packages/server",
+    "test": "npm test --workspace=packages/server",
+    "typecheck": "npm run typecheck --workspace=packages/protocol && npm run typecheck --workspace=packages/server"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}

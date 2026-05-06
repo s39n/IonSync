@@ -1,0 +1,32 @@
+services:
+  ionsync:
+    image: ionsync:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${IONSYNC_PORT:-3000}:3000"
+    volumes:
+      - ionsync_data:/data
+      # Mount a hand-written config instead of env vars:
+      # - ./config.js:/app/config.js:ro
+      # TLS certificates (also set tls: {} in config.js):
+      # - ./certs:/certs:ro
+    environment:
+      IONSYNC_PASSWORD: ${IONSYNC_PASSWORD:?Create a .env file and set IONSYNC_PASSWORD}
+      # IONSYNC_PORT: 3000
+      # IONSYNC_HOST: 0.0.0.0
+      # IONSYNC_LOG_LEVEL: 3          # 0=silent 1=error 2=warn 3=info
+      # IONSYNC_VERSIONS_PER_FILE: 5
+      # IONSYNC_CLEANUP_INTERVAL: 3600
+      # IONSYNC_KEEP_DELETED_SECS: 604800
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/dashboard"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  ionsync_data:

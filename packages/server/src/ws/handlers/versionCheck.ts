@@ -1,0 +1,74 @@
+/**
+ * Handles `version_check` from the client.
+ *
+ * If the server has a newer plugin build, it responds with the content of
+ * main.js, styles.css, and manifest.json from the client/ directory so the
+ * plugin can hot-reload itself — preserving the v1 auto-update feature.
+ */
+import type { VersionCheckMsg } from "@ionsync/protocol";
+import type { SyncContext } from "../../context.js";
+import type { SyncPeer } from "../peer.js";
+import fs from "node:fs";
+import path from "node:path";
+
+interface BuildInfo {
+  version: string;
+  build: string;
+}
+
+// Cached build info loaded once at startup
+let cachedBuildInfo: BuildInfo | null = null;
+let cachedClientDir = "";
+
+function getBuildInfo(clientDir: string): BuildInfo | null {
+  if (cachedClientDir !== clientDir) {
+    cachedBuildInfo = null;
+    cachedClientDir = clientDir;
+  }
+  if (cachedBuildInfo) return cachedBuildInfo;
+
+  const infoPath = path.join(clientDir, "build_info.json");
+  if (!fs.existsSync(infoPath)) return null;
+
+  try {
+    cachedBuildInfo = JSON.parse(fs.readFileSync(infoPath, "utf8")) as BuildInfo;
+    return cachedBuildInfo;
+  } catch {
+    return null;
+  }
+}
+
+const PLUGIN_FILES = ["main.js", "styles.css", "manifest.json"] as const;
+
+export function handleVersionCheck(
+  ctx: SyncContext,
+  peer: SyncPeer,
+  msg: VersionCheckMsg
+): void {
+  const serverBuild = getBuildInfo(ctx.clientDir);
+
+  if (!serverBuild) {
+    // No build info available — treat as up-to-date
+    peer.send({ type: "version_check_response", needsUpdate: false });
+    return;
+  }
+
+  const needsUpdate =
+    msg.version !== serverBuild.version || msg.build !== serverBuild.build;
+
+  if (!needsUpdate) {
+    peer.send({ type: "version_check_response", needsUpdate: false });
+    return;
+  }
+
+  // Read and encode plugin files
+  const files: Record<string, string> = {};
+  for (const filename of PLUGIN_FILES) {
+    const fp = path.join(ctx.clientDir, filename);
+    if (fs.existsSync(fp)) {
+      files[filename] = fs.readFileSync(fp).toString("base64");
+    }
+  }
+
+  peer.send({ type: "version_check_response", needsUpdate: true, files });
+}

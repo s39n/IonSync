@@ -1,0 +1,680 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IonSync</title>
+  <style>
+    /* ── Reset & variables ────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0f1117;
+      --bg2:       #1a1d26;
+      --bg3:       #222535;
+      --border:    #2e3148;
+      --text:      #e2e4f0;
+      --muted:     #6e7290;
+      --accent:    #6c8eff;
+      --accent-d:  #5070d8;
+      --green:     #3dcc7e;
+      --red:       #ff5f5f;
+      --yellow:    #ffb347;
+      --radius:    8px;
+      --font:      -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono:      "SF Mono", "Fira Code", "Consolas", monospace;
+      --sidebar-w: 200px;
+      --header-h:  56px;
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg:      #f4f5fb;
+        --bg2:     #ffffff;
+        --bg3:     #ebedf5;
+        --border:  #d0d4e8;
+        --text:    #1a1d2e;
+        --muted:   #7880a0;
+      }
+    }
+
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; }
+
+    /* ── Layout ───────────────────────────────────────────────────────────── */
+    #login {
+      display: flex; align-items: center; justify-content: center;
+      height: 100%; min-height: 100vh;
+    }
+
+    .login-card {
+      background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 40px; width: 100%; max-width: 380px;
+    }
+    .login-card h1 { font-size: 1.3rem; font-weight: 600; margin-bottom: 6px; }
+    .login-card p { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
+    .login-card label { display: block; font-size: 12px; font-weight: 500; color: var(--muted); margin-bottom: 6px; letter-spacing: .04em; text-transform: uppercase; }
+    .login-card input[type=password] {
+      width: 100%; padding: 10px 12px; border: 1px solid var(--border);
+      border-radius: 6px; background: var(--bg3); color: var(--text);
+      font-size: 14px; outline: none; transition: border-color .15s;
+    }
+    .login-card input[type=password]:focus { border-color: var(--accent); }
+    .login-error { color: var(--red); font-size: 12px; margin-top: 8px; min-height: 18px; }
+
+    #app { display: none; height: 100vh; flex-direction: column; }
+    #app.visible { display: flex; }
+
+    /* ── Header ───────────────────────────────────────────────────────────── */
+    header {
+      height: var(--header-h); flex-shrink: 0;
+      display: flex; align-items: center; gap: 16px;
+      padding: 0 20px; border-bottom: 1px solid var(--border);
+      background: var(--bg2);
+    }
+    header .logo { font-weight: 700; font-size: 1rem; letter-spacing: -.01em; display: flex; align-items: center; gap: 7px; }
+    header .logo svg { color: var(--accent); flex-shrink: 0; }
+    header .logo span { color: var(--accent); }
+    header .spacer { flex: 1; }
+    header .status-dot {
+      width: 8px; height: 8px; border-radius: 50%; background: var(--muted);
+      transition: background .3s;
+    }
+    header .status-dot.ok { background: var(--green); }
+    header .status-label { font-size: 12px; color: var(--muted); }
+    header button.logout {
+      font-size: 12px; padding: 5px 12px; border-radius: 5px;
+      border: 1px solid var(--border); background: transparent;
+      color: var(--muted); cursor: pointer; transition: color .15s, border-color .15s;
+    }
+    header button.logout:hover { color: var(--text); border-color: var(--text); }
+
+    /* ── Body ─────────────────────────────────────────────────────────────── */
+    .body { display: flex; flex: 1; overflow: hidden; }
+
+    /* ── Sidebar ──────────────────────────────────────────────────────────── */
+    nav {
+      width: var(--sidebar-w); flex-shrink: 0;
+      border-right: 1px solid var(--border); background: var(--bg2);
+      padding: 16px 10px; display: flex; flex-direction: column; gap: 2px;
+    }
+    nav .nav-section { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); padding: 8px 10px 4px; margin-top: 8px; }
+    nav button {
+      width: 100%; text-align: left; padding: 8px 10px; border-radius: 6px;
+      border: none; background: none; color: var(--text); cursor: pointer;
+      font-size: 13px; font-family: inherit; display: flex; align-items: center; gap: 8px;
+      transition: background .12s;
+    }
+    nav button:hover { background: var(--bg3); }
+    nav button.active { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+    nav button .icon { font-size: 15px; flex-shrink: 0; }
+    nav .badge {
+      margin-left: auto; background: var(--accent); color: #fff;
+      font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 10px; min-width: 20px; text-align: center;
+    }
+    nav .badge.red { background: var(--red); }
+
+    /* ── Main pane ────────────────────────────────────────────────────────── */
+    main { flex: 1; overflow-y: auto; padding: 24px; background: var(--bg); }
+
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    h2 { font-size: 1rem; font-weight: 600; margin-bottom: 16px; }
+
+    /* ── Overview ─────────────────────────────────────────────────────────── */
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .stat-card {
+      background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 16px 20px;
+    }
+    .stat-card .label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 8px; }
+    .stat-card .value { font-size: 2rem; font-weight: 700; }
+    .stat-card .value.green { color: var(--green); }
+    .stat-card .value.accent { color: var(--accent); }
+
+    /* ── Tables ───────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
+      overflow: hidden; margin-bottom: 16px;
+    }
+    .card-header {
+      padding: 12px 16px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 12px; background: var(--bg3);
+    }
+    .card-header h3 { font-size: 13px; font-weight: 600; flex: 1; }
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      text-align: left; padding: 10px 16px;
+      font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+      color: var(--muted); border-bottom: 1px solid var(--border); background: var(--bg3);
+    }
+    td { padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+    .empty { text-align: center; color: var(--muted); padding: 32px 16px !important; font-size: 13px; }
+
+    /* ── Badges ───────────────────────────────────────────────────────────── */
+    .badge-pill {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600;
+    }
+    .badge-pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; }
+    .badge-pill.green { background: color-mix(in srgb, var(--green) 15%, transparent); color: var(--green); }
+    .badge-pill.green::before { background: var(--green); }
+    .badge-pill.red { background: color-mix(in srgb, var(--red) 15%, transparent); color: var(--red); }
+    .badge-pill.red::before { background: var(--red); }
+    .badge-pill.muted { background: var(--bg3); color: var(--muted); }
+    .badge-pill.muted::before { background: var(--muted); }
+
+    /* ── Buttons ──────────────────────────────────────────────────────────── */
+    .btn {
+      padding: 5px 12px; border-radius: 5px; border: 1px solid var(--border);
+      background: var(--bg3); color: var(--text); font-size: 12px; cursor: pointer;
+      font-family: inherit; transition: background .12s, border-color .12s;
+    }
+    .btn:hover { background: var(--border); }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn.primary:hover { background: var(--accent-d); border-color: var(--accent-d); }
+    .btn.danger { background: color-mix(in srgb, var(--red) 12%, transparent); border-color: var(--red); color: var(--red); }
+    .btn.danger:hover { background: color-mix(in srgb, var(--red) 22%, transparent); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    /* ── Search bar ───────────────────────────────────────────────────────── */
+    .search-bar {
+      padding: 6px 10px; border-radius: 5px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); font-size: 13px; font-family: inherit;
+      outline: none; width: 220px; transition: border-color .15s;
+    }
+    .search-bar:focus { border-color: var(--accent); }
+
+    /* ── Monospace / code ─────────────────────────────────────────────────── */
+    .mono { font-family: var(--mono); font-size: 12px; }
+    .path { color: var(--muted); font-family: var(--mono); font-size: 12px; word-break: break-all; }
+
+    /* ── Log viewer ───────────────────────────────────────────────────────── */
+    #log-output {
+      background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 16px; font-family: var(--mono); font-size: 12px; line-height: 1.7;
+      white-space: pre-wrap; word-break: break-all; overflow-y: auto;
+      height: calc(100vh - var(--header-h) - 120px); color: var(--text);
+    }
+    #log-output .warn { color: var(--yellow); }
+    #log-output .err { color: var(--red); }
+
+    /* ── Spinner ──────────────────────────────────────────────────────────── */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      display: inline-block; width: 14px; height: 14px;
+      border: 2px solid var(--border); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin .7s linear infinite;
+    }
+
+    /* ── Toast ────────────────────────────────────────────────────────────── */
+    #toast {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      background: var(--bg2); border: 1px solid var(--border);
+      padding: 10px 20px; border-radius: 8px; font-size: 13px;
+      box-shadow: 0 4px 24px rgba(0,0,0,.3);
+      opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 999;
+    }
+    #toast.show { opacity: 1; }
+    #toast.success { border-color: var(--green); color: var(--green); }
+    #toast.error { border-color: var(--red); color: var(--red); }
+
+    /* ── Misc ─────────────────────────────────────────────────────────────── */
+    .auto-refresh { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+    .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+    .toolbar .spacer { flex: 1; }
+    .text-muted { color: var(--muted); }
+    .file-size { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  </style>
+</head>
+<body>
+
+<!-- ── Login ───────────────────────────────────────────────────────────────── -->
+<div id="login">
+  <div class="login-card">
+    <h1 style="display:flex;align-items:center;gap:9px"><svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1.5" fill="var(--accent)" stroke="none"></circle><ellipse cx="12" cy="12" rx="10" ry="3.5"></ellipse><ellipse cx="12" cy="12" rx="10" ry="3.5" transform="rotate(60 12 12)"></ellipse><ellipse cx="12" cy="12" rx="10" ry="3.5" transform="rotate(120 12 12)"></ellipse></svg>Ion<span style="color:var(--accent)">Sync</span></h1>
+    <p>Enter your server password to access the dashboard.</p>
+    <label for="pw-input">Password</label>
+    <input id="pw-input" type="password" placeholder="••••••••••" autocomplete="current-password">
+    <div class="login-error" id="login-error"></div>
+    <button class="btn primary" id="login-btn" style="width:100%;margin-top:20px;padding:10px">Sign in</button>
+  </div>
+</div>
+
+<!-- ── App ─────────────────────────────────────────────────────────────────── -->
+<div id="app">
+
+  <header>
+    <div class="logo"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"></circle><ellipse cx="12" cy="12" rx="10" ry="3.5"></ellipse><ellipse cx="12" cy="12" rx="10" ry="3.5" transform="rotate(60 12 12)"></ellipse><ellipse cx="12" cy="12" rx="10" ry="3.5" transform="rotate(120 12 12)"></ellipse></svg>Ion<span>Sync</span></div>
+    <div class="status-dot" id="status-dot"></div>
+    <span class="status-label" id="status-label">Connecting…</span>
+    <div class="spacer"></div>
+    <div class="auto-refresh"><span id="refresh-spinner" class="spinner" style="display:none"></span> Auto-refresh: 5s</div>
+    <button class="logout" id="logout-btn">Sign out</button>
+  </header>
+
+  <div class="body">
+    <nav>
+      <div class="nav-section">Monitor</div>
+      <button class="nav-btn active" data-panel="overview"><span class="icon">📊</span> Overview</button>
+      <button class="nav-btn" data-panel="peers"><span class="icon">🔗</span> Peers <span class="badge" id="peers-badge">0</span></button>
+      <button class="nav-btn" data-panel="devices"><span class="icon">💻</span> Devices</button>
+      <div class="nav-section">Storage</div>
+      <button class="nav-btn" data-panel="files"><span class="icon">📁</span> Files</button>
+      <div class="nav-section">Debug</div>
+      <button class="nav-btn" data-panel="logs"><span class="icon">📋</span> Logs</button>
+    </nav>
+
+    <main>
+
+      <!-- ── Overview ── -->
+      <div class="panel active" id="panel-overview">
+        <h2>Overview</h2>
+        <div class="stat-grid">
+          <div class="stat-card">
+            <div class="label">Active Peers</div>
+            <div class="value accent" id="stat-peers">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="label">Known Devices</div>
+            <div class="value" id="stat-devices">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="label">Stored Files</div>
+            <div class="value" id="stat-files">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="label">Pending Uploads</div>
+            <div class="value" id="stat-pending">—</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h3>Connected Peers</h3></div>
+          <table>
+            <thead><tr><th>Device ID</th><th>Auto-sync</th><th>Pending</th><th>Actions</th></tr></thead>
+            <tbody id="overview-peers-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ── Peers ── -->
+      <div class="panel" id="panel-peers">
+        <div class="toolbar">
+          <h2 style="margin:0">Active Peers</h2>
+          <div class="spacer"></div>
+          <button class="btn" onclick="refreshAll()">Refresh</button>
+        </div>
+        <div class="card">
+          <table>
+            <thead><tr><th>Peer ID</th><th>Device ID</th><th>Auto-sync</th><th>Pending Uploads</th><th>Actions</th></tr></thead>
+            <tbody id="peers-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ── Devices ── -->
+      <div class="panel" id="panel-devices">
+        <div class="toolbar">
+          <h2 style="margin:0">Known Devices</h2>
+          <div class="spacer"></div>
+          <button class="btn" onclick="refreshAll()">Refresh</button>
+        </div>
+        <div class="card">
+          <table>
+            <thead><tr><th>Device ID</th><th>Last Seen</th><th>Status</th></tr></thead>
+            <tbody id="devices-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ── Files ── -->
+      <div class="panel" id="panel-files">
+        <div class="toolbar">
+          <h2 style="margin:0">Stored Files</h2>
+          <div class="spacer"></div>
+          <input class="search-bar" id="file-search" type="text" placeholder="Search paths…" oninput="renderFiles()">
+          <button class="btn" onclick="loadFiles()">Refresh</button>
+        </div>
+        <div class="card">
+          <table>
+            <thead><tr><th>Path</th><th>Size</th><th>Modified</th><th></th></tr></thead>
+            <tbody id="files-body"></tbody>
+          </table>
+        </div>
+        <div id="files-stats" class="text-muted" style="font-size:12px;margin-top:8px"></div>
+      </div>
+
+      <!-- ── Logs ── -->
+      <div class="panel" id="panel-logs">
+        <div class="toolbar">
+          <h2 style="margin:0">Server Logs</h2>
+          <div class="spacer"></div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
+            <input type="checkbox" id="log-scroll" checked> Auto-scroll
+          </label>
+          <button class="btn" onclick="loadLogs()">Refresh</button>
+        </div>
+        <div id="log-output"></div>
+      </div>
+
+    </main>
+  </div>
+</div>
+
+<!-- ── Toast ── -->
+<div id="toast"></div>
+
+<script>
+'use strict';
+// ── State ──────────────────────────────────────────────────────────────────
+const S = { peers: [], devices: [], files: [], authed: false };
+let pollTimer = null;
+let allFiles = [];
+
+// ── Auth ───────────────────────────────────────────────────────────────────
+async function login() {
+  const pw = document.getElementById('pw-input').value;
+  const err = document.getElementById('login-error');
+  const btn = document.getElementById('login-btn');
+  if (!pw) { err.textContent = 'Enter a password.'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Signing in…';
+  err.textContent = '';
+
+  try {
+    const r = await fetch('/api/login', { headers: { 'X-Dashboard-Password': pw } });
+    if (r.ok) {
+      S.authed = true;
+      document.getElementById('login').style.display = 'none';
+      document.getElementById('app').classList.add('visible');
+      startPolling();
+    } else {
+      err.textContent = 'Incorrect password.';
+    }
+  } catch {
+    err.textContent = 'Could not reach server.';
+  }
+  btn.disabled = false;
+  btn.textContent = 'Sign in';
+}
+
+function logout() {
+  document.cookie = 'dash_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT';
+  location.reload();
+}
+
+// Try using existing cookie on load
+async function tryRestoreSession() {
+  try {
+    const r = await fetch('/api/peers');
+    if (r.ok) {
+      S.authed = true;
+      document.getElementById('login').style.display = 'none';
+      document.getElementById('app').classList.add('visible');
+      startPolling();
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+// ── Polling ────────────────────────────────────────────────────────────────
+function startPolling() {
+  refreshAll();
+  pollTimer = setInterval(refreshAll, 5000);
+}
+
+async function refreshAll() {
+  setStatus(true);
+  try {
+    await Promise.all([loadPeers(), loadDevices(), loadLogs()]);
+    setStatus(true);
+    // Lazy-load files only when the panel is active (expensive walk)
+    if (document.getElementById('panel-files').classList.contains('active')) {
+      await loadFiles();
+    }
+  } catch {
+    setStatus(false);
+  }
+}
+
+// ── API helpers ────────────────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const r = await fetch(path, opts);
+  if (r.status === 401) { location.reload(); throw new Error('Unauthorized'); }
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r;
+}
+
+async function loadPeers() {
+  const r = await api('/api/peers');
+  S.peers = await r.json();
+  renderPeers();
+  updateOverview();
+}
+
+async function loadDevices() {
+  const r = await api('/api/devices');
+  S.devices = await r.json();
+  renderDevices();
+  updateOverview();
+}
+
+async function loadFiles() {
+  const r = await api('/api/files');
+  allFiles = await r.json();
+  renderFiles();
+}
+
+async function loadLogs() {
+  const r = await api('/api/logs');
+  const text = await r.text();
+  renderLogs(text);
+}
+
+// ── Peer actions ───────────────────────────────────────────────────────────
+async function peerAction(action, peerId, btn) {
+  btn.disabled = true;
+  try {
+    await api(`/api/action/${action}/${encodeURIComponent(peerId)}`);
+    toast(`Done: ${action}`, 'success');
+    await loadPeers();
+  } catch (e) {
+    toast(`Failed: ${e.message}`, 'error');
+  }
+  btn.disabled = false;
+}
+
+async function deleteFile(path, btn) {
+  if (!confirm(`Delete version file?\n\n${path}`)) return;
+  btn.disabled = true;
+  try {
+    await api(`/api/delete-file/${encodeURIComponent(path)}`, { method: 'DELETE' });
+    toast('File deleted', 'success');
+    await loadFiles();
+  } catch (e) {
+    toast(`Failed: ${e.message}`, 'error');
+  }
+  btn.disabled = false;
+}
+
+// ── Render helpers ─────────────────────────────────────────────────────────
+function fmtDate(ms) {
+  if (!ms) return '—';
+  const d = new Date(typeof ms === 'string' ? ms : Number(ms));
+  if (isNaN(d)) return String(ms);
+  const now = Date.now();
+  const diff = now - d.getTime();
+  if (diff < 60_000) return 'just now';
+  if (diff < 3600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3600_000)}h ago`;
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function fmtSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+}
+
+function shortId(id) {
+  return id ? id.substring(0, 8) + '…' : '—';
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function renderPeers() {
+  const badge = document.getElementById('peers-badge');
+  badge.textContent = S.peers.length;
+  badge.className = 'badge' + (S.peers.length > 0 ? '' : ' red');
+
+  const tbody = document.getElementById('peers-body');
+  if (!S.peers.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">No active peers</td></tr>';
+    return;
+  }
+  tbody.innerHTML = S.peers.map(p => `
+    <tr>
+      <td><span class="mono" title="${escHtml(p.id)}">${escHtml(shortId(p.id))}</span></td>
+      <td><span class="mono" title="${escHtml(p.deviceId)}">${escHtml(shortId(p.deviceId))}</span></td>
+      <td>${p.autoSync ? '<span class="badge-pill green">On</span>' : '<span class="badge-pill muted">Off</span>'}</td>
+      <td>${p.pendingUploads > 0 ? `<span class="badge-pill red">${p.pendingUploads}</span>` : '<span class="text-muted">0</span>'}</td>
+      <td style="display:flex;gap:6px">
+        <button class="btn" onclick="peerAction('trigger-sync','${escHtml(p.id)}',this)">Sync</button>
+        <button class="btn danger" onclick="peerAction('disconnect','${escHtml(p.id)}',this)">Disconnect</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function renderDevices() {
+  const tbody = document.getElementById('devices-body');
+  if (!S.devices.length) {
+    tbody.innerHTML = '<tr><td colspan="3" class="empty">No devices seen yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = S.devices.map(d => `
+    <tr>
+      <td><span class="mono" title="${escHtml(d.id)}">${escHtml(d.id)}</span></td>
+      <td>${escHtml(fmtDate(d.last_online))}</td>
+      <td>${d.connected ? '<span class="badge-pill green">Connected</span>' : '<span class="badge-pill muted">Offline</span>'}</td>
+    </tr>
+  `).join('');
+}
+
+function renderFiles() {
+  const q = (document.getElementById('file-search').value || '').toLowerCase();
+  const filtered = allFiles.filter(f => f.path.toLowerCase().includes(q));
+  const tbody = document.getElementById('files-body');
+
+  if (!filtered.length) {
+    tbody.innerHTML = `<tr><td colspan="4" class="empty">${allFiles.length ? 'No files match search' : 'No stored files yet'}</td></tr>`;
+    document.getElementById('files-stats').textContent = '';
+    return;
+  }
+
+  const totalSize = filtered.reduce((s, f) => s + f.size, 0);
+  document.getElementById('files-stats').textContent =
+    `Showing ${filtered.length} of ${allFiles.length} files · ${fmtSize(totalSize)} total`;
+
+  tbody.innerHTML = filtered.map(f => `
+    <tr>
+      <td><span class="path">${escHtml(f.path)}</span></td>
+      <td><span class="file-size">${fmtSize(f.size)}</span></td>
+      <td><span class="text-muted" style="font-size:12px">${escHtml(fmtDate(f.mtime))}</span></td>
+      <td><button class="btn danger" onclick="deleteFile('${escHtml(f.path)}',this)">Delete</button></td>
+    </tr>
+  `).join('');
+}
+
+function renderLogs(text) {
+  const el = document.getElementById('log-output');
+  const lines = text.split('\n');
+  el.innerHTML = lines.map(line => {
+    const safe = escHtml(line);
+    if (line.includes('[WARN]')) return `<span class="warn">${safe}</span>`;
+    if (line.includes('[ERROR]') || line.includes('error') || line.includes('Error')) return `<span class="err">${safe}</span>`;
+    return safe;
+  }).join('\n');
+
+  if (document.getElementById('log-scroll').checked) {
+    el.scrollTop = el.scrollHeight;
+  }
+}
+
+function updateOverview() {
+  document.getElementById('stat-peers').textContent = S.peers.length;
+  document.getElementById('stat-devices').textContent = S.devices.length;
+  document.getElementById('stat-files').textContent = allFiles.length || '—';
+
+  const pending = S.peers.reduce((s, p) => s + p.pendingUploads, 0);
+  document.getElementById('stat-pending').textContent = pending;
+
+  // Overview peers table
+  const tbody = document.getElementById('overview-peers-body');
+  if (!S.peers.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">No active peers</td></tr>';
+    return;
+  }
+  tbody.innerHTML = S.peers.map(p => `
+    <tr>
+      <td><span class="mono" title="${escHtml(p.deviceId)}">${escHtml(shortId(p.deviceId))}</span></td>
+      <td>${p.autoSync ? '<span class="badge-pill green">On</span>' : '<span class="badge-pill muted">Off</span>'}</td>
+      <td>${p.pendingUploads > 0 ? `<span class="badge-pill red">${p.pendingUploads}</span>` : '0'}</td>
+      <td style="display:flex;gap:6px">
+        <button class="btn" onclick="peerAction('trigger-sync','${escHtml(p.id)}',this)">Sync</button>
+        <button class="btn danger" onclick="peerAction('disconnect','${escHtml(p.id)}',this)">Disconnect</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+// ── Status indicator ───────────────────────────────────────────────────────
+function setStatus(ok) {
+  const dot = document.getElementById('status-dot');
+  const label = document.getElementById('status-label');
+  dot.className = 'status-dot' + (ok ? ' ok' : '');
+  label.textContent = ok ? 'Online' : 'Unreachable';
+}
+
+// ── Navigation ─────────────────────────────────────────────────────────────
+function showPanel(name) {
+  document.querySelectorAll('.panel').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(el => el.classList.remove('active'));
+
+  document.getElementById('panel-' + name).classList.add('active');
+  document.querySelector(`.nav-btn[data-panel="${name}"]`).classList.add('active');
+
+  // Load files on demand when switching to files panel
+  if (name === 'files' && !allFiles.length) loadFiles();
+}
+
+// ── Toast ──────────────────────────────────────────────────────────────────
+let toastTimer = null;
+function toast(msg, type = 'success') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show ' + type;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = ''; }, 2800);
+}
+
+// ── Event wiring ───────────────────────────────────────────────────────────
+document.getElementById('login-btn').addEventListener('click', login);
+document.getElementById('pw-input').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+document.getElementById('logout-btn').addEventListener('click', logout);
+document.querySelectorAll('.nav-btn').forEach(btn => {
+  btn.addEventListener('click', () => showPanel(btn.dataset.panel));
+});
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+tryRestoreSession();
+</script>
+</body>
+</html>

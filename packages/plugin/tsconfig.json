@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"],
+    "target": "ES2018",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "noEmit": true,
+    "outDir": "./dist",
+    "baseUrl": ".",
+    "paths": {
+      "@ionsync/protocol": ["../protocol/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}
