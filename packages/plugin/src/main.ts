@@ -123,6 +123,12 @@ export class IonSyncPlugin extends Plugin {
     }
   }
 
+  log(...args: unknown[]): void {
+    if (this.settings.debug) {
+      console.log("[IonSync]", ...args);
+    }
+  }
+
   getSVGIcon(): string {
     // Atom — nucleus dot + three orbital ellipses at 0°, 60°, 120°
     return `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"></circle><ellipse cx="12" cy="12" rx="10" ry="3.5"></ellipse><ellipse cx="12" cy="12" rx="10" ry="3.5" transform="rotate(60 12 12)"></ellipse><ellipse cx="12" cy="12" rx="10" ry="3.5" transform="rotate(120 12 12)"></ellipse></svg>`;

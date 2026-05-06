@@ -1,7 +1,10 @@
 node_modules
 packages/*/node_modules
 packages/*/dist
-packages/server/client
+packages/server/client/main.js
+packages/server/client/styles.css
+packages/server/client/manifest.json
+packages/server/client/build_info.json
 **/*.test.ts
 **/.DS_Store
 .git

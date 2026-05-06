@@ -33,8 +33,8 @@ const postBuildPlugin = {
 
       // Stamp version + build into the bundle
       const mainJs = fs.readFileSync(BUILD_DIR + "main.js", "utf-8")
-        .replaceAll("__IONSYNC_VERSION__", VERSION)
-        .replaceAll("__IONSYNC_BUILD__", String(BUILD));
+        .replaceAll("__IONSYNC_VERSION__", JSON.stringify(VERSION))
+        .replaceAll("__IONSYNC_BUILD__", JSON.stringify(String(BUILD)));
       fs.writeFileSync(BUILD_DIR + "main.js", mainJs);
 
       // Keep manifest.json version in sync
@@ -79,7 +79,9 @@ const postBuildPlugin = {
   },
 };
 
-esbuild.build({
+// esbuild v0.17+ removed the `watch` option from build() — watch mode now
+// requires context().watch().  Branch on prod/dev accordingly.
+const buildOptions = {
   banner: { js: banner },
   entryPoints: ["src/main.ts"],
   bundle: true,
@@ -103,11 +105,18 @@ esbuild.build({
     "@ionsync/protocol": protocolSrc,
   },
   format: "cjs",
-  watch: prod ? false : { onRebuild(err) { if (err) console.error("watch build failed", err); } },
   target: "es2018",
   logLevel: "info",
   sourcemap: prod ? false : "inline",
   treeShaking: true,
   outfile: "main.js",
   plugins: [postBuildPlugin],
-}).catch(() => process.exit(1));
+};
+
+if (prod) {
+  esbuild.build(buildOptions).catch(() => process.exit(1));
+} else {
+  const ctx = await esbuild.context(buildOptions);
+  await ctx.watch();
+  console.log("Watching for changes…");
+}

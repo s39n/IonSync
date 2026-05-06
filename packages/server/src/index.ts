@@ -29,12 +29,14 @@ const config = mergeConfig(rawConfig.default ?? rawConfig);
 
 // ── Logging ───────────────────────────────────────────────────────────────────
 
-// Wrap console methods to populate the in-memory log buffer
-// (buffer is populated later via ctx.logBuffer; we patch after context creation)
+// Wrap console.log/warn/error so messages are captured into the in-memory ring
+// buffer exposed by GET /api/logs.  Patched after ctx is created below.
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
-const dataBase = path.join(config.appDir, config.dataDir);
+// Use path.resolve so an absolute dataDir (e.g. "/data" from Docker) is
+// honoured as-is rather than being appended to appDir.
+const dataBase = path.resolve(config.appDir, config.dataDir);
 const dbDir = path.join(dataBase, "db");
 const filesDir = path.join(dataBase, "files");
 const clientDir = path.join(config.appDir, "client");
@@ -44,6 +46,20 @@ const storage = new Storage(filesDir);
 storage.init();
 
 const ctx = createContext(config, db, storage, clientDir);
+
+// Patch console methods to feed into the in-memory log buffer (200 lines max).
+const MAX_LOG = 200;
+const _log   = console.log.bind(console);
+const _warn  = console.warn.bind(console);
+const _error = console.error.bind(console);
+function appendLog(level: string, args: unknown[]): void {
+  const line = `[${level}] ${args.map(String).join(" ")}`;
+  ctx.logBuffer.push(line);
+  if (ctx.logBuffer.length > MAX_LOG) ctx.logBuffer.shift();
+}
+console.log   = (...args) => { _log(...args);   appendLog("INFO",  args); };
+console.warn  = (...args) => { _warn(...args);  appendLog("WARN",  args); };
+console.error = (...args) => { _error(...args); appendLog("ERROR", args); };
 
 // ── Express app ───────────────────────────────────────────────────────────────
 

@@ -49,6 +49,9 @@ export class XSync {
   // One-shot response listeners keyed by msg.type
   private responseListeners: Array<(msg: ServerMsg) => boolean> = [];
 
+  private messageQueue: ServerMsg[] = [];
+  private isProcessingQueue = false;
+
   constructor(public plugin: IonSyncPlugin) {
     this.ws = new WsManager(plugin.settings);
     this.storage = new Storage(plugin.app, plugin.settings, plugin.manifest.dir ?? '');
@@ -89,7 +92,7 @@ export class XSync {
       switch (event.type) {
         case "connected":      void this._onConnected(); break;
         case "disconnected":   this._onDisconnected(); break;
-        case "message":        void this._handleServerMessage(event.msg); break;
+        case "message":        void this._queueMessage(event.msg); break;
         case "update_available": void this._onUpdateAvailable(event.update); break;
         case "incompatible":   this.xNotify.showNotification("#ff9800", "Incompatible plugin version"); break;
       }
@@ -100,6 +103,7 @@ export class XSync {
 
   unload(): void {
     this.storage.abortTree();
+    this.storage.tree = {};
     this.xTimeouts.clear();
     if (this.configCheckInterval !== null) {
       window.clearInterval(this.configCheckInterval);
@@ -126,6 +130,7 @@ export class XSync {
     this.unload();
     this.xNotify.cleanup();
     this.ws.destroy();
+    this.messageQueue = [];
   }
 
   // ── Connection events ─────────────────────────────────────────────────────
@@ -145,6 +150,9 @@ export class XSync {
     this.isSyncing = false;
     this.releaseWakeLock();
     this.storage.abortTree();
+    this.storage.tree = {};
+    this.messageQueue = [];
+    this.isProcessingQueue = false;
   }
 
   private async _onUpdateAvailable(update: UpdateInfo): Promise<void> {
@@ -155,6 +163,20 @@ export class XSync {
   }
 
   // ── Incoming server messages ──────────────────────────────────────────────
+
+  private async _queueMessage(msg: ServerMsg): Promise<void> {
+    this.messageQueue.push(msg);
+    if (this.isProcessingQueue) return;
+    this.isProcessingQueue = true;
+    while (this.messageQueue.length > 0) {
+      const next = this.messageQueue.shift();
+      if (next) {
+        try { await this._handleServerMessage(next); }
+        catch (e) { console.error("[XSync] message processing error:", e); }
+      }
+    }
+    this.isProcessingQueue = false;
+  }
 
   private async _handleServerMessage(msg: ServerMsg): Promise<void> {
     // Give one-shot listeners first crack
@@ -168,7 +190,7 @@ export class XSync {
         await this._applyServerFile(msg.file, msg.content);
         break;
       case "sync_done":
-        this._onSyncDone();
+        await this._onSyncDone();
         break;
     }
   }
@@ -177,6 +199,7 @@ export class XSync {
 
   async sync(): Promise<void> {
     if (!this.ws.isConnected || this.isSyncing) return;
+    this.plugin.log("Starting sync...");
     this.isSyncing = true;
     this.syncUpCount = 0;
     this.syncDownCount = 0;
@@ -196,6 +219,8 @@ export class XSync {
         if (!this.exclusionFilter?.isExcluded(path)) files.push(entry);
       }
 
+      this.plugin.log(`Syncing ${files.length} files`);
+
       // Always send at least one sync message (triggers sync_done for empty vault)
       if (files.length === 0) {
         this.ws.send({ type: "sync", files: [] });
@@ -213,18 +238,22 @@ export class XSync {
     }
   }
 
-  private _onSyncDone(): void {
+  private async _onSyncDone(): Promise<void> {
+    this.plugin.log("Sync done");
     this.isSyncing = false;
     this.releaseWakeLock();
     this.xNotify.setSyncSummary(this.syncUpCount, this.syncDownCount);
     this.syncUpCount = 0;
     this.syncDownCount = 0;
+    this.storage.tree = {};
+    await this.storage.flushMetadata();
   }
 
   // ── File upload ───────────────────────────────────────────────────────────
 
   private async _uploadFile(path: string): Promise<void> {
     if (!this.ws.isConnected) return;
+    this.plugin.log("Uploading:", path);
     const isBinary = Utils.isBinary(path);
     const stored = this.storage.readMetadata(path);
     const entry: FileEntry | null = (this.storage.tree[path] ?? stored) ?? null;
@@ -251,6 +280,7 @@ export class XSync {
 
   private async _applyServerFile(file: FileEntry, content: string): Promise<void> {
     if (this.exclusionFilter?.isExcluded(file.path)) return;
+    this.plugin.log("Applying server file:", file.path, file.action);
     if (file.action === "deleted") {
       await this.storage.delete(file.path, file);
       this.addActivity("delete", file.path);
@@ -284,6 +314,7 @@ export class XSync {
     args: unknown[] = []
   ): Promise<void> {
     if (this.exclusionFilter?.isExcluded(file.path)) return;
+    this.plugin.log("Local event:", action, file.path);
 
     if ((action === "create" || action === "modify") && this.deleteQueue[file.path]) {
       delete this.deleteQueue[file.path];
@@ -292,6 +323,7 @@ export class XSync {
 
     if (action === "rename") {
       const oldPath = args[0] as string;
+      this.plugin.log("Rename event:", oldPath, "->", file.path);
       const oldMeta = this.storage.readMetadata(oldPath);
       this.deleteQueue[oldPath] = {
         metadata: { action: "deleted", sha1: oldMeta?.sha1 ?? "", mtime: Date.now(), fileType: "file" },
@@ -315,6 +347,7 @@ export class XSync {
     }
 
     if (!this.plugin.settings.autoSync || !this.ws.isConnected) {
+      this.plugin.log("Queueing event (offline/manual):", action, file.path);
       this.unsentSessionEvents[file.path] = { action, file };
       this.xNotify.updatePendingCount(Object.keys(this.unsentSessionEvents).length);
       return;
@@ -322,6 +355,7 @@ export class XSync {
 
     const delay = this.plugin.settings.delayedSync ?? 0;
     if (action === "modify" && delay > 0) {
+      this.plugin.log("Debouncing modify event:", file.path, delay, "s");
       this.xTimeouts.set(file.path, delay * 1_000, async () => {
         await this._sendFileEvent(file, forceChanged);
       });
@@ -332,12 +366,16 @@ export class XSync {
 
   private async _sendFileEvent(file: TAbstractFile, forceChanged: boolean): Promise<void> {
     if (!this.ws.isConnected) return;
+    this.plugin.log("Sending file event:", file.path);
     const isBinary = Utils.isBinary(file.path);
     const stat = await this.plugin.app.vault.adapter.stat(file.path);
     if (!stat) return;
 
     const stored = this.storage.readMetadata(file.path);
-    if (!forceChanged && stored && stored.mtime === stat.mtime && stored.sha1) return;
+    if (!forceChanged && stored && stored.mtime === stat.mtime && stored.sha1) {
+      this.plugin.log("File unchanged, skipping:", file.path);
+      return;
+    }
 
     let sha1: string | null = null;
     let content = "";

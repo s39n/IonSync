@@ -62,6 +62,12 @@ export class WsManager {
     }
   }
 
+  private log(...args: unknown[]): void {
+    if (this.settings.debug) {
+      console.log("[WsManager]", ...args);
+    }
+  }
+
   on(listener: Listener): void { this.listeners.push(listener); }
   off(listener: Listener): void { this.listeners = this.listeners.filter((l) => l !== listener); }
 
@@ -77,15 +83,18 @@ export class WsManager {
       console.warn("[WsManager] No password configured");
       return;
     }
+    this.log("Connecting...");
     this._openSocket();
   }
 
   send(msg: ClientMsg): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.log("Sending:", msg.type);
     this.ws.send(JSON.stringify(msg));
   }
 
   disconnect(): void {
+    this.log("Disconnecting");
     this._cancelReconnect();
     if (this.ws) {
       this.ws.onclose = null;
@@ -111,6 +120,7 @@ export class WsManager {
     const { host, port } = this.settings;
     const scheme = this.settings.tls ? "wss" : "ws";
     const url = `${scheme}://${host}:${port}`;
+    this.log("Opening WebSocket to:", url);
 
     try {
       this.ws = new WebSocket(url);
@@ -121,6 +131,7 @@ export class WsManager {
     }
 
     this.ws.onopen = () => {
+      this.log("WebSocket opened");
       this.reconnectDelay = 1_000;
     };
 
@@ -128,12 +139,14 @@ export class WsManager {
       let msg: ServerMsg;
       try { msg = JSON.parse(ev.data) as ServerMsg; }
       catch (e) { console.error("[WsManager] bad JSON:", e); return; }
+      this.log("Received:", msg.type);
       this._handleMessage(msg).catch((e) => console.error("[WsManager] message handler error:", e));
     };
 
     this.ws.onerror = (ev) => { console.error("[WsManager] error:", ev); };
 
     this.ws.onclose = () => {
+      this.log("WebSocket closed");
       this.ws = null;
       if (this.isConnected) {
         this.isConnected = false;

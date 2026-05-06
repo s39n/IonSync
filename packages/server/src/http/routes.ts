@@ -123,7 +123,7 @@ export function buildRouter(ctx: SyncContext): express.Router {
 
   router.get("/api/files", (req, res) => {
     if (!checkAuth(req, res)) return;
-    const filesBase = path.join(ctx.config.appDir, ctx.config.dataDir, "files");
+    const filesBase = path.resolve(ctx.config.appDir, ctx.config.dataDir, "files");
 
     const walk = (dir: string): Array<{ path: string; size: number; mtime: string }> => {
       if (!fs.existsSync(dir)) return [];
@@ -154,7 +154,7 @@ export function buildRouter(ctx: SyncContext): express.Router {
 
     // Express wildcard captures rest of path
     const relativePath = decodeURIComponent((req.params as Record<string, string>)["0"] ?? "");
-    const filesBase = path.join(ctx.config.appDir, ctx.config.dataDir, "files");
+    const filesBase = path.resolve(ctx.config.appDir, ctx.config.dataDir, "files");
     const full = path.resolve(filesBase, relativePath);
     const rel = path.normalize(path.relative(filesBase, full));
 

@@ -21,6 +21,7 @@ export class Storage {
   private fsInternal: FSAdapter;
   private metadata: Record<string, FileEntry> = {};
   private aborted = false;
+  private saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private app: App, private settings: PluginSettings, private pluginDir: string) {
     this.fsVault = new FSAdapter(app, "");
@@ -29,7 +30,7 @@ export class Storage {
 
   async init(): Promise<void> {
     await this.loadMetadata();
-    await this.loadDeleteQueue(); // pre-loads persisted delete queue into memory if needed
+    await this.loadDeleteQueue();
   }
 
   // ── Metadata persistence ───────────────────────────────────────────────────
@@ -44,7 +45,18 @@ export class Storage {
   }
 
   private async saveMetadata(): Promise<void> {
+    if (this.saveTimeout) {
+      clearTimeout(this.saveTimeout);
+      this.saveTimeout = null;
+    }
     await this.fsInternal.write("data/metadata.json", JSON.stringify(this.metadata));
+  }
+
+  private requestSave(): void {
+    if (this.saveTimeout) return;
+    this.saveTimeout = setTimeout(() => {
+      void this.saveMetadata();
+    }, 2_000);
   }
 
   readMetadata(path: string): FileEntry | null {
@@ -53,11 +65,20 @@ export class Storage {
 
   async writeMetadata(entry: FileEntry): Promise<void> {
     this.metadata[entry.path] = entry;
-    await this.saveMetadata();
+    this.requestSave();
   }
 
   async deleteMetadata(path: string): Promise<void> {
     delete this.metadata[path];
+    this.requestSave();
+  }
+
+  /** Force immediate save of metadata */
+  async flushMetadata(): Promise<void> {
+    if (this.saveTimeout) {
+      clearTimeout(this.saveTimeout);
+      this.saveTimeout = null;
+    }
     await this.saveMetadata();
   }
 
