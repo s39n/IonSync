@@ -53,7 +53,7 @@ export function handleFileUpload(
 
   // Broadcast to other connected peers (live sync).
   // Pass uploadBuf so broadcastToPeers reuses it instead of reading from disk again.
-  broadcastToPeers(ctx, peer, file, uploadBuf);
+  broadcastToPeers(ctx, peer, file);
 
   logInfo(ctx, `[file_data] saved ${file.path} (action=${file.action}, mtime=${file.mtime})`);
 }
