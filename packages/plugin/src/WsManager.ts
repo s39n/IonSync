@@ -87,6 +87,11 @@ export class WsManager {
     this._openSocket();
   }
 
+  /** Bytes queued in the WebSocket's outgoing buffer but not yet sent. */
+  get bufferedAmount(): number {
+    return this.ws?.bufferedAmount ?? 0;
+  }
+
   send(msg: ClientMsg): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.log("Sending:", msg.type);

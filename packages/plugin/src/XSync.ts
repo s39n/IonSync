@@ -265,6 +265,20 @@ export class XSync {
     const entry: FileEntry | null = (this.storage.tree[path] ?? stored) ?? null;
     if (!entry) return;
 
+    // Wait for the outgoing socket buffer to drain before reading the next file
+    // into memory. Without this, a burst of large files would all be read and
+    // base64-encoded simultaneously, spiking memory before TCP can flush them.
+    if (entry.action === "active" && entry.fileType === "file" && this.ws.bufferedAmount > 1 * 1024 * 1024) {
+      await new Promise<void>((resolve) => {
+        const check = setInterval(() => {
+          if (this.ws.bufferedAmount < 256 * 1024) {
+            clearInterval(check);
+            resolve();
+          }
+        }, 50);
+      });
+    }
+
     let content = "";
     if (entry.action === "active" && entry.fileType === "file") {
       if (isBinary) {

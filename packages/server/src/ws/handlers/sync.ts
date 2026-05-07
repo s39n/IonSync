@@ -94,7 +94,9 @@ export function drainPushQueue(ctx: SyncContext, peer: SyncPeer): void {
   const payload = JSON.stringify({ type: "file_push" as const, file, content });
   peer.ws.send(payload, (err?: Error) => {
     if (err) return; // connection closed — abandon the queue
-    drainPushQueue(ctx, peer);
+    // setImmediate yields to the event loop so V8 can collect the payload string
+    // and the decoded Buffer from the previous file before we allocate the next.
+    setImmediate(() => drainPushQueue(ctx, peer));
   });
 }
 
