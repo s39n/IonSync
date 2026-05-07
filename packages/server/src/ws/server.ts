@@ -16,11 +16,12 @@ export function attachWebSocketServer(
   httpServer: import("node:http").Server | import("node:https").Server
 ): WebSocketServer {
   // maxPayload caps the size of a single WebSocket message the server will accept.
-  // A file_data upload embeds base64 content inside JSON, so a 100 MB file arrives
-  // as ~137 MB of JSON.  The 200 MB ceiling here comfortably covers files up to
-  // ~145 MB.  Connections that exceed this are closed before the message handler
-  // ever runs, preventing a single giant upload from exhausting heap.
-  const wss = new WebSocketServer({ server: httpServer, maxPayload: 200 * 1024 * 1024 });
+  // A file_data upload embeds base64 content inside JSON, so a 25 MB file arrives
+  // as ~33 MB of JSON.  The 50 MB ceiling here comfortably covers the default
+  // plugin limit (25 MB → ~33 MB on the wire) with headroom to spare.
+  // Connections that exceed this are closed before the message handler ever runs,
+  // preventing a single giant upload from exhausting heap.
+  const wss = new WebSocketServer({ server: httpServer, maxPayload: 50 * 1024 * 1024 });
 
   // Ping every 30s so reverse-proxy idle timeouts don't kill long uploads
   const pingInterval = setInterval(() => {

@@ -377,6 +377,18 @@ export class XSync {
     const stat = await this.plugin.app.vault.adapter.stat(file.path);
     if (!stat) return;
 
+    // Mirror the size guard from computeTree — don't read a file that's too
+    // large to hash or transmit safely.
+    const maxBytes = (this.plugin.settings.maxFileSizeMB ?? 25) * 1024 * 1024;
+    if (stat.size > maxBytes) {
+      this.plugin.log(
+        `Skipping file event for "${file.path}": ` +
+        `${(stat.size / 1024 / 1024).toFixed(1)} MB > ` +
+        `${this.plugin.settings.maxFileSizeMB ?? 25} MB limit`
+      );
+      return;
+    }
+
     const stored = this.storage.readMetadata(file.path);
     if (!forceChanged && stored && stored.mtime === stat.mtime && stored.sha1) {
       this.plugin.log("File unchanged, skipping:", file.path);

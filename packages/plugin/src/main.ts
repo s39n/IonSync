@@ -33,6 +33,14 @@ export interface PluginSettings {
   syncActiveCommunityPlugins: boolean;
   syncInstalledCommunityPlugins: boolean;
   exclusionList: string;
+  /**
+   * Files strictly larger than this value (in MB) are silently skipped during
+   * computeTree and real-time events.  Keeps the plugin and server from loading
+   * gigantic binaries into memory.  Must stay below maxPayload ÷ 1.34 on the
+   * server (the base64 expansion factor).  Default 25 MB → ~33 MB on the wire,
+   * safely under the server's 50 MB WebSocket message cap.
+   */
+  maxFileSizeMB: number;
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
@@ -64,6 +72,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
   syncActiveCommunityPlugins: false,
   syncInstalledCommunityPlugins: false,
   exclusionList: "",
+  maxFileSizeMB: 25,
 };
 
 // ---------- Plugin ----------

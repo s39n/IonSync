@@ -132,6 +132,20 @@ export class Storage {
         this.tree[path] = { path, sha1: "", mtime, action: "active", fileType: "folder" };
       } else {
         if (!stat) return;
+
+        // Skip files that exceed the configured size limit.  Reading a 500 MB
+        // binary into memory just to hash it would instantly exhaust Obsidian's
+        // heap.  Files above the limit are simply not synced.
+        const maxBytes = (this.settings.maxFileSizeMB ?? 25) * 1024 * 1024;
+        if (stat.size > maxBytes) {
+          console.warn(
+            `[IonSync] Skipping "${path}": ` +
+            `${(stat.size / 1024 / 1024).toFixed(1)} MB > ` +
+            `${this.settings.maxFileSizeMB ?? 25} MB limit`
+          );
+          return;
+        }
+
         const mtime = stat.mtime;
         const stored = this.readMetadata(path);
         // 40 chars = SHA-1 (current). 64 chars = old SHA-256 (stale) → recompute.

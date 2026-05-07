@@ -142,6 +142,20 @@ export class IonSyncSettingsTab extends PluginSettingTab {
     toggleSetting("Active community plugins", "community-plugins.json", "syncActiveCommunityPlugins");
     toggleSetting("Installed community plugins", ".obsidian/plugins/", "syncInstalledCommunityPlugins");
 
+    new Setting(containerEl)
+      .setName("Max file size (MB)")
+      .setDesc(
+        "Files larger than this are skipped — they will not be hashed, uploaded, or downloaded. " +
+        "Keep this below ~35 MB to stay within the server's 50 MB per-message WebSocket limit. " +
+        "Existing oversized files already on the server are unaffected."
+      )
+      .addSlider((s) =>
+        s.setLimits(1, 100, 1)
+          .setValue(this.plugin.settings.maxFileSizeMB ?? 25)
+          .setDynamicTooltip()
+          .onChange(async (v) => { this.plugin.settings.maxFileSizeMB = v; await this.plugin.saveSettings(); })
+      );
+
     // ── Exclusion list ──────────────────────────────────────────────────────
     containerEl.createEl("h3", { text: "Exclusion list" });
     containerEl.createEl("p", { text: "One glob pattern per line. Lines starting with # are comments." });
