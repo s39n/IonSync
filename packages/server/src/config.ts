@@ -21,10 +21,9 @@ export interface Config {
   dataDir: string;
   cleanup: CleanupConfig;
   logs: { level: number };
-  maxFileSizeMb: number; // ✅ Add this
+  maxFileSizeMb: number; 
 }
 
-// Update DEFAULTS
 const DEFAULTS: Omit<Config, "password"> = {
   port: 3000,
   host: "0.0.0.0",
@@ -32,7 +31,7 @@ const DEFAULTS: Omit<Config, "password"> = {
   dataDir: "data",
   cleanup: { intervalSecs: 3600, versionsPerFile: 5, keepDeletedFilesSecs: 7 * 24 * 3600 },
   logs: { level: 3 },
-  maxFileSizeMb: 50, // ✅ Default to 50MB
+  maxFileSizeMb: 50, 
 };
 
 export async function loadConfig(configPath?: string): Promise<Config> {
@@ -69,9 +68,7 @@ export function mergeConfig(raw: Record<string, unknown>): Config {
       keepDeletedFilesSecs: cleanup.keepDeletedFilesSecs ?? DEFAULTS.cleanup.keepDeletedFilesSecs,
     },
     logs: { level: logs.level ?? DEFAULTS.logs.level },
-    maxFileSizeMb: typeof raw["maxFileSizeMb"] === "number" 
-      ? raw["maxFileSizeMb"] 
-      : DEFAULTS.maxFileSizeMb,
+    maxFileSizeMb: process.env.MAX_FILE_SIZE_MB ? parseInt(process.env.MAX_FILE_SIZE_MB, 10) : (typeof raw["maxFileSizeMb"] === "number" ? raw["maxFileSizeMb"] : DEFAULTS.maxFileSizeMb),
   };
 
   if (raw["tls"] && typeof raw["tls"] === "object") {
