@@ -4,7 +4,7 @@ import type { SyncContext } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 
 /** Max files requested from client simultaneously — bounds server-side buffer memory. */
-const UPLOAD_BATCH = 10;
+const UPLOAD_BATCH = 1;
 
 export function handleSync(ctx: SyncContext, peer: SyncPeer, msg: SyncMsg): void {
   // On the first chunk of a sync session, initialise state and start accumulating.
@@ -92,11 +92,23 @@ export function drainPushQueue(ctx: SyncContext, peer: SyncPeer): void {
   }
 
   const payload = JSON.stringify({ type: "file_push" as const, file, content });
+  
   peer.ws.send(payload, (err?: Error) => {
     if (err) return; // connection closed — abandon the queue
-    // setImmediate yields to the event loop so V8 can collect the payload string
-    // and the decoded Buffer from the previous file before we allocate the next.
-    setImmediate(() => drainPushQueue(ctx, peer));
+    
+    // Check if the WebSocket buffer is choked (e.g., > 10MB)
+    if (peer.ws.bufferedAmount > 10 * 1024 * 1024) {
+      const waitInterval = setInterval(() => {
+        // Wait for buffer to drain below 2MB
+        if (peer.ws.bufferedAmount < 2 * 1024 * 1024) {
+          clearInterval(waitInterval);
+          setImmediate(() => drainPushQueue(ctx, peer)); // Yield to GC
+        }
+      }, 50);
+    } else {
+      // Yield to GC immediately before reading the next file
+      setImmediate(() => drainPushQueue(ctx, peer));
+    }
   });
 }
 
@@ -113,39 +125,31 @@ export function checkSyncDone(peer: SyncPeer): void {
   }
 }
 
-/**
- * @param uploadBuf - Pass the already-decoded Buffer from handleFileUpload so we
- *   avoid reading the file from disk a second time.  When omitted (e.g. for a
- *   folder or deleted entry) we fall back to readLatest.
- */
-export function broadcastToPeers(
-  ctx: SyncContext,
-  sourcePeer: SyncPeer,
-  file: FileEntry,
-  uploadBuf?: Buffer
-): void {
-  // Collect targets first — skip the disk read if nobody is listening.
+export function broadcastToPeers(ctx: SyncContext, sourcePeer: SyncPeer, file: FileEntry): void {
+  // 1. Collect targets first
   const targets: SyncPeer[] = [];
   for (const peer of ctx.peers.values()) {
     if (peer.id === sourcePeer.id) continue;
     if (!peer.authed || !peer.autoSync) continue;
-    targets.push(peer);
+    if (peer.ws.readyState === peer.ws.OPEN) {
+      targets.push(peer);
+    }
   }
+
+  // 2. Bail early if no targets (saves a disk read)
   if (targets.length === 0) return;
 
+  // 3. Read and stringify only ONCE
   let content = "";
   if (file.action === "active" && file.fileType === "file") {
-    const buf = uploadBuf ?? ctx.storage.readLatest(file.path);
+    const buf = ctx.storage.readLatest(file.path);
     content = buf ? buf.toString("base64") : "";
   }
 
-  // Stringify once — peer.send() would JSON.stringify per-call, which would
-  // duplicate a potentially large base64 string in memory for every peer.
   const payload = JSON.stringify({ type: "file_push" as const, file, content });
 
+  // 4. Broadcast raw string directly
   for (const peer of targets) {
-    if (peer.ws.readyState === peer.ws.OPEN) {
-      peer.ws.send(payload);
-    }
+    peer.ws.send(payload);
   }
 }

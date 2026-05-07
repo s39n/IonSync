@@ -1,5 +1,6 @@
 import type { FileEntry } from "@ionsync/protocol";
 import type { App } from "obsidian";
+import { ExclusionFilter } from "./ExclusionFilter.js";
 import { FSAdapter } from "./FSAdapter.js";
 import Utils from "./Utils.js";
 import type { PluginSettings } from "./main.js";
@@ -117,12 +118,16 @@ export class Storage {
   async computeTree(): Promise<void> {
     this.aborted = false;
     this.tree = {};
+    const exclusionFilter = new ExclusionFilter(this.settings);
 
     await this.fsVault.iterate(async ({ path, stat, isFolder }) => {
       if (this.aborted) return;
 
       // Skip the plugin's own data files
       if (path.startsWith(this.pluginDir.replace(/^\//, "") + "/data/")) return;
+
+      // Skip excluded paths before any I/O (size check, hashing, etc.)
+      if (exclusionFilter.isExcluded(path)) return;
 
       if (isFolder) {
         const mtime = await this.getFolderMTime(path);
