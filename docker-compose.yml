@@ -14,6 +14,9 @@ services:
       # - ./certs:/certs:ro
     environment:
       IONSYNC_PASSWORD: ${IONSYNC_PASSWORD:?Create a .env file and set IONSYNC_PASSWORD}
+      # Raise the V8 old-generation heap limit.  Default auto-detection on Alpine
+      # is ~2 GB which is too low when syncing vaults with files in the 100s of MB.
+      NODE_OPTIONS: "--max-old-space-size=4096"
       # IONSYNC_PORT: 3000
       # IONSYNC_HOST: 0.0.0.0
       # IONSYNC_LOG_LEVEL: 3          # 0=silent 1=error 2=warn 3=info

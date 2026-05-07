@@ -111,16 +111,39 @@ export function checkSyncDone(peer: SyncPeer): void {
   }
 }
 
-export function broadcastToPeers(ctx: SyncContext, sourcePeer: SyncPeer, file: FileEntry): void {
-  let content = "";
-  if (file.action === "active" && file.fileType === "file") {
-    const buf = ctx.storage.readLatest(file.path);
-    content = buf ? buf.toString("base64") : "";
-  }
-
+/**
+ * @param uploadBuf - Pass the already-decoded Buffer from handleFileUpload so we
+ *   avoid reading the file from disk a second time.  When omitted (e.g. for a
+ *   folder or deleted entry) we fall back to readLatest.
+ */
+export function broadcastToPeers(
+  ctx: SyncContext,
+  sourcePeer: SyncPeer,
+  file: FileEntry,
+  uploadBuf?: Buffer
+): void {
+  // Collect targets first — skip the disk read if nobody is listening.
+  const targets: SyncPeer[] = [];
   for (const peer of ctx.peers.values()) {
     if (peer.id === sourcePeer.id) continue;
     if (!peer.authed || !peer.autoSync) continue;
-    peer.send({ type: "file_push", file, content });
+    targets.push(peer);
+  }
+  if (targets.length === 0) return;
+
+  let content = "";
+  if (file.action === "active" && file.fileType === "file") {
+    const buf = uploadBuf ?? ctx.storage.readLatest(file.path);
+    content = buf ? buf.toString("base64") : "";
+  }
+
+  // Stringify once — peer.send() would JSON.stringify per-call, which would
+  // duplicate a potentially large base64 string in memory for every peer.
+  const payload = JSON.stringify({ type: "file_push" as const, file, content });
+
+  for (const peer of targets) {
+    if (peer.ws.readyState === peer.ws.OPEN) {
+      peer.ws.send(payload);
+    }
   }
 }

@@ -12,22 +12,28 @@ export function handleFileUpload(
   peer: SyncPeer,
   msg: FileDataUploadMsg
 ): void {
-  const { file, content } = msg;
+  const { file } = msg;
 
-  // Persist content for active files (not folders, not deleted)
-  if (file.action === "active" && file.fileType === "file" && content) {
-    const buf = Buffer.from(content, "base64");
+  // Persist content for active files (not folders, not deleted).
+  // Hoist buf so we can hand it to broadcastToPeers and avoid re-reading from disk.
+  let uploadBuf: Buffer | undefined;
+  if (file.action === "active" && file.fileType === "file" && msg.content) {
+    uploadBuf = Buffer.from(msg.content, "base64");
+
+    // Drop the large base64 string ASAP so V8 can GC it before we do more work.
+    // We now hold only the decoded Buffer, which is 25% smaller than the string.
+    msg.content = "";
 
     // Verify SHA1 — reject corrupted uploads silently (client will retry on next sync)
     if (file.sha1) {
-      const computed = sha1(buf);
+      const computed = sha1(uploadBuf);
       if (computed !== file.sha1) {
         logWarn(ctx, `[file_data] SHA1 mismatch for ${file.path} — rejecting upload`);
         return;
       }
     }
 
-    ctx.storage.write(file.path, file.mtime, buf);
+    ctx.storage.write(file.path, file.mtime, uploadBuf);
   }
 
   // Update the DB record
@@ -45,8 +51,9 @@ export function handleFileUpload(
   // Check whether sync is fully complete (uploads + server pushes both done)
   checkSyncDone(peer);
 
-  // Broadcast to other connected peers (live sync)
-  broadcastToPeers(ctx, peer, file);
+  // Broadcast to other connected peers (live sync).
+  // Pass uploadBuf so broadcastToPeers reuses it instead of reading from disk again.
+  broadcastToPeers(ctx, peer, file, uploadBuf);
 
   logInfo(ctx, `[file_data] saved ${file.path} (action=${file.action}, mtime=${file.mtime})`);
 }
