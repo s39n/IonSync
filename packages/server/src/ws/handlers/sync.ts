@@ -142,8 +142,20 @@ export function broadcastToPeers(ctx: SyncContext, sourcePeer: SyncPeer, file: F
   // 3. Read and stringify only ONCE
   let content = "";
   if (file.action === "active" && file.fileType === "file") {
-    const buf = ctx.storage.readLatest(file.path);
-    content = buf ? buf.toString("base64") : "";
+    // ✅ 1. Check size before reading
+    const sizeBytes = ctx.storage.getSizeLatest(file.path) ?? 0;
+    const limitBytes = ctx.config.maxFileSizeMb * 1024 * 1024;
+
+    if (sizeBytes > limitBytes) {
+      console.warn(`[Sync] Skipping push for ${file.path} (${(sizeBytes / 1024 / 1024).toFixed(2)}MB). Exceeds ${ctx.config.maxFileSizeMb}MB limit.`);
+      // We still send the file metadata, but we omit the content so the client 
+      // knows the file exists but doesn't crash the server downloading it.
+      content = ""; 
+    } else {
+      // Safe to read
+      const buf = ctx.storage.readLatest(file.path);
+      content = buf ? buf.toString("base64") : "";
+    }
   }
 
   const payload = JSON.stringify({ type: "file_push" as const, file, content });

@@ -29,7 +29,22 @@ export class Storage {
     }
     return resolved;
   }
+  // ─── Size Checking ───────────────────────────────────────────────────────
+  /**
+   * Returns the size of the latest version of a file in bytes.
+   * Returns null if no versions exist.
+   */
+  getSizeLatest(filePath: string): number | null {
+    const versions = this.listVersionMtimes(filePath);
+    if (versions.length === 0) return null;
+    return this.getSizeVersion(filePath, versions[0]!);
+  }
 
+  getSizeVersion(filePath: string, mtime: number): number | null {
+    const vp = this.versionPath(filePath, mtime);
+    if (!fs.existsSync(vp)) return null;
+    return fs.statSync(vp).size;
+  }
   private versionPath(filePath: string, mtime: number): string {
     return path.join(this.resolve(filePath), `v_${mtime}`);
   }
