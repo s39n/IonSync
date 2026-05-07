@@ -41,6 +41,11 @@ export class SyncDB {
     fs.mkdirSync(dbDir, { recursive: true });
     this.db = new Database(path.join(dbDir, "sync.db"));
     this.db.pragma("journal_mode = WAL");
+    // NORMAL durability is safe under WAL: a crash can lose at most the last
+    // committed transaction (which the plugin will re-upload on next sync).
+    // The default FULL mode does an extra fsync per write that shows up as
+    // noticeable latency during bulk syncs with many small files.
+    this.db.pragma("synchronous = NORMAL");
     this.db.pragma("foreign_keys = ON");
     runMigrations(this.db);
   }
