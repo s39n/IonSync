@@ -72,7 +72,7 @@ export class XSync {
     this.inited = true;
 
     this.ws.isEnabled = this.plugin.settings.syncEnabled;
-    this.exclusionFilter = new ExclusionFilter(this.plugin.settings);
+    this.exclusionFilter = new ExclusionFilter(this.plugin.settings, this.plugin.app.vault.configDir);
 
     await this.storage.init();
     this.deleteQueue = await this.storage.loadDeleteQueue();
@@ -265,20 +265,6 @@ export class XSync {
     const entry: FileEntry | null = (this.storage.tree[path] ?? stored) ?? null;
     if (!entry) return;
 
-    // Wait for the outgoing socket buffer to drain before reading the next file
-    // into memory. Without this, a burst of large files would all be read and
-    // base64-encoded simultaneously, spiking memory before TCP can flush them.
-    if (entry.action === "active" && entry.fileType === "file" && this.ws.bufferedAmount > 1 * 1024 * 1024) {
-      await new Promise<void>((resolve) => {
-        const check = setInterval(() => {
-          if (this.ws.bufferedAmount < 256 * 1024) {
-            clearInterval(check);
-            resolve();
-          }
-        }, 50);
-      });
-    }
-
     let content = "";
     if (entry.action === "active" && entry.fileType === "file") {
       if (isBinary) {
@@ -373,9 +359,16 @@ export class XSync {
       return;
     }
 
-    const delay = this.plugin.settings.delayedSync ?? 0;
-    if (action === "modify" && delay > 0) {
-      this.plugin.log("Debouncing modify event:", file.path, delay, "s");
+    let delay = this.plugin.settings.delayedSync ?? 0;
+    const isConfigPath = file.path.startsWith(this.plugin.app.vault.configDir + "/");
+
+    // Force a 5-second debounce on config files to batch plugin/theme installs
+    if (isConfigPath) {
+      delay = Math.max(delay, 5); 
+    }
+
+    if ((action === "modify" || (action === "create" && isConfigPath)) && delay > 0) {
+      this.plugin.log("Debouncing event:", file.path, delay, "s");
       this.xTimeouts.set(file.path, delay * 1_000, async () => {
         await this._sendFileEvent(file, forceChanged);
       });
@@ -390,18 +383,6 @@ export class XSync {
     const isBinary = Utils.isBinary(file.path);
     const stat = await this.plugin.app.vault.adapter.stat(file.path);
     if (!stat) return;
-
-    // Mirror the size guard from computeTree — don't read a file that's too
-    // large to hash or transmit safely.
-    const maxBytes = (this.plugin.settings.maxFileSizeMB ?? 25) * 1024 * 1024;
-    if (stat.size > maxBytes) {
-      this.plugin.log(
-        `Skipping file event for "${file.path}": ` +
-        `${(stat.size / 1024 / 1024).toFixed(1)} MB > ` +
-        `${this.plugin.settings.maxFileSizeMB ?? 25} MB limit`
-      );
-      return;
-    }
 
     const stored = this.storage.readMetadata(file.path);
     if (!forceChanged && stored && stored.mtime === stat.mtime && stored.sha1) {
@@ -471,12 +452,15 @@ export class XSync {
 
   private _watchedConfigFiles(): string[] {
     const s = this.plugin.settings;
+    const configDir = this.plugin.app.vault.configDir;
     const files: string[] = [];
-    if (s.syncMainSettings) { files.push(".obsidian/app.json"); }
-    if (s.syncAppearanceSettings) { files.push(".obsidian/appearance.json"); }
-    if (s.syncHotkeys) { files.push(".obsidian/hotkeys.json"); }
-    if (s.syncActiveCorePlugins) { files.push(".obsidian/core-plugins.json", ".obsidian/core-plugins-migration.json"); }
-    if (s.syncActiveCommunityPlugins) { files.push(".obsidian/community-plugins.json"); }
+    
+    // Check configDir dynamically to support `.obsidian` or any custom config directory
+    if (s.syncMainSettings) { files.push(`${configDir}/app.json`); }
+    if (s.syncAppearanceSettings) { files.push(`${configDir}/appearance.json`); }
+    if (s.syncHotkeys) { files.push(`${configDir}/hotkeys.json`); }
+    if (s.syncActiveCorePlugins) { files.push(`${configDir}/core-plugins.json`, `${configDir}/core-plugins-migration.json`); }
+    if (s.syncActiveCommunityPlugins) { files.push(`${configDir}/community-plugins.json`); }
     return files;
   }
 

@@ -6,20 +6,32 @@ const VIDEO_EXTS = new Set(["mp4","mkv","avi","mov","wmv","flv","webm","m4v","mp
 
 export class ExclusionFilter {
   private patterns: RegExp[];
+  private dangerousFiles: Set<string>;
 
-  constructor(private settings: PluginSettings) {
+  constructor(private settings: PluginSettings, private configDir: string) {
     this.patterns = (settings.exclusionList ?? "")
       .split("\n")
       .map((p) => p.trim())
       .filter((p) => p.length > 0 && !p.startsWith("#"))
       .map((p) => this.patternToRegex(p));
+
+    // Immutable Rule: Never sync workspace state or dynamic UI graphs
+    this.dangerousFiles = new Set([
+      `${this.configDir}/workspace.json`,
+      `${this.configDir}/workspace-mobile.json`,
+      `${this.configDir}/sync.json`,
+      `${this.configDir}/graph.json`
+    ]);
   }
 
   isExcluded(path: string): boolean {
+    // 1. IMMUTABLE RULE: Never sync workspace files (prevents infinite loops)
+    if (this.dangerousFiles.has(path)) return true;
+
     // Obsidian trash folder
     if (this.isTrashPath(path) && !this.settings.syncTrash) return true;
 
-    // .obsidian/* settings files — checked before hidden-file rule
+    // config settings files — checked before hidden-file rule
     if (this.isThemesOrSnippets(path)) return !this.settings.syncThemesAndSnippets;
     if (this.isSnippets(path)) return !this.settings.syncSnippets || !this.settings.syncThemesAndSnippets;
     if (this.isMainSettings(path)) return !this.settings.syncMainSettings;
@@ -52,19 +64,19 @@ export class ExclusionFilter {
   private isHiddenPath(p: string) {
     return p.startsWith(".") || p.includes("/.");
   }
-  private isThemesOrSnippets(p: string) { return p.startsWith(".obsidian/themes/"); }
-  private isSnippets(p: string) { return p.startsWith(".obsidian/snippets/"); }
-  private isMainSettings(p: string) { return p === ".obsidian/app.json"; }
-  private isAppearanceSettings(p: string) { return p === ".obsidian/appearance.json"; }
-  private isHotkeys(p: string) { return p === ".obsidian/hotkeys.json"; }
+  private isThemesOrSnippets(p: string) { return p.startsWith(`${this.configDir}/themes/`); }
+  private isSnippets(p: string) { return p.startsWith(`${this.configDir}/snippets/`); }
+  private isMainSettings(p: string) { return p === `${this.configDir}/app.json`; }
+  private isAppearanceSettings(p: string) { return p === `${this.configDir}/appearance.json`; }
+  private isHotkeys(p: string) { return p === `${this.configDir}/hotkeys.json`; }
   private isActiveCorePlugins(p: string) {
-    return p === ".obsidian/core-plugins.json" || p === ".obsidian/core-plugins-migration.json";
+    return p === `${this.configDir}/core-plugins.json` || p === `${this.configDir}/core-plugins-migration.json`;
   }
   private isCorePluginSettings(p: string) {
-    return p.startsWith(".obsidian/plugins/") && !p.startsWith(".obsidian/plugins/ion-sync/");
+    return p.startsWith(`${this.configDir}/plugins/`) && !p.startsWith(`${this.configDir}/plugins/ion-sync/`);
   }
-  private isActiveCommunityPlugins(p: string) { return p === ".obsidian/community-plugins.json"; }
-  private isInstalledCommunityPlugins(p: string) { return p.startsWith(".obsidian/plugins/"); }
+  private isActiveCommunityPlugins(p: string) { return p === `${this.configDir}/community-plugins.json`; }
+  private isInstalledCommunityPlugins(p: string) { return p.startsWith(`${this.configDir}/plugins/`); }
 
   private patternToRegex(pattern: string): RegExp {
     // Glob-style: * = any non-separator char, ** = anything

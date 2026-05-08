@@ -118,7 +118,7 @@ export class Storage {
   async computeTree(): Promise<void> {
     this.aborted = false;
     this.tree = {};
-    const exclusionFilter = new ExclusionFilter(this.settings);
+    const exclusionFilter = new ExclusionFilter(this.settings, this.app.vault.configDir);
 
     await this.fsVault.iterate(async ({ path, stat, isFolder }) => {
       if (this.aborted) return;
