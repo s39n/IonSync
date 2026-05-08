@@ -12,28 +12,33 @@ export function handleFileUpload(
   peer: SyncPeer,
   msg: FileDataUploadMsg
 ): void {
-  const { file } = msg;
+  const { file, content } = msg;
 
-  // Persist content for active files (not folders, not deleted).
-  // Hoist buf so we can hand it to broadcastToPeers and avoid re-reading from disk.
-  let uploadBuf: Buffer | undefined;
-  if (file.action === "active" && file.fileType === "file" && msg.content) {
-    uploadBuf = Buffer.from(msg.content, "base64");
+  // Persist content for active files (not folders, not deleted)
+  if (file.action === "active" && file.fileType === "file" && content) {
+    const buf = Buffer.from(content, "base64");
 
-    // Drop the large base64 string ASAP so V8 can GC it before we do more work.
-    // We now hold only the decoded Buffer, which is 25% smaller than the string.
-    msg.content = "";
+    // ✅ RE-ADDED: Reject huge files before they hit the disk
+    const limitBytes = ctx.config.maxFileSizeMb * 1024 * 1024;
+    if (buf.length > limitBytes) {
+      logWarn(ctx, `[Upload] Rejected ${file.path}. Size (${(buf.length / 1024 / 1024).toFixed(2)}MB) exceeds limit.`);
+      msg.content = ""; // Clear massive string from memory immediately
+      return; 
+    }
 
     // Verify SHA1 — reject corrupted uploads silently (client will retry on next sync)
     if (file.sha1) {
-      const computed = sha1(uploadBuf);
+      const computed = sha1(buf);
       if (computed !== file.sha1) {
         logWarn(ctx, `[file_data] SHA1 mismatch for ${file.path} — rejecting upload`);
         return;
       }
     }
 
-    ctx.storage.write(file.path, file.mtime, uploadBuf);
+    ctx.storage.write(file.path, file.mtime, buf);
+
+    // ✅ RE-ADDED: Help the Garbage Collector clear the RAM instantly
+    msg.content = "";
   }
 
   // Update the DB record
@@ -51,8 +56,7 @@ export function handleFileUpload(
   // Check whether sync is fully complete (uploads + server pushes both done)
   checkSyncDone(peer);
 
-  // Broadcast to other connected peers (live sync).
-  // Pass uploadBuf so broadcastToPeers reuses it instead of reading from disk again.
+  // Broadcast to other connected peers (live sync)
   broadcastToPeers(ctx, peer, file);
 
   logInfo(ctx, `[file_data] saved ${file.path} (action=${file.action}, mtime=${file.mtime})`);

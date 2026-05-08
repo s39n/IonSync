@@ -1,6 +1,5 @@
 import type { FileEntry } from "@ionsync/protocol";
 import type { App } from "obsidian";
-import { ExclusionFilter } from "./ExclusionFilter.js";
 import { FSAdapter } from "./FSAdapter.js";
 import Utils from "./Utils.js";
 import type { PluginSettings } from "./main.js";
@@ -9,7 +8,7 @@ import type { PluginSettings } from "./main.js";
  * Manages local file metadata and vault I/O.
  *
  * Metadata is stored as a flat JSON object at:
- *   <plugin-dir>/data/metadata.json
+ * <plugin-dir>/data/metadata.json
  *
  * Key: relative path from vault root.
  * Value: FileEntry (path, sha1, mtime, action, fileType).
@@ -118,16 +117,12 @@ export class Storage {
   async computeTree(): Promise<void> {
     this.aborted = false;
     this.tree = {};
-    const exclusionFilter = new ExclusionFilter(this.settings, this.app.vault.configDir);
 
     await this.fsVault.iterate(async ({ path, stat, isFolder }) => {
       if (this.aborted) return;
 
       // Skip the plugin's own data files
       if (path.startsWith(this.pluginDir.replace(/^\//, "") + "/data/")) return;
-
-      // Skip excluded paths before any I/O (size check, hashing, etc.)
-      if (exclusionFilter.isExcluded(path)) return;
 
       if (isFolder) {
         const mtime = await this.getFolderMTime(path);
@@ -137,20 +132,6 @@ export class Storage {
         this.tree[path] = { path, sha1: "", mtime, action: "active", fileType: "folder" };
       } else {
         if (!stat) return;
-
-        // Skip files that exceed the configured size limit.  Reading a 500 MB
-        // binary into memory just to hash it would instantly exhaust Obsidian's
-        // heap.  Files above the limit are simply not synced.
-        const maxBytes = (this.settings.maxFileSizeMB ?? 25) * 1024 * 1024;
-        if (stat.size > maxBytes) {
-          console.warn(
-            `[IonSync] Skipping "${path}": ` +
-            `${(stat.size / 1024 / 1024).toFixed(1)} MB > ` +
-            `${this.settings.maxFileSizeMB ?? 25} MB limit`
-          );
-          return;
-        }
-
         const mtime = stat.mtime;
         const stored = this.readMetadata(path);
         // 40 chars = SHA-1 (current). 64 chars = old SHA-256 (stale) → recompute.
@@ -158,6 +139,15 @@ export class Storage {
           this.tree[path] = stored;
           return;
         }
+
+        // ✅ RE-ADDED: Prevent the plugin from crashing on massive files
+        const MAX_FILE_SIZE = 40 * 1024 * 1024; // 40MB limit
+        if (stat.size > MAX_FILE_SIZE) {
+          console.warn(`[IonSync] File too large to hash: ${path}`);
+          this.tree[path] = { path, sha1: "", mtime, action: "active", fileType: "file" };
+          return;
+        }
+
         const isBinary = Utils.isBinary(path);
         let sha1: string | null = null;
         if (isBinary) {
