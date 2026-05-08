@@ -140,7 +140,7 @@ export class Storage {
           return;
         }
 
-        // ✅ RE-ADDED: Prevent the plugin from crashing on massive files
+        // ✅ FIX 3: Prevent the plugin from crashing on massive files
         const MAX_FILE_SIZE = 40 * 1024 * 1024; // 40MB limit
         if (stat.size > MAX_FILE_SIZE) {
           console.warn(`[IonSync] File too large to hash: ${path}`);

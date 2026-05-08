@@ -18,7 +18,7 @@ export function handleFileUpload(
   if (file.action === "active" && file.fileType === "file" && content) {
     const buf = Buffer.from(content, "base64");
 
-    // ✅ RE-ADDED: Reject huge files before they hit the disk
+    // ✅ FIX 1: Reject huge files before they hit the disk
     const limitBytes = ctx.config.maxFileSizeMb * 1024 * 1024;
     if (buf.length > limitBytes) {
       logWarn(ctx, `[Upload] Rejected ${file.path}. Size (${(buf.length / 1024 / 1024).toFixed(2)}MB) exceeds limit.`);
@@ -37,7 +37,7 @@ export function handleFileUpload(
 
     ctx.storage.write(file.path, file.mtime, buf);
 
-    // ✅ RE-ADDED: Help the Garbage Collector clear the RAM instantly
+    // ✅ FIX 2: Help the Garbage Collector clear the RAM instantly
     msg.content = "";
   }
 
