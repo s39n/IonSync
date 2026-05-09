@@ -1,6 +1,7 @@
 import type { FileEntry } from "@ionsync/protocol";
 import type { App } from "obsidian";
 import { FSAdapter } from "./FSAdapter.js";
+import { ExclusionFilter } from "./ExclusionFilter.js";
 import Utils from "./Utils.js";
 import type { PluginSettings } from "./main.js";
 
@@ -53,10 +54,14 @@ export class Storage {
   }
 
   private requestSave(): void {
-    if (this.saveTimeout) return;
+    // Clear the timeout so active typing delays the massive disk write
+    if (this.saveTimeout) {
+      clearTimeout(this.saveTimeout);
+    }
+    // Only save after 10 seconds of complete idle time
     this.saveTimeout = setTimeout(() => {
       void this.saveMetadata();
-    }, 2_000);
+    }, 10_000); 
   }
 
   readMetadata(path: string): FileEntry | null {
@@ -117,9 +122,11 @@ export class Storage {
   async computeTree(): Promise<void> {
     this.aborted = false;
     this.tree = {};
+    const exclusionFilter = new ExclusionFilter(this.settings, this.app.vault.configDir);
 
     await this.fsVault.iterate(async ({ path, stat, isFolder }) => {
       if (this.aborted) return;
+      if (exclusionFilter.isExcluded(path)) return;
 
       // Skip the plugin's own data files
       if (path.startsWith(this.pluginDir.replace(/^\//, "") + "/data/")) return;
@@ -134,13 +141,13 @@ export class Storage {
         if (!stat) return;
         const mtime = stat.mtime;
         const stored = this.readMetadata(path);
-        // 40 chars = SHA-1 (current). 64 chars = old SHA-256 (stale) → recompute.
+        // 40 chars = SHA-1
         if (stored && stored.mtime === mtime && stored.sha1 && stored.sha1.length === 40) {
           this.tree[path] = stored;
           return;
         }
 
-        // ✅ FIX 3: Prevent the plugin from crashing on massive files
+        // Prevent the plugin from crashing on massive files
         const MAX_FILE_SIZE = 40 * 1024 * 1024; // 40MB limit
         if (stat.size > MAX_FILE_SIZE) {
           console.warn(`[IonSync] File too large to hash: ${path}`);
@@ -163,17 +170,14 @@ export class Storage {
   }
 
   private async getFolderMTime(path: string): Promise<number | null> {
-    let maxMtime = 0;
-    let hasChildren = false;
+    // Just stat the folder itself, DO NOT loop through its children.
+    // This stops the exponential disk-read lag during full syncs.
     try {
-      const listing = await this.app.vault.adapter.list(path);
-      for (const child of [...(listing.files ?? []), ...(listing.folders ?? [])]) {
-        hasChildren = true;
-        const childStat = await this.app.vault.adapter.stat(child);
-        if (childStat && childStat.mtime > maxMtime) maxMtime = childStat.mtime;
-      }
-    } catch { return null; }
-    return hasChildren ? maxMtime : null;
+      const stat = await this.app.vault.adapter.stat(path);
+      return stat ? stat.mtime : 0;
+    } catch { 
+      return null; 
+    }
   }
 
   // ── Vault I/O ─────────────────────────────────────────────────────────────

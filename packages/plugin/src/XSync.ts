@@ -46,9 +46,7 @@ export class XSync {
   private inited = false;
   private isEnabled = false;
 
-  // One-shot response listeners keyed by msg.type
   private responseListeners: Array<(msg: ServerMsg) => boolean> = [];
-
   private messageQueue: ServerMsg[] = [];
   private isProcessingQueue = false;
 
@@ -179,7 +177,6 @@ export class XSync {
   }
 
   private async _handleServerMessage(msg: ServerMsg): Promise<void> {
-    // Give one-shot listeners first crack
     this.responseListeners = this.responseListeners.filter((cb) => !cb(msg));
 
     switch (msg.type) {
@@ -221,10 +218,6 @@ export class XSync {
 
       this.plugin.log(`Syncing ${files.length} files`);
 
-      // Always send at least one sync message (triggers sync_done for empty vault).
-      // Multi-chunk syncs: mark every chunk except the last with last:false so the
-      // server accumulates all entries before processing. The final chunk is last:true
-      // (or omitted, which the server also treats as true for backward-compat).
       if (files.length === 0) {
         this.ws.send({ type: "sync", files: [], last: true });
       } else {
@@ -287,19 +280,37 @@ export class XSync {
   private async _applyServerFile(file: FileEntry, content: string): Promise<void> {
     if (this.exclusionFilter?.isExcluded(file.path)) return;
     this.plugin.log("Applying server file:", file.path, file.action);
-    if (file.action === "deleted") {
-      await this.storage.delete(file.path, file);
-      this.addActivity("delete", file.path);
-    } else if (file.fileType === "folder") {
-      await this.storage.makeFolder(file.path, file);
-    } else {
-      if (Utils.isBinary(file.path)) {
-        await this.storage.writeBinary(file.path, content, file);
+
+    try {
+      const localStat = await this.plugin.app.vault.adapter.stat(file.path);
+
+      if (file.action === "deleted") {
+        await this.storage.delete(file.path, file);
+        this.addActivity("delete", file.path);
+      } else if (file.fileType === "folder") {
+        // COLLISION: Server says Folder, Local is File
+        if (localStat && localStat.type === "file") {
+          console.warn(`[IonSync] Collision: Server pushed folder, but local is file. Skipping: ${file.path}`);
+          return;
+        }
+        await this.storage.makeFolder(file.path, file);
       } else {
-        await this.storage.write(file.path, content, file);
+        // EISDIR COLLISION: Server says File, Local is Folder
+        if (localStat && localStat.type === "folder") {
+          console.warn(`[IonSync] EISDIR Collision: Server pushed file, but local is folder. Skipping: ${file.path}`);
+          return;
+        }
+
+        if (Utils.isBinary(file.path)) {
+          await this.storage.writeBinary(file.path, content, file);
+        } else {
+          await this.storage.write(file.path, content, file);
+        }
+        this.addActivity("down", file.path);
+        this.syncDownCount++;
       }
-      this.addActivity("down", file.path);
-      this.syncDownCount++;
+    } catch (e) {
+      console.error(`[IonSync] Error applying server file (${file.path}):`, e);
     }
   }
 
@@ -359,12 +370,14 @@ export class XSync {
       return;
     }
 
-    let delay = this.plugin.settings.delayedSync ?? 0;
+    let delay = this.plugin.settings.delayedSync ?? 2;
     const isConfigPath = file.path.startsWith(this.plugin.app.vault.configDir + "/");
 
-    // Force a 5-second debounce on config files to batch plugin/theme installs
     if (isConfigPath) {
       delay = Math.max(delay, 5); 
+    } else {
+      // Hard minimum 2-second debounce on regular notes to prevent spam
+      delay = Math.max(delay, 2);
     }
 
     if ((action === "modify" || (action === "create" && isConfigPath)) && delay > 0) {
@@ -455,7 +468,6 @@ export class XSync {
     const configDir = this.plugin.app.vault.configDir;
     const files: string[] = [];
     
-    // Check configDir dynamically to support `.obsidian` or any custom config directory
     if (s.syncMainSettings) { files.push(`${configDir}/app.json`); }
     if (s.syncAppearanceSettings) { files.push(`${configDir}/appearance.json`); }
     if (s.syncHotkeys) { files.push(`${configDir}/hotkeys.json`); }
