@@ -10,40 +10,22 @@ import { handleFileUpload, handleFileDownload } from "./handlers/fileData.js";
 import { handleFileHistory } from "./handlers/fileHistory.js";
 import { handleVersionCheck } from "./handlers/versionCheck.js";
 import type { IncomingMessage } from "node:http";
+import { diff_match_patch } from "diff-match-patch"; // ✅ Phase 2 Import
 
 export function attachWebSocketServer(
   ctx: SyncContext,
   httpServer: import("node:http").Server | import("node:https").Server
 ): WebSocketServer {
-  // maxPayload caps the size of a single WebSocket message the server will accept.
-  // A file_data upload embeds base64 content inside JSON, so a 25 MB file arrives
-  // as ~33 MB of JSON.  The 50 MB ceiling here comfortably covers the default
-  // plugin limit (25 MB → ~33 MB on the wire) with headroom to spare.
-  // Connections that exceed this are closed before the message handler ever runs,
-  // preventing a single giant upload from exhausting heap.
   const wss = new WebSocketServer({ server: httpServer, maxPayload: 50 * 1024 * 1024 });
 
-  // Track whether each connection responded to the most recent ping.
-  // WeakMap avoids hacking extra properties onto WebSocket and lets GC collect
-  // entries automatically when a socket is garbage-collected.
   const isAlive = new WeakMap<WebSocket, boolean>();
 
-  // Heartbeat interval serves two purposes:
-  //  1. Keeps reverse-proxy idle timeouts from killing long uploads.
-  //  2. Detects "zombie" connections where TCP silently died (phone went to
-  //     airplane mode, NAT table expired, etc.). A zombie never fires "close",
-  //     so without this ctx.peers would grow forever and we'd keep broadcasting
-  //     to sockets that are no longer reachable.
   const pingInterval = setInterval(() => {
     for (const ws of wss.clients) {
       if (isAlive.get(ws) === false) {
-        // No pong since the last ping → zombie. ws.terminate() forces an
-        // OS-level close, which fires the "close" event and triggers the normal
-        // peer-cleanup path (ctx.peers.delete, authTimeout clear, etc.).
         ws.terminate();
         continue;
       }
-      // Assume dead until the client proves otherwise with a pong frame.
       isAlive.set(ws, false);
       ws.ping();
     }
@@ -57,33 +39,26 @@ export function attachWebSocketServer(
 
     ctx.peers.set(peerId, peer);
 
-    // Register the socket with the heartbeat tracker and reset the alive flag
-    // whenever the client sends a pong frame back.  The browser WebSocket API
-    // and Obsidian's mobile engine both reply to ping frames automatically — no
-    // plugin-side code is needed for this.
     isAlive.set(ws, true);
     ws.on("pong", () => { isAlive.set(ws, true); });
 
-    // Send challenge immediately
     peer.send({ type: "challenge", nonce });
 
-    // Disconnect timeout if not authed within 5 seconds
     const authTimeout = setTimeout(() => {
       if (!peer.authed) {
         peer.disconnect("Auth timeout");
       }
     }, 5_000);
 
-    ws.on("message", (raw: Buffer) => {
+    // ✅ Changed to async to support reading the current file for Delta Patching
+    ws.on("message", async (raw: Buffer) => {
       let msg: ClientMsg;
       try {
         msg = JSON.parse(raw.toString()) as ClientMsg;
       } catch {
-        // Ignore malformed messages
         return;
       }
 
-      // Auth must come first
       if (!peer.authed) {
         if (msg.type === "auth") {
           clearTimeout(authTimeout);
@@ -94,7 +69,6 @@ export function attachWebSocketServer(
         return;
       }
 
-      // Update last_online on every message
       if (peer.deviceId) {
         ctx.db.touchDevice(peer.deviceId);
       }
@@ -109,17 +83,44 @@ export function attachWebSocketServer(
         case "file_event":
           handleFileEvent(ctx, peer, msg);
           break;
-        case "file_data":
-          if (msg.mode === "apply") {
-            handleFileUpload(ctx, peer, msg);
-          } else {
-            handleFileDownload(ctx, peer, msg);
+        case "file_data": {
+          // ✅ This is the line that was missing! It defines rawMsg so the rest of the block can use it.
+          const rawMsg = msg as any; 
+          
+          if (rawMsg.mode === "patch") {
+            try {
+              console.log(`[Delta Patch] Stitching update for: ${rawMsg.file.path}`);
+              
+              // 1. Read current server file
+              const currentBuffer = await (ctx.storage as any).read(rawMsg.file.path);
+              const currentText = currentBuffer ? currentBuffer.toString("utf-8") : "";
+
+              // 2. Apply the incoming patch
+              const dmp = new diff_match_patch();
+              const patches = dmp.patch_fromText(rawMsg.content);
+              const [newText] = dmp.patch_apply(patches, currentText);
+
+              // 3. Morph message into a standard 'apply' full-file upload
+              rawMsg.mode = "apply";
+              rawMsg.content = Buffer.from(newText, "utf-8").toString("base64");
+
+              // 4. Hand off to your existing modular handler
+              handleFileUpload(ctx, peer, rawMsg);
+            } catch (err) {
+              pushLog(ctx, `[Delta] Failed to patch ${rawMsg.file?.path}: ${err}`);
+            }
+          } 
+          else if (rawMsg.mode === "apply") {
+            handleFileUpload(ctx, peer, rawMsg);
+          } 
+          else {
+            handleFileDownload(ctx, peer, rawMsg);
           }
           break;
+        }
         case "file_history":
           handleFileHistory(ctx, peer, msg);
           break;
-        // "auth" after already authed → ignore
         default:
           break;
       }

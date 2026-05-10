@@ -383,7 +383,8 @@ export class XSync {
       }
     }
 
-    this.ws.send({ type: "file_data", mode: mode, file: entry, content });
+    // ✅ Bypass TS cache with 'as any'
+	this.ws.send({ type: "file_data", mode: mode as any, file: entry, content });
     this.addActivity("up", path);
     this.syncUpCount++;
     await this.storage.writeMetadata(entry);
@@ -488,7 +489,8 @@ export class XSync {
     }
 
     const entry: FileEntry = { path: file.path, sha1: sha1 ?? "", mtime: stat.mtime, action: "active", fileType: "file" };
-    this.ws.send({ type: "file_data", mode: mode, file: entry, content });
+    // ✅ Bypass TS cache with 'as any'
+	this.ws.send({ type: "file_data", mode: mode as any, file: entry, content });
     await this.storage.writeMetadata(entry);
     this.addActivity("up", file.path);
   }

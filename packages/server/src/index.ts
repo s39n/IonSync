@@ -1,115 +1,113 @@
+import http from "node:http";
+import https from "node:https";
+import fs from "node:fs";
+import path from "node:path";
 import express from "express";
-import http from "http";
-import { WebSocketServer, WebSocket } from "ws";
-import { diff_match_patch } from "diff-match-patch";
-import { BackgroundSyncReq, ClientMsg } from "@ionsync/protocol";
-// Import your custom context/DB logic here
-// import { initContext } from "./context"; 
+import { mergeConfig } from "./config.js";
+import { SyncDB } from "./db/index.js";
+import { Storage } from "./storage/index.js";
+import { createContext } from "./context.js";
+import { attachWebSocketServer } from "./ws/server.js";
+import { buildRouter } from "./http/routes.js";
+import { SyncCleanup } from "./cleanup/index.js";
 
-// ─── SERVER CONTEXT SETUP ──────────────────────────────────────────────────
-// Replace this block with your actual DB/Storage context initialization
-const ctx = {
-  db: { upsertFile: (file: any) => { /* Your DB logic */ } },
-  storage: { 
-    read: async (path: string): Promise<Buffer | null> => { return Buffer.from(""); /* Your read logic */ },
-    write: async (path: string, mtime: number, buf: Buffer) => { /* Your write logic */ }
-  },
-  config: { maxFileSizeMb: 40 }
-};
-// ───────────────────────────────────────────────────────────────────────────
+// ── Config ────────────────────────────────────────────────────────────────────
+
+const configPath = path.resolve(process.argv[2] ?? "config.js");
+if (!fs.existsSync(configPath)) {
+  const examplePath = path.join(path.dirname(configPath), "config.example.js");
+  console.error(`\nRequired config file not found: ${configPath}`);
+  if (fs.existsSync(examplePath)) {
+    console.error("\nCopy config.example.js to config.js and fill in your settings.");
+  }
+  process.exit(1);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const rawConfig = await import(configPath);
+const config = mergeConfig(rawConfig.default ?? rawConfig);
+
+// ── Logging ───────────────────────────────────────────────────────────────────
+
+// Wrap console.log/warn/error so messages are captured into the in-memory ring
+// buffer exposed by GET /api/logs.  Patched after ctx is created below.
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
+
+// Use path.resolve so an absolute dataDir (e.g. "/data" from Docker) is
+// honoured as-is rather than being appended to appDir.
+const dataBase = path.resolve(config.appDir, config.dataDir);
+const dbDir = path.join(dataBase, "db");
+const filesDir = path.join(dataBase, "files");
+const clientDir = path.join(config.appDir, "client");
+
+const db = new SyncDB(dbDir);
+const storage = new Storage(filesDir);
+storage.init();
+
+const ctx = createContext(config, db, storage, clientDir);
+
+// Patch console methods to feed into the in-memory log buffer (200 lines max).
+const MAX_LOG = 200;
+const _log   = console.log.bind(console);
+const _warn  = console.warn.bind(console);
+const _error = console.error.bind(console);
+function appendLog(level: string, args: unknown[]): void {
+  const line = `[${level}] ${args.map(String).join(" ")}`;
+  ctx.logBuffer.push(line);
+  if (ctx.logBuffer.length > MAX_LOG) ctx.logBuffer.shift();
+}
+console.log   = (...args) => { _log(...args);   appendLog("INFO",  args); };
+console.warn  = (...args) => { _warn(...args);  appendLog("WARN",  args); };
+console.error = (...args) => { _error(...args); appendLog("ERROR", args); };
+
+// ── Express app ───────────────────────────────────────────────────────────────
 
 const app = express();
-app.use(express.json({ limit: '50mb' }));
+app.use(buildRouter(ctx));
 
-// ─── PHASE 3 & 2: Background Sync with Patch Support ───────────────────────
-app.post("/api/sync/background", async (req, res) => {
-  const { deviceId, files } = req.body as BackgroundSyncReq;
+// ── HTTP / HTTPS server ───────────────────────────────────────────────────────
 
-  if (!files || !Array.isArray(files)) {
-    return res.status(400).send("Invalid payload");
-  }
+let server: http.Server | https.Server;
 
-  for (const item of files) {
-    const { file, content } = item;
-    ctx.db.upsertFile(file);
+if (config.tls) {
+  server = https.createServer(
+    {
+      key: fs.readFileSync(config.tls.key),
+      cert: fs.readFileSync(config.tls.cert),
+    },
+    app
+  );
+} else {
+  server = http.createServer(app);
+}
 
-    if (file.action === "active" && file.fileType === "file" && content) {
-      // ✅ Handle Delta Patching from Background Sync
-      if ((item as any).mode === "patch") {
-        const currentBuffer = await ctx.storage.read(file.path);
-        const currentText = currentBuffer ? currentBuffer.toString("utf-8") : "";
+// ── WebSocket ─────────────────────────────────────────────────────────────────
 
-        const dmp = new diff_match_patch();
-        const patches = dmp.patch_fromText(content);
-        const [newText] = dmp.patch_apply(patches, currentText);
+attachWebSocketServer(ctx, server);
 
-        await ctx.storage.write(file.path, file.mtime, Buffer.from(newText, "utf-8"));
-      } else {
-        const buf = Buffer.from(content, "base64");
-        const limitBytes = ctx.config.maxFileSizeMb * 1024 * 1024;
-        if (buf.length <= limitBytes) {
-          await ctx.storage.write(file.path, file.mtime, buf);
-        }
-      }
-    }
-  }
+// ── Cleanup ───────────────────────────────────────────────────────────────────
 
-  console.log(`[BackgroundSync] Processed ${files.length} files from ${deviceId}`);
-  res.sendStatus(200);
+const cleanup = new SyncCleanup(ctx);
+cleanup.start();
+
+// ── Listen ────────────────────────────────────────────────────────────────────
+
+server.listen(config.port, config.host, () => {
+  const scheme = config.tls ? "wss" : "ws";
+  console.log(`IonSync Server v2 listening on ${scheme}://${config.host}:${config.port}`);
 });
 
-// ─── WEBSOCKET SERVER ──────────────────────────────────────────────────────
-const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+// ── Graceful shutdown ─────────────────────────────────────────────────────────
 
-wss.on("connection", (ws: WebSocket) => {
-  console.log("[Server] Client connected");
-
-  ws.on("message", async (data: string) => {
-    try {
-      // ✅ Cast to 'any' to bypass the monorepo cache bug entirely
-      const rawMsg = JSON.parse(data) as any;
-
-      if (rawMsg.type === "file_data" && (rawMsg.mode === "apply" || rawMsg.mode === "patch")) {
-        
-        ctx.db.upsertFile(rawMsg.file);
-
-        if (rawMsg.file.action === "active" && rawMsg.file.fileType === "file" && rawMsg.content) {
-          
-          // ✅ PHASE 2: Handle Delta Patching from active WebSocket
-          if (rawMsg.mode === "patch") {
-            console.log(`[Delta Patch] Applying update to: ${rawMsg.file.path}`);
-            
-            const currentBuffer = await ctx.storage.read(rawMsg.file.path);
-            const currentText = currentBuffer ? currentBuffer.toString("utf-8") : "";
-
-            const dmp = new diff_match_patch();
-            const patches = dmp.patch_fromText(rawMsg.content);
-            const [newText] = dmp.patch_apply(patches, currentText);
-
-            await ctx.storage.write(rawMsg.file.path, rawMsg.file.mtime, Buffer.from(newText, "utf-8"));
-
-          } else {
-            // Standard Full-File Push
-            const buf = Buffer.from(rawMsg.content, "base64");
-            const limitBytes = ctx.config.maxFileSizeMb * 1024 * 1024;
-            if (buf.length <= limitBytes) {
-              await ctx.storage.write(rawMsg.file.path, rawMsg.file.mtime, buf);
-            }
-          }
-        }
-      }
-      
-      // ... your other message handlers (auth, sync, etc.) ...
-
-    } catch (e) {
-      console.error("[Server] Message error:", e);
-    }
+function shutdown(): void {
+  cleanup.stop();
+  db.close();
+  server.close(() => {
+    console.log("Server stopped.");
+    process.exit(0);
   });
+}
 
-});
-
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`[Server] IonSync Engine listening on port ${PORT}`);
-}); 
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

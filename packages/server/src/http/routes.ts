@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import type { SyncContext } from "../context.js";
 import { sha256 } from "../crypto.js";
+import { diff_match_patch } from "diff-match-patch"; // ✅ Phase 2 Import
+import type { BackgroundSyncReq } from "@ionsync/protocol"; // ✅ Phase 3 Import
 
 export function buildRouter(ctx: SyncContext): express.Router {
   const router = express.Router();
@@ -27,6 +29,58 @@ export function buildRouter(ctx: SyncContext): express.Router {
     }
     return true;
   }
+
+  // ── Background Sync (Phase 3) ─────────────────────────────────────────────
+  
+  // ✅ express.json() is applied ONLY to this route so it doesn't interfere with your others
+  router.post("/api/sync/background", express.json({ limit: "50mb" }), async (req: Request, res: Response) => {
+    const { deviceId, files } = req.body as BackgroundSyncReq;
+
+    if (!files || !Array.isArray(files)) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+
+    // Keep the device marked as active
+    if (deviceId) {
+      ctx.db.touchDevice(deviceId);
+    }
+
+    for (const item of files) {
+      const { file, content } = item;
+      
+      if (file.action === "active" && file.fileType === "file" && content) {
+        // ✅ Phase 2: Handle Delta Patching from Background App-Close Syncs
+        if ((item as any).mode === "patch") {
+          try {
+            console.log(`[Delta Patch] Background stitching update for: ${file.path}`);
+            
+            const currentBuffer = await (ctx.storage as any).read(file.path);
+            const currentText = currentBuffer ? currentBuffer.toString("utf-8") : "";
+
+            const dmp = new diff_match_patch();
+            const patches = dmp.patch_fromText(content);
+            const [newText] = dmp.patch_apply(patches, currentText);
+
+            await (ctx.storage as any).write(file.path, file.mtime, Buffer.from(newText, "utf-8"));
+          } catch (err) {
+            console.error(`[Background] Failed to patch ${file.path}: ${err}`);
+          }
+        } else {
+          // Standard Full-File Push
+          try {
+            const buf = Buffer.from(content, "base64");
+            await (ctx.storage as any).write(file.path, file.mtime, buf);
+          } catch (err) {
+            console.error(`[Background] Failed to write full file ${file.path}: ${err}`);
+          }
+        }
+      }
+    }
+
+    console.log(`[BackgroundSync] Processed ${files.length} files from ${deviceId}`);
+    res.status(200).json({ ok: true });
+  });
 
   // ── Dashboard ─────────────────────────────────────────────────────────────
 
@@ -109,10 +163,7 @@ export function buildRouter(ctx: SyncContext): express.Router {
       target.disconnect("Disconnected by admin");
       res.json({ ok: true });
     } else if (action === "trigger-sync") {
-      // Nudge the client to re-run sync — server sends a dummy push of the
-      // "largest mtime" file so the client kicks off a full sync cycle.
-      // Simplest compatible approach: client listens for file_push and reconciles.
-      target.send({ type: "sync_done" }); // causes client to re-sync on next cycle
+      target.send({ type: "sync_done" }); 
       res.json({ ok: true });
     } else {
       res.status(400).json({ error: `Unknown action: ${action}` });
@@ -152,7 +203,6 @@ export function buildRouter(ctx: SyncContext): express.Router {
   router.delete("/api/delete-file/*", (req, res) => {
     if (!checkAuth(req, res)) return;
 
-    // Express wildcard captures rest of path
     const relativePath = decodeURIComponent((req.params as Record<string, string>)["0"] ?? "");
     const filesBase = path.resolve(ctx.config.appDir, ctx.config.dataDir, "files");
     const full = path.resolve(filesBase, relativePath);
@@ -175,7 +225,6 @@ export function buildRouter(ctx: SyncContext): express.Router {
 }
 
 // ── Fallback dashboard HTML ───────────────────────────────────────────────────
-// Shown when client/dashboard.html hasn't been built yet.
 function fallbackDashboard(): string {
   return `<!doctype html>
 <html lang="en">
