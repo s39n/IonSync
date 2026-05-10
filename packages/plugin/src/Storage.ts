@@ -6,16 +6,9 @@ import Utils from "./Utils.js";
 import type { PluginSettings } from "./main.js";
 
 /**
- * Manages local file metadata and vault I/O.
- *
- * Metadata is stored as a flat JSON object at:
- * <plugin-dir>/data/metadata.json
- *
- * Key: relative path from vault root.
- * Value: FileEntry (path, sha1, mtime, action, fileType).
+ * Manages local file metadata, vault I/O, and Delta-Sync Shadow Copies.
  */
 export class Storage {
-  /** In-memory tree used during a sync pass */
   tree: Record<string, FileEntry> = {};
 
   private fsVault: FSAdapter;
@@ -32,6 +25,34 @@ export class Storage {
   async init(): Promise<void> {
     await this.loadMetadata();
     await this.loadDeleteQueue();
+  }
+
+  // ── Delta Sync: Shadow Storage ─────────────────────────────────────────────
+
+  /** Converts a vault path to a safe, flat hex filename for shadow storage */
+  private _getShadowPath(vaultPath: string): string {
+    const safeName = Buffer.from(vaultPath).toString("hex");
+    return `data/shadow/${safeName}.md`;
+  }
+
+  async readShadow(vaultPath: string): Promise<string | null> {
+    try {
+      return await this.fsInternal.read(this._getShadowPath(vaultPath));
+    } catch {
+      return null; // Shadow doesn't exist yet
+    }
+  }
+
+  async writeShadow(vaultPath: string, content: string): Promise<void> {
+    try {
+      const shadowDir = this.pluginDir + "/data/shadow";
+      if (!(await this.app.vault.adapter.exists(shadowDir))) {
+        await this.app.vault.adapter.mkdir(shadowDir);
+      }
+      await this.fsInternal.write(this._getShadowPath(vaultPath), content);
+    } catch (e) {
+      console.error("[IonSync] Failed to write shadow copy:", e);
+    }
   }
 
   // ── Metadata persistence ───────────────────────────────────────────────────
@@ -54,19 +75,11 @@ export class Storage {
   }
 
   private requestSave(): void {
-    // Clear the timeout so active typing delays the massive disk write
-    if (this.saveTimeout) {
-      clearTimeout(this.saveTimeout);
-    }
-    // Only save after 10 seconds of complete idle time
-    this.saveTimeout = setTimeout(() => {
-      void this.saveMetadata();
-    }, 10_000); 
+    if (this.saveTimeout) clearTimeout(this.saveTimeout);
+    this.saveTimeout = setTimeout(() => { void this.saveMetadata(); }, 10_000); 
   }
 
-  readMetadata(path: string): FileEntry | null {
-    return this.metadata[path] ?? null;
-  }
+  readMetadata(path: string): FileEntry | null { return this.metadata[path] ?? null; }
 
   async writeMetadata(entry: FileEntry): Promise<void> {
     this.metadata[entry.path] = entry;
@@ -78,16 +91,12 @@ export class Storage {
     this.requestSave();
   }
 
-  /** Force immediate save of metadata */
   async flushMetadata(): Promise<void> {
-    if (this.saveTimeout) {
-      clearTimeout(this.saveTimeout);
-      this.saveTimeout = null;
-    }
+    if (this.saveTimeout) { clearTimeout(this.saveTimeout); this.saveTimeout = null; }
     await this.saveMetadata();
   }
 
-  // ── Delete queue (offline-queued deletions) ────────────────────────────────
+  // ── Delete queue ───────────────────────────────────────────────────────────
 
   private deleteQueueData: Record<string, { metadata: Partial<FileEntry>; timestamp: number }> = {};
 
@@ -106,7 +115,7 @@ export class Storage {
     await this.fsInternal.write("data/delete-queue.json", JSON.stringify(queue));
   }
 
-  // ── Plugin update (auto-update received from server) ──────────────────────
+  // ── Plugin update ──────────────────────────────────────────────────────────
 
   async updatePlugin(files: { name: string; content: string }[]): Promise<void> {
     for (const f of files) {
@@ -115,7 +124,7 @@ export class Storage {
     }
   }
 
-  // ── Tree computation (full vault scan for sync) ────────────────────────────
+  // ── Tree computation ───────────────────────────────────────────────────────
 
   abortTree(): void { this.aborted = true; }
 
@@ -125,10 +134,7 @@ export class Storage {
     const exclusionFilter = new ExclusionFilter(this.settings, this.app.vault.configDir);
 
     await this.fsVault.iterate(async ({ path, stat, isFolder }) => {
-      if (this.aborted) return;
-      if (exclusionFilter.isExcluded(path)) return;
-
-      // Skip the plugin's own data files
+      if (this.aborted || exclusionFilter.isExcluded(path)) return;
       if (path.startsWith(this.pluginDir.replace(/^\//, "") + "/data/")) return;
 
       if (isFolder) {
@@ -141,16 +147,13 @@ export class Storage {
         if (!stat) return;
         const mtime = stat.mtime;
         const stored = this.readMetadata(path);
-        // 40 chars = SHA-1
         if (stored && stored.mtime === mtime && stored.sha1 && stored.sha1.length === 40) {
           this.tree[path] = stored;
           return;
         }
 
-        // Prevent the plugin from crashing on massive files
         const MAX_FILE_SIZE = 40 * 1024 * 1024; // 40MB limit
         if (stat.size > MAX_FILE_SIZE) {
-          console.warn(`[IonSync] File too large to hash: ${path}`);
           this.tree[path] = { path, sha1: "", mtime, action: "active", fileType: "file" };
           return;
         }
@@ -170,40 +173,28 @@ export class Storage {
   }
 
   private async getFolderMTime(path: string): Promise<number | null> {
-    // Just stat the folder itself, DO NOT loop through its children.
-    // This stops the exponential disk-read lag during full syncs.
     try {
       const stat = await this.app.vault.adapter.stat(path);
       return stat ? stat.mtime : 0;
     } catch { 
       return null; 
     }
-  }
+  } 
 
   // ── Vault I/O ─────────────────────────────────────────────────────────────
 
-  async read(path: string): Promise<string | null> {
-    return this.fsVault.read(path);
-  }
+  async read(path: string): Promise<string | null> { return this.fsVault.read(path); }
 
-  async readBinary(path: string): Promise<ArrayBuffer | null> {
-    return this.fsVault.readBinary(path);
-  }
+  async readBinary(path: string): Promise<ArrayBuffer | null> { return this.fsVault.readBinary(path); }
 
-  /**
-   * Write a text file received from the server.
-   * content is a base64-encoded string.
-   */
   async write(path: string, content: string, entry: FileEntry): Promise<void> {
     const text = Buffer.from(content, "base64").toString("utf-8");
     await this.fsVault.write(path, text, entry.mtime);
     await this.writeMetadata(entry);
+    // ✅ Keep shadow copy perfectly synchronized with server pushes
+    await this.writeShadow(path, text); 
   }
 
-  /**
-   * Write a binary file received from the server.
-   * content is a base64-encoded string.
-   */
   async writeBinary(path: string, content: string, entry: FileEntry): Promise<void> {
     const buf = Buffer.from(content, "base64");
     await this.fsVault.writeBinary(path, buf.buffer, entry.mtime);
@@ -215,7 +206,6 @@ export class Storage {
     await this.writeMetadata(entry);
   }
 
-  /** Move to Obsidian trash (keeps metadata for deleted-file tracking) */
   async delete(path: string, entry: FileEntry): Promise<void> {
     await this.fsVault.delete(path);
     entry.action = "deleted";

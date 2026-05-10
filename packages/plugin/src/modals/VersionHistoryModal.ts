@@ -68,7 +68,9 @@ export class FilesHistoryModal extends SuggestModal<string> {
     try {
       const resp = await this.plugin.xSync.listVersionHistory("/");
       // resp.versions are VersionEntry[] — use path field from the response
-      this.files = resp.versions.map((v) => (v as any).path as string).filter(Boolean);
+      this.files = resp.versions
+      .map((v: any) => (v as any).path as string) // ✅ Fix: Explicit type for parameter 'v'
+      .filter(Boolean);
     } catch {
       this.files = [];
     }

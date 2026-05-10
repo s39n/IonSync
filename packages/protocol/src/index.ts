@@ -9,12 +9,21 @@ export interface FileEntry {
   mtime: number; // milliseconds, client-reported — used for conflict resolution
   action: FileAction;
   fileType: FileType;
-}
+} 
 
 export interface VersionEntry {
   mtime: number;
   sha1: string;
   receivedAt: number; // server time
+}
+
+// ✅ Added for Phase 3: Mobile Background Sync (HTTP POST Payload)
+export interface BackgroundSyncReq {
+  deviceId: string;
+  files: {
+    file: FileEntry;
+    content: string; // Base64
+  }[];
 }
 
 // ─── Client → Server messages ──────────────────────────────────────────────

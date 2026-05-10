@@ -24,7 +24,7 @@ export function handleFileUpload(
       logWarn(ctx, `[Upload] Rejected ${file.path}. Size (${(buf.length / 1024 / 1024).toFixed(2)}MB) exceeds limit.`);
       msg.content = ""; // Clear massive string from memory immediately
       return; 
-    }
+    } 
 
     // Verify SHA1 — reject corrupted uploads silently (client will retry on next sync)
     if (file.sha1) {

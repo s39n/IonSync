@@ -41,7 +41,7 @@ export interface PluginSettings {
    * safely under the server's 50 MB WebSocket message cap.
    */
   maxFileSizeMB: number;
-}
+} 
 
 const DEFAULT_SETTINGS: PluginSettings = {
   host: "",
