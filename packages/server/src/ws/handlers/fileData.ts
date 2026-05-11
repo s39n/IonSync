@@ -2,7 +2,11 @@ import type { FileDataUploadMsg, FileDataRequestMsg } from "@ionsync/protocol";
 import type { SyncContext } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 import { broadcastToPeers, checkSyncDone } from "./sync.js";
-import crypto from "node:crypto"; // ✅ FIX 1: Import native Node crypto directly
+import crypto from "node:crypto";
+
+// Magic header written by the plugin's Crypto.ts when E2EE is enabled.
+// Matches the first 8 bytes of the binary payload (MAGIC = "IONENCv1").
+const E2EE_MAGIC = Buffer.from([0x49, 0x4f, 0x4e, 0x45, 0x4e, 0x43, 0x76, 0x31]);
 
 /**
  * Client is uploading a file to the server (mode: "apply").
@@ -22,27 +26,33 @@ export function handleFileUpload(
   if (file.action === "active" && file.fileType === "file" && content) {
     const buf = Buffer.from(content, "base64");
 
+    // Detect E2EE: the plugin prepends an 8-byte magic header ("IONENCv1")
+    // to every encrypted payload.  When present the SHA1 in the file entry
+    // is of the *plaintext* (not the ciphertext), so we must skip the SHA1
+    // check — the server can't verify content it cannot decrypt.
+    const isE2EE = buf.length >= E2EE_MAGIC.length && buf.slice(0, E2EE_MAGIC.length).equals(E2EE_MAGIC);
+
     // 1. Check size limit
     const limitBytes = ctx.config.maxFileSizeMb * 1024 * 1024;
     if (buf.length > limitBytes) {
       logWarn(ctx, `[Upload] Rejected ${file.path}. Size exceeds limit.`);
       isRejected = true;
-    } 
-    // 2. Check for file corruption
-    else if (file.sha1) {
+    }
+    // 2. Verify SHA1 — skipped for E2EE uploads (SHA1 is of plaintext; we store ciphertext)
+    else if (!isE2EE && file.sha1) {
       const computed = crypto.createHash("sha1").update(buf).digest("hex");
       if (computed !== file.sha1) {
-        logWarn(ctx, `[file_data] SHA1 mismatch for ${file.path} — rejecting upload. Skipping to next file.`);
+        logWarn(ctx, `[file_data] SHA1 mismatch for ${file.path} — rejecting upload.`);
         isRejected = true;
       }
     }
 
-    // 3. If the file is healthy, save it
+    // 3. Save healthy files
     if (!isRejected) {
       ctx.storage.write(file.path, file.mtime, buf);
     }
 
-    // Help the Garbage Collector clear the RAM instantly
+    // Help the GC clear the buffer promptly
     msg.content = "";
   }
 

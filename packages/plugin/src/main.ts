@@ -41,6 +41,20 @@ export interface PluginSettings {
    * safely under the server's 50 MB WebSocket message cap.
    */
   maxFileSizeMB: number;
+
+  // ── End-to-End Encryption ─────────────────────────────────────────────────
+  /**
+   * When true, all file content is encrypted client-side with AES-256-GCM
+   * before being sent to the server.  The server stores and relays ciphertext
+   * only and never possesses the decryption key.
+   *
+   * Every device that shares the same vault must use the same encryptionPassword.
+   * Files that were already on the server before E2EE was enabled remain
+   * in plaintext until they are next modified and re-uploaded.
+   */
+  encryptionEnabled: boolean;
+  /** Passphrase used to derive the AES-256-GCM key via PBKDF2-SHA256. */
+  encryptionPassword: string;
 } 
 
 const DEFAULT_SETTINGS: PluginSettings = {
@@ -73,6 +87,8 @@ const DEFAULT_SETTINGS: PluginSettings = {
   syncInstalledCommunityPlugins: false,
   exclusionList: "",
   maxFileSizeMB: 25,
+  encryptionEnabled: false,
+  encryptionPassword: "",
 };
 
 // ---------- Plugin ----------

@@ -156,6 +156,59 @@ export class IonSyncSettingsTab extends PluginSettingTab {
           .onChange(async (v) => { this.plugin.settings.maxFileSizeMB = v; await this.plugin.saveSettings(); })
       );
 
+    // ── End-to-End Encryption ───────────────────────────────────────────────
+    containerEl.createEl("h3", { text: "End-to-End Encryption" });
+
+    new Setting(containerEl)
+      .setName("Enable E2EE")
+      .setDesc(
+        "Encrypt all file content on this device using AES-256-GCM before uploading. " +
+        "The server stores and relays ciphertext only and never has access to your key. " +
+        "Every device sharing this vault must use the same Encryption Password. " +
+        "Files already on the server remain in plaintext until they are next modified."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.encryptionEnabled)
+          .onChange(async (v) => {
+            this.plugin.settings.encryptionEnabled = v;
+            await this.plugin.saveSettings();
+            this.display();
+          })
+      );
+
+    if (this.plugin.settings.encryptionEnabled) {
+      new Setting(containerEl)
+        .setName("Encryption password")
+        .setDesc(
+          "Passphrase used to derive the AES-256-GCM key via PBKDF2. " +
+          "Must be identical on every device that syncs this vault. " +
+          "Changing this makes existing encrypted server files unreadable until re-uploaded."
+        )
+        .addText((t) => {
+          t.setPlaceholder("strong-passphrase")
+            .setValue(this.plugin.settings.encryptionPassword)
+            .onChange(async (v) => {
+              this.plugin.settings.encryptionPassword = v;
+              await this.plugin.saveSettings();
+            });
+          t.inputEl.setAttribute("type", "password");
+          t.inputEl.style.width = "260px";
+          return t;
+        });
+
+      const warn = containerEl.createEl("div");
+      warn.style.cssText =
+        "border: 1px solid var(--color-orange); border-radius: 6px; " +
+        "padding: 10px 14px; margin: 4px 0 12px; font-size: 12px; " +
+        "color: var(--color-orange); " +
+        "background: color-mix(in srgb, var(--color-orange) 10%, transparent);";
+      warn.setText(
+        "There is no password recovery. If you forget this passphrase " +
+        "you will permanently lose access to all encrypted files stored on the server. " +
+        "Store it in a password manager before enabling."
+      );
+    }
+
     // ── Exclusion list ──────────────────────────────────────────────────────
     containerEl.createEl("h3", { text: "Exclusion list" });
     containerEl.createEl("p", { text: "One glob pattern per line. Lines starting with # are comments." });

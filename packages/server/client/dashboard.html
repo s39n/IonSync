@@ -227,6 +227,54 @@
     .toolbar .spacer { flex: 1; }
     .text-muted { color: var(--muted); }
     .file-size { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+
+    /* ── File preview modal ───────────────────────────────────────────────── */
+    #preview-overlay {
+      display: none; position: fixed; inset: 0; z-index: 100;
+      background: rgba(0,0,0,.55); align-items: center; justify-content: center;
+    }
+    #preview-overlay.open { display: flex; }
+    #preview-modal {
+      background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
+      width: min(760px, 94vw); max-height: 86vh; display: flex; flex-direction: column;
+      box-shadow: 0 8px 40px rgba(0,0,0,.45);
+    }
+    #preview-header {
+      padding: 14px 18px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 10px;
+    }
+    #preview-title { flex: 1; font-size: 13px; font-family: var(--mono); word-break: break-all; color: var(--text); }
+    #preview-close {
+      background: none; border: none; color: var(--muted); font-size: 20px;
+      cursor: pointer; line-height: 1; padding: 0 4px;
+    }
+    #preview-close:hover { color: var(--text); }
+    #preview-body { flex: 1; overflow-y: auto; padding: 16px 18px; }
+
+    /* E2EE unlock form inside the preview */
+    #e2ee-unlock {
+      display: flex; flex-direction: column; gap: 10px; padding: 10px 0;
+    }
+    #e2ee-unlock label { font-size: 12px; color: var(--muted); }
+    #e2ee-unlock input {
+      padding: 8px 10px; border-radius: 5px; border: 1px solid var(--border);
+      background: var(--bg3); color: var(--text); font-size: 13px; outline: none;
+    }
+    #e2ee-unlock input:focus { border-color: var(--accent); }
+    #e2ee-err { color: var(--red); font-size: 12px; min-height: 16px; }
+    .lock-banner {
+      display: flex; align-items: center; gap: 10px; padding: 12px 14px;
+      border-radius: 6px; border: 1px solid var(--border); background: var(--bg3);
+      font-size: 13px; color: var(--muted); margin-bottom: 14px;
+    }
+    .lock-banner .icon { font-size: 20px; }
+
+    #preview-content {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+      padding: 14px; font-family: var(--mono); font-size: 12px; line-height: 1.65;
+      white-space: pre-wrap; word-break: break-all; color: var(--text);
+      max-height: 460px; overflow-y: auto;
+    }
   </style>
 </head>
 <body>
@@ -361,6 +409,19 @@
       </div>
 
     </main>
+  </div>
+</div>
+
+<!-- ── File preview / E2EE decrypt modal ── -->
+<div id="preview-overlay">
+  <div id="preview-modal" role="dialog" aria-modal="true">
+    <div id="preview-header">
+      <span id="preview-title">—</span>
+      <button id="preview-close" title="Close">✕</button>
+    </div>
+    <div id="preview-body">
+      <!-- Rendered by openPreview() -->
+    </div>
   </div>
 </div>
 
@@ -588,7 +649,10 @@ function renderFiles() {
       <td><span class="path">${escHtml(f.path)}</span></td>
       <td><span class="file-size">${fmtSize(f.size)}</span></td>
       <td><span class="text-muted" style="font-size:12px">${escHtml(fmtDate(f.mtime))}</span></td>
-      <td><button class="btn danger" onclick="deleteFile('${escHtml(f.path)}',this)">Delete</button></td>
+      <td style="display:flex;gap:6px">
+        <button class="btn" onclick="openPreview('${escHtml(f.path)}')">Preview</button>
+        <button class="btn danger" onclick="deleteFile('${escHtml(f.path)}',this)">Delete</button>
+      </td>
     </tr>
   `).join('');
 }
@@ -675,6 +739,145 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 tryRestoreSession();
+
+// ── File preview + E2EE client-side decryption ────────────────────────────
+//
+// The plugin encrypts files as:  base64( MAGIC[8] + IV[12] + AES-GCM-ct )
+// where MAGIC = "IONENCv1" (0x49 0x4F 0x4E 0x45 0x4E 0x43 0x76 0x31).
+//
+// The server's /api/file-content endpoint tells us whether the stored file
+// is encrypted via the `encrypted` flag in the JSON response, so we don't
+// have to detect the magic ourselves here.
+//
+// Decryption mirrors Crypto.ts exactly:
+//   key  = PBKDF2-SHA256(password, salt="IonSync-AES-GCM-v1-salt", 100 000 iter)
+//   iv   = bytes[8..19]   (12 bytes after the magic)
+//   ct   = bytes[20..]
+//   text = AES-GCM-decrypt(key, iv, ct)
+
+const E2EE_PBKDF2_SALT = new TextEncoder().encode('IonSync-AES-GCM-v1-salt');
+let previewCurrentPath = '';
+let previewCurrentB64 = '';   // raw base64 from server (may be encrypted)
+let previewIsEncrypted = false;
+
+async function openPreview(filePath) {
+  previewCurrentPath = filePath;
+  previewIsEncrypted = false;
+  previewCurrentB64 = '';
+
+  document.getElementById('preview-title').textContent = filePath;
+  document.getElementById('preview-body').innerHTML =
+    '<div style="text-align:center;padding:30px"><span class="spinner"></span></div>';
+  document.getElementById('preview-overlay').classList.add('open');
+
+  try {
+    const r = await api('/api/file-content?path=' + encodeURIComponent(filePath));
+    const data = await r.json();
+    previewCurrentB64 = data.content;
+    previewIsEncrypted = data.encrypted;
+
+    if (previewIsEncrypted) {
+      renderE2eeUnlock();
+    } else {
+      renderPlainPreview(previewCurrentB64);
+    }
+  } catch (e) {
+    document.getElementById('preview-body').innerHTML =
+      `<p style="color:var(--red)">Failed to load: ${escHtml(e.message)}</p>`;
+  }
+}
+
+function renderPlainPreview(b64) {
+  let text;
+  try {
+    // Decode base64 → try to display as UTF-8 text
+    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    text = '[Binary file — cannot display as text]';
+  }
+  document.getElementById('preview-body').innerHTML =
+    `<div id="preview-content">${escHtml(text)}</div>`;
+}
+
+function renderE2eeUnlock() {
+  document.getElementById('preview-body').innerHTML = `
+    <div class="lock-banner">
+      <span class="icon">🔒</span>
+      <span>This file is end-to-end encrypted. Enter your vault encryption password to preview it.</span>
+    </div>
+    <div id="e2ee-unlock">
+      <label for="e2ee-pw">Encryption password</label>
+      <input id="e2ee-pw" type="password" placeholder="your-encryption-passphrase" autocomplete="off">
+      <div id="e2ee-err"></div>
+      <button class="btn primary" id="e2ee-btn" onclick="decryptPreview()">Decrypt &amp; preview</button>
+    </div>`;
+  document.getElementById('e2ee-pw').addEventListener('keydown', e => {
+    if (e.key === 'Enter') decryptPreview();
+  });
+  setTimeout(() => document.getElementById('e2ee-pw')?.focus(), 50);
+}
+
+async function decryptPreview() {
+  const pw = document.getElementById('e2ee-pw').value;
+  const errEl = document.getElementById('e2ee-err');
+  const btn = document.getElementById('e2ee-btn');
+  if (!pw) { errEl.textContent = 'Enter a password.'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Decrypting…';
+  errEl.textContent = '';
+
+  try {
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveKey']
+    );
+    const key = await crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: E2EE_PBKDF2_SALT, iterations: 100_000, hash: 'SHA-256' },
+      keyMaterial,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['decrypt']
+    );
+
+    // Decode the stored base64 blob
+    const raw = Uint8Array.from(atob(previewCurrentB64), c => c.charCodeAt(0));
+    // Layout: MAGIC[8] + IV[12] + ciphertext[N]
+    const iv = raw.slice(8, 20);
+    const ciphertext = raw.slice(20);
+
+    const plainBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+
+    let text;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(plainBuf);
+    } catch {
+      text = '[Binary content — cannot display as text]';
+    }
+
+    document.getElementById('preview-body').innerHTML =
+      `<p style="font-size:11px;color:var(--green);margin-bottom:10px">🔓 Decrypted successfully</p>` +
+      `<div id="preview-content">${escHtml(text)}</div>`;
+  } catch (e) {
+    errEl.textContent = 'Decryption failed — wrong password or corrupted data.';
+    btn.disabled = false;
+    btn.textContent = 'Decrypt & preview';
+  }
+}
+
+function closePreview() {
+  document.getElementById('preview-overlay').classList.remove('open');
+  previewCurrentB64 = '';
+}
+
+// Wire up close button and overlay click-outside
+document.getElementById('preview-close').addEventListener('click', closePreview);
+document.getElementById('preview-overlay').addEventListener('click', e => {
+  if (e.target === document.getElementById('preview-overlay')) closePreview();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closePreview();
+});
 </script>
 </body>
 </html>

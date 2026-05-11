@@ -2,12 +2,13 @@ import type { FileEntry, ServerMsg, BackgroundSyncReq } from "@ionsync/protocol"
 import type { TAbstractFile } from "obsidian";
 import { WsManager, type UpdateInfo } from "./WsManager.js";
 import { Storage } from "./Storage.js";
-import { XNotify, NotifyType } from "./XNotify.js";
+import { XNotify, NotifyType, STATUS_WARN } from "./XNotify.js";
 import { XTimeouts } from "./XTimeouts.js";
 import { ExclusionFilter } from "./ExclusionFilter.js";
 import Utils from "./Utils.js";
 import type { IonSyncPlugin } from "./main.js";
-import { diff_match_patch } from "diff-match-patch"; // ✅ Phase 2 Import
+import { diff_match_patch } from "diff-match-patch";
+import { deriveKey, encryptToBase64, decryptFromBase64, isEncryptedBase64 } from "./Crypto.js";
 
 const CHUNK_SIZE = 2_000;
 
@@ -47,6 +48,28 @@ export class XSync {
   private responseListeners: Array<(msg: ServerMsg) => boolean> = [];
   private messageQueue: ServerMsg[] = [];
   private isProcessingQueue = false;
+
+  // ── E2EE key cache ────────────────────────────────────────────────────────
+  // PBKDF2 derivation is expensive (~100–200 ms).  Cache the derived key and
+  // only re-derive when the password changes.
+  private _e2eeKey: CryptoKey | null = null;
+  private _e2eeKeyPassword = "";
+
+  private async _getEncryptionKey(): Promise<CryptoKey | null> {
+    const { encryptionEnabled, encryptionPassword } = this.plugin.settings;
+    if (!encryptionEnabled || !encryptionPassword) {
+      this._e2eeKey = null;
+      this._e2eeKeyPassword = "";
+      return null;
+    }
+    if (this._e2eeKey && this._e2eeKeyPassword === encryptionPassword) {
+      return this._e2eeKey;
+    }
+    this._e2eeKey = await deriveKey(encryptionPassword);
+    this._e2eeKeyPassword = encryptionPassword;
+    return this._e2eeKey;
+  }
+
 
   constructor(public plugin: IonSyncPlugin) {
     this.ws = new WsManager(plugin.settings);
@@ -226,12 +249,30 @@ export class XSync {
   }
 
   private async _applyServerFile(file: FileEntry, content: string): Promise<void> {
-    // ✅ Emergency Guard: Instantly drop massive developer folders
-    if (file.path.includes("node_modules/") || file.path.includes(".git/")) {
-      return;
-    }
-
+    // Emergency guard: drop developer folders
+    if (file.path.includes("node_modules/") || file.path.includes(".git/")) return;
     if (this.exclusionFilter?.isExcluded(file.path)) return;
+
+    // ── E2EE decrypt ──────────────────────────────────────────────────────
+    // If the incoming content carries our encryption magic, decrypt it before
+    // passing it to the write path (which expects a plain base64 payload).
+    if (file.action !== "deleted" && content && isEncryptedBase64(content)) {
+      const key = await this._getEncryptionKey();
+      if (!key) {
+        console.warn(`[IonSync] E2EE: received encrypted file but no decryption key is configured — skipping ${file.path}`);
+        this.xNotify.showNotification(STATUS_WARN, "Encrypted file received — enable E2EE in settings to decrypt");
+        return;
+      }
+      try {
+        const plainBytes = await decryptFromBase64(key, content);
+        // Re-encode as plain base64 so the existing write path handles it normally.
+        content = Buffer.from(new Uint8Array(plainBytes)).toString("base64");
+      } catch (e) {
+        console.error(`[IonSync] E2EE: decryption failed for ${file.path} — wrong password or corrupted data:`, e);
+        this.xNotify.showNotification(STATUS_WARN, `E2EE decrypt failed: ${file.path}`);
+        return;
+      }
+    }
 
     try {
       const localStat = await this.plugin.app.vault.adapter.stat(file.path);
@@ -347,11 +388,9 @@ export class XSync {
     await this.storage.flushMetadata();
   }
 
-  // ✅ PHASE 2: Delta Sync integration for bulk uploads
   private async _uploadFile(path: string): Promise<void> {
     if (!this.ws.isConnected) return;
 
-    // ✅ Emergency Fix: Hardcoded safety net for all media types so we NEVER text-diff an image
     const hardcodedBinaryCheck = /\.(jpeg|jpg|png|gif|bmp|webp|ico|svg|pdf|mp3|mp4|wav|mov|zip|rar|7z)$/i.test(path);
     const isBinary = Utils.isBinary(path) || hardcodedBinaryCheck;
 
@@ -361,52 +400,56 @@ export class XSync {
 
     let content = "";
     let mode: "apply" | "patch" = "apply";
-    let liveSha1 = entry.sha1; 
+    let liveSha1 = entry.sha1;
+
+    const e2eeKey = await this._getEncryptionKey();
 
     if (entry.action === "active" && entry.fileType === "file") {
       if (isBinary) {
         const buf = await this.storage.readBinary(path);
         if (buf) {
-          // ✅ Wrap ArrayBuffer in Uint8Array for flawless Base64 conversion
-          content = Buffer.from(new Uint8Array(buf)).toString("base64");
-          liveSha1 = (await Utils.getSHABinary(buf)) ?? ""; 
+          liveSha1 = (await Utils.getSHABinary(buf)) ?? "";
+          content = e2eeKey
+            ? await encryptToBase64(e2eeKey, buf)
+            : Buffer.from(new Uint8Array(buf)).toString("base64");
         }
       } else {
         const currentText = await this.storage.read(path);
         if (currentText !== null) {
-          liveSha1 = (await Utils.getSHA(currentText)) ?? ""; 
-          
-          const shadowText = await this.storage.readShadow(path);
-          
-          if (shadowText !== null && shadowText !== currentText) {
-            const dmp = new diff_match_patch();
-            const diffs = dmp.diff_main(shadowText, currentText);
-            dmp.diff_cleanupSemantic(diffs);
-            const patches = dmp.patch_make(shadowText, currentText, diffs);
-            const patchText = dmp.patch_toText(patches);
+          liveSha1 = (await Utils.getSHA(currentText)) ?? "";
 
-            if (patchText.length < currentText.length) {
-              mode = "patch";
-              content = patchText;
-              this.plugin.log(`[Delta] Sending patch for ${path}`);
+          if (e2eeKey) {
+            // E2EE: always send full ciphertext — patches are meaningless on ciphertext
+            content = await encryptToBase64(e2eeKey, Buffer.from(currentText));
+          } else {
+            // Delta sync: send a patch when it's smaller than the full file
+            const shadowText = await this.storage.readShadow(path);
+            if (shadowText !== null && shadowText !== currentText) {
+              const dmp = new diff_match_patch();
+              const diffs = dmp.diff_main(shadowText, currentText);
+              dmp.diff_cleanupSemantic(diffs);
+              const patches = dmp.patch_make(shadowText, currentText, diffs);
+              const patchText = dmp.patch_toText(patches);
+              if (patchText.length < currentText.length) {
+                mode = "patch";
+                content = patchText;
+                this.plugin.log(`[Delta] Sending patch for ${path}`);
+              } else {
+                content = Buffer.from(currentText).toString("base64");
+              }
             } else {
               content = Buffer.from(currentText).toString("base64");
             }
-          } else {
-            content = Buffer.from(currentText).toString("base64");
+            await this.storage.writeShadow(path, currentText);
           }
-          await this.storage.writeShadow(path, currentText);
         }
       }
     }
 
     entry.sha1 = liveSha1;
-
-    // Bypass TS cache with 'as any'
     this.ws.send({ type: "file_data", mode: mode as any, file: entry, content });
     this.addActivity("up", path);
     this.syncUpCount++;
-    
     await this.storage.writeMetadata(entry);
   }
 
@@ -466,7 +509,6 @@ export class XSync {
     });
   }
 
-  // ✅ PHASE 2: Delta Sync integration for active live-sync edits
   private async _sendFileEvent(file: TAbstractFile, forceChanged: boolean): Promise<void> {
     if (!this.ws.isConnected) return;
     const stat = await this.plugin.app.vault.adapter.stat(file.path);
@@ -480,42 +522,49 @@ export class XSync {
     let content = "";
     let mode: "apply" | "patch" = "apply";
 
+    const e2eeKey = await this._getEncryptionKey();
+
     if (isBinary) {
       const buf = await this.storage.readBinary(file.path);
-      if (buf) { 
-        sha1 = await Utils.getSHABinary(buf); 
-        content = Buffer.from(buf).toString("base64"); 
+      if (buf) {
+        sha1 = await Utils.getSHABinary(buf);
+        content = e2eeKey
+          ? await encryptToBase64(e2eeKey, buf)
+          : Buffer.from(buf).toString("base64");
       }
     } else {
       const currentText = await this.storage.read(file.path);
-      if (currentText !== null) { 
-        sha1 = await Utils.getSHA(currentText); 
-        
-        const shadowText = await this.storage.readShadow(file.path);
-        if (shadowText !== null && shadowText !== currentText) {
-          const dmp = new diff_match_patch();
-          const diffs = dmp.diff_main(shadowText, currentText);
-          dmp.diff_cleanupSemantic(diffs);
-          const patches = dmp.patch_make(shadowText, currentText, diffs);
-          const patchText = dmp.patch_toText(patches);
+      if (currentText !== null) {
+        sha1 = await Utils.getSHA(currentText);
 
-          if (patchText.length < currentText.length) {
-            mode = "patch";
-            content = patchText;
-            this.plugin.log(`[Delta] Sending patch for ${file.path}`);
+        if (e2eeKey) {
+          // E2EE: full ciphertext only — no delta patching on encrypted data
+          content = await encryptToBase64(e2eeKey, Buffer.from(currentText));
+        } else {
+          const shadowText = await this.storage.readShadow(file.path);
+          if (shadowText !== null && shadowText !== currentText) {
+            const dmp = new diff_match_patch();
+            const diffs = dmp.diff_main(shadowText, currentText);
+            dmp.diff_cleanupSemantic(diffs);
+            const patches = dmp.patch_make(shadowText, currentText, diffs);
+            const patchText = dmp.patch_toText(patches);
+            if (patchText.length < currentText.length) {
+              mode = "patch";
+              content = patchText;
+              this.plugin.log(`[Delta] Sending patch for ${file.path}`);
+            } else {
+              content = Buffer.from(currentText).toString("base64");
+            }
           } else {
             content = Buffer.from(currentText).toString("base64");
           }
-        } else {
-          content = Buffer.from(currentText).toString("base64");
+          await this.storage.writeShadow(file.path, currentText);
         }
-        await this.storage.writeShadow(file.path, currentText);
       }
     }
 
     const entry: FileEntry = { path: file.path, sha1: sha1 ?? "", mtime: stat.mtime, action: "active", fileType: "file" };
-    // ✅ Bypass TS cache with 'as any'
-	this.ws.send({ type: "file_data", mode: mode as any, file: entry, content });
+    this.ws.send({ type: "file_data", mode: mode as any, file: entry, content });
     await this.storage.writeMetadata(entry);
     this.addActivity("up", file.path);
   }
@@ -571,16 +620,17 @@ export class XSync {
     }
   }
 
+
   private async _onFocusChanged(): Promise<void> {
     this.xTimeouts.executeAll();
     await this._checkConfigFiles();
-  } 
+  }
 
   private async _checkConfigFiles(): Promise<void> {
     if (!this.ws.isConnected || !this.plugin.settings.autoSync || this.isSyncing) return;
     const configDir = this.plugin.app.vault.configDir;
     const targets = [`${configDir}/app.json`, `${configDir}/appearance.json`, `${configDir}/hotkeys.json`, `${configDir}/community-plugins.json`].filter(p => !this.exclusionFilter?.isExcluded(p));
-    
+
     for (const path of targets) {
       const stat = await this.plugin.app.vault.adapter.stat(path);
       if (stat) await this._sendFileEvent({ path } as TAbstractFile, false);

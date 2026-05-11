@@ -159,6 +159,27 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     res.json(walk(filesBase));
   });
 
+  // ── Read latest version of a file (for dashboard preview) ────────────────
+  // Returns { content: base64, encrypted: boolean }.
+  // "content" is the raw stored bytes encoded as base64 — if the file was
+  // uploaded with E2EE enabled the bytes begin with the IONENCv1 magic and
+  // must be decrypted client-side in the browser using the user's passphrase.
+  router.get("/api/file-content", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const filePath = decodeURIComponent(String(req.query.path ?? "")).trim();
+    if (!filePath) { res.status(400).json({ error: "Missing path" }); return; }
+
+    const buf = ctx.storage.readLatest(filePath);
+    if (!buf) { res.status(404).json({ error: "File not found" }); return; }
+
+    // Detect E2EE magic ("IONENCv1") so the dashboard can show the lock icon
+    // and prompt for the passphrase without having to re-implement detection JS.
+    const E2EE_MAGIC = Buffer.from([0x49, 0x4f, 0x4e, 0x45, 0x4e, 0x43, 0x76, 0x31]);
+    const encrypted = buf.length >= E2EE_MAGIC.length && buf.slice(0, E2EE_MAGIC.length).equals(E2EE_MAGIC);
+
+    res.json({ content: buf.toString("base64"), encrypted, size: buf.length });
+  });
+
   // ── Delete a file from server storage ─────────────────────────────────────
 
   router.delete("/api/delete-file/*", (req, res) => {
