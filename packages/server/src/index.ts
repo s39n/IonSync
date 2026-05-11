@@ -107,7 +107,7 @@ publicServer.listen(config.port, config.host, () => {
 
 // Admin Server binds to a DIFFERENT port and strictly to localhost / private LAN
 const ADMIN_PORT = config.port + 1; // e.g., 3001
-const ADMIN_HOST = "127.0.0.1"; // 🚨 Change to "0.0.0.0" ONLY if you want to access it from other computers on your home WiFi
+const ADMIN_HOST = "0.0.0.0"; // 🚨 Change to "0.0.0.0" ONLY if you want to access it from other computers on your home WiFi
 
 adminServer.listen(ADMIN_PORT, ADMIN_HOST, () => {
   console.log(`[Admin] Dashboard safely locked to http://${ADMIN_HOST}:${ADMIN_PORT}/dashboard`);
