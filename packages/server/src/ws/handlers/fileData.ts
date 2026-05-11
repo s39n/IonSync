@@ -7,45 +7,53 @@ import crypto from "node:crypto"; // ✅ FIX 1: Import native Node crypto direct
 /**
  * Client is uploading a file to the server (mode: "apply").
  */
+/**
+ * Client is uploading a file to the server (mode: "apply").
+ */
 export function handleFileUpload(
   ctx: SyncContext,
   peer: SyncPeer,
   msg: FileDataUploadMsg
 ): void {
   const { file, content } = msg;
+  let isRejected = false;
 
   // Persist content for active files (not folders, not deleted)
   if (file.action === "active" && file.fileType === "file" && content) {
     const buf = Buffer.from(content, "base64");
 
-    // Reject huge files before they hit the disk
+    // 1. Check size limit
     const limitBytes = ctx.config.maxFileSizeMb * 1024 * 1024;
     if (buf.length > limitBytes) {
-      logWarn(ctx, `[Upload] Rejected ${file.path}. Size (${(buf.length / 1024 / 1024).toFixed(2)}MB) exceeds limit.`);
-      msg.content = ""; // Clear massive string from memory immediately
-      return; 
+      logWarn(ctx, `[Upload] Rejected ${file.path}. Size exceeds limit.`);
+      isRejected = true;
     } 
-
-    // ✅ FIX 2: Use native Node crypto to hash the RAW binary buffer safely
-    if (file.sha1) {
+    // 2. Check for file corruption
+    else if (file.sha1) {
       const computed = crypto.createHash("sha1").update(buf).digest("hex");
-      
       if (computed !== file.sha1) {
-        logWarn(ctx, `[file_data] SHA1 mismatch for ${file.path} — rejecting upload`);
-        return;
+        logWarn(ctx, `[file_data] SHA1 mismatch for ${file.path} — rejecting upload. Skipping to next file.`);
+        isRejected = true;
       }
     }
 
-    ctx.storage.write(file.path, file.mtime, buf);
+    // 3. If the file is healthy, save it
+    if (!isRejected) {
+      ctx.storage.write(file.path, file.mtime, buf);
+    }
 
     // Help the Garbage Collector clear the RAM instantly
     msg.content = "";
   }
 
-  // Update the DB record
-  ctx.db.upsertFile(file);
+  // ✅ Only update the database and broadcast if the file was ACTUALLY saved
+  if (!isRejected) {
+    ctx.db.upsertFile(file);
+    broadcastToPeers(ctx, peer, file);
+    logInfo(ctx, `[file_data] saved ${file.path} (action=${file.action}, mtime=${file.mtime})`);
+  }
 
-  // Mark pending upload as resolved and open a slot for the next queued path
+  // ✅ CRITICAL FIX: Always advance the queue, even if the file was rejected!
   peer.pendingUploads.delete(file.path);
 
   if (peer.uploadQueue.length > 0) {
@@ -54,13 +62,8 @@ export function handleFileUpload(
     peer.send({ type: "file_event_result", path: next, result: "client_newer" });
   }
 
-  // Check whether sync is fully complete (uploads + server pushes both done)
+  // Check whether sync is fully complete
   checkSyncDone(peer);
-
-  // Broadcast to other connected peers (live sync)
-  broadcastToPeers(ctx, peer, file);
-
-  logInfo(ctx, `[file_data] saved ${file.path} (action=${file.action}, mtime=${file.mtime})`);
 }
 
 /**
