@@ -3,6 +3,7 @@ import type {
   ClientMsg,
   VersionCheckResponseMsg,
 } from "@ionsync/protocol";
+import { Platform } from "obsidian";
 import type { PluginSettings } from "./main.js";
 
 // ---------- Types ----------
@@ -53,7 +54,15 @@ export class WsManager {
   private mobileVisibilityListener?: () => void;
 
   constructor(private settings: PluginSettings) {
-    if (typeof document !== "undefined") {
+    // On mobile, disconnect when the app goes to the background and reconnect
+    // when it comes back to the foreground. This avoids drained battery from a
+    // stale socket and prevents the OS from killing the socket underneath us.
+    //
+    // On desktop we intentionally skip this — minimising/alt-tabbing fires
+    // visibilitychange too, which would cause a reconnect (and two notifications)
+    // every time the user switches windows. The server's ping/pong keepalive and
+    // the existing onclose handler already manage genuine connection drops there.
+    if (Platform.isMobile && typeof document !== "undefined") {
       this.mobileVisibilityListener = () => {
         if (document.hidden) this.disconnect();
         else this.scheduleReconnect(0);

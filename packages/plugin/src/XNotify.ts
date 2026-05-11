@@ -30,6 +30,11 @@ export class XNotify {
   private lastNoticeType: string | null = null;
   private _pendingCount = 0;
 
+  /** Timestamp (ms) of the last CONNECTION_LOST event; 0 when connected. */
+  private _lastDisconnectTime = 0;
+  /** If a reconnect arrives within this window, suppress both disconnect and connect notices. */
+  private static readonly TRANSIENT_MS = 5_000;
+
   constructor(private xSync: XSync) {}
 
   makeStatusBarItem(el: HTMLElement): void {
@@ -180,17 +185,36 @@ export class XNotify {
 
     switch (type) {
       case NotifyType.PLUGIN_DISABLED:
-      case NotifyType.CONNECTION_LOST:
       case NotifyType.NOT_CONNECTED:
         if (level > 0) this._makeNotice(STATUS_ERROR, type);
         this.setColor(STATUS_ERROR);
         this.setStatusMessage(type, false);
         break;
-      case NotifyType.CONNECTED:
-        if (level > 0) this._makeNotice(STATUS_OK, type);
+      case NotifyType.CONNECTION_LOST:
+        this._lastDisconnectTime = Date.now();
+        if (level > 0) this._makeNotice(STATUS_ERROR, type);
+        this.setColor(STATUS_ERROR);
+        this.setStatusMessage(type, false);
+        break;
+      case NotifyType.CONNECTED: {
+        const wasTransient =
+          this._lastDisconnectTime > 0 &&
+          Date.now() - this._lastDisconnectTime < XNotify.TRANSIENT_MS;
+        this._lastDisconnectTime = 0;
+        if (wasTransient) {
+          // The connection blipped back within the threshold — cancel the
+          // pending "Connection lost" notice and show nothing for CONNECTED.
+          if (this.pendingNoticeTimeout !== null) {
+            clearTimeout(this.pendingNoticeTimeout);
+            this.pendingNoticeTimeout = null;
+          }
+        } else if (level > 0) {
+          this._makeNotice(STATUS_OK, type);
+        }
         this.setColor(STATUS_OK);
         this.setStatusMessage(this._pendingCount > 0 ? `${this._pendingCount} remaining` : type, true);
         break;
+      }
       case NotifyType.SYNCING:
         if (level > 1) this._makeNotice(STATUS_SYNC, type);
         this.setColor(STATUS_SYNC);

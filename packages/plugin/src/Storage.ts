@@ -156,7 +156,7 @@ export class Storage {
           continue;
         }
 
-        const MAX_FILE_SIZE = 40 * 1024 * 1024; // 40MB limit
+        const MAX_FILE_SIZE = (this.settings.maxFileSizeMB ?? 25) * 1024 * 1024;
         if (file.stat.size > MAX_FILE_SIZE) {
           this.tree[file.path] = { path: file.path, sha1: "", mtime, action: "active", fileType: "file" };
           continue;

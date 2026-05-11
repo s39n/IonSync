@@ -525,12 +525,17 @@ export class XSync {
   private async _onConnected(): Promise<void> {
     this.xNotify.notifyStatus(NotifyType.CONNECTED);
     if (Object.keys(this.deleteQueue).length > 0) await this._processDeleteQueue();
-    
+
     if (this.plugin.settings.autoSync) {
-      // ✅ Wait for Obsidian's engine to fully load the 20k+ files into memory BEFORE syncing
-      this.plugin.app.workspace.onLayoutReady(() => {
+      // onLayoutReady fires immediately when the layout is already ready (which it
+      // always is on a reconnect), but it also registers a *persistent* listener on
+      // the workspace event that leaks across reconnects.  Check the flag directly
+      // so we only queue sync() once without accumulating stale listeners.
+      if (this.plugin.app.workspace.layoutReady) {
         void this.sync();
-      });
+      } else {
+        this.plugin.app.workspace.onLayoutReady(() => { void this.sync(); });
+      }
     }
   }
 
