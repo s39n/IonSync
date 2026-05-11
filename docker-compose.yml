@@ -6,6 +6,7 @@ services:
       dockerfile: Dockerfile
     ports:
       - "${IONSYNC_PORT:-3000}:3000"
+      - "${IONSYNC_DASH:-3001}:3001"
     volumes:
       - ${IONSYNC_DATA:-ionsync_data}:/data
       # Mount a hand-written config instead of env vars:
