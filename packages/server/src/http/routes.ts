@@ -220,31 +220,6 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     res.json({ files, asOf: asOfMs });
   });
 
-  // ── Snapshot export ────────────────────────────────────────────────────────
-  // Returns JSON: { files: Array<{ path, mtime, encrypted, content: base64 }> }
-  // The browser builds the final ZIP (via JSZip) and decrypts E2EE entries
-  // client-side — the server never sees the passphrase.
-  router.get("/api/export-snapshot", (req, res) => {
-    if (!checkAuth(req, res)) return;
-
-    const dateParam = String(req.query.date ?? "").trim();
-    if (!dateParam) { res.status(400).json({ error: "Missing date parameter" }); return; }
-
-    const asOfMs = new Date(dateParam).getTime();
-    if (isNaN(asOfMs)) { res.status(400).json({ error: "Invalid date" }); return; }
-
-    const E2EE_MAGIC = Buffer.from([0x49, 0x4f, 0x4e, 0x45, 0x4e, 0x43, 0x76, 0x31]);
-    const snapFiles = ctx.db.getSnapshotFiles(asOfMs);
-
-    const files = snapFiles.map(({ path: filePath, mtime }) => {
-      const buf = ctx.storage.readVersion(filePath, mtime);
-      if (!buf) return null;
-      const encrypted = buf.length >= E2EE_MAGIC.length && buf.slice(0, E2EE_MAGIC.length).equals(E2EE_MAGIC);
-      return { path: filePath, mtime, encrypted, content: buf.toString("base64") };
-    }).filter((f): f is NonNullable<typeof f> => f !== null);
-
-    res.json({ files, asOf: asOfMs });
-  });
 
   return router;
 }

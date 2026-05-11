@@ -1021,7 +1021,19 @@ async function decryptPreview() {
       `<p style="font-size:11px;color:var(--green);margin-bottom:10px">🔓 Decrypted successfully</p>` +
       `<div id="preview-content">${escHtml(text)}</div>`;
   } catch (e) {
-    errEl.textContent = 'Decryption failed — wrong password or corrupted data.';
+    const raw2 = previewCurrentB64 ? Uint8Array.from(atob(previewCurrentB64), c => c.charCodeAt(0)) : null;
+    const magicHex = raw2 ? Array.from(raw2.slice(0, 8)).map(b => b.toString(16).padStart(2,'0')).join(' ') : 'n/a';
+    const ivHex = raw2 ? Array.from(raw2.slice(8, 20)).map(b => b.toString(16).padStart(2,'0')).join(' ') : 'n/a';
+    console.error('[IonSync] E2EE decrypt error:', e, {
+      errorName: e?.name,
+      errorMessage: e?.message,
+      passwordLength: pw.length,
+      blobBytes: raw2?.length ?? 0,
+      magicHex,
+      ivHex,
+    });
+    const detail = e?.message ? ` (${e.message})` : '';
+    errEl.textContent = 'Decryption failed — wrong password or corrupted data.' + detail + ' Check browser console (F12) for details.';
     btn.disabled = false;
     btn.textContent = 'Decrypt & preview';
   }
