@@ -2,7 +2,7 @@ import type { FileDataUploadMsg, FileDataRequestMsg } from "@ionsync/protocol";
 import type { SyncContext } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 import { broadcastToPeers, checkSyncDone } from "./sync.js";
-import { sha1 } from "../../crypto.js";
+import crypto from "node:crypto"; // ✅ FIX 1: Import native Node crypto directly
 
 /**
  * Client is uploading a file to the server (mode: "apply").
@@ -18,7 +18,7 @@ export function handleFileUpload(
   if (file.action === "active" && file.fileType === "file" && content) {
     const buf = Buffer.from(content, "base64");
 
-    // ✅ FIX 1: Reject huge files before they hit the disk
+    // Reject huge files before they hit the disk
     const limitBytes = ctx.config.maxFileSizeMb * 1024 * 1024;
     if (buf.length > limitBytes) {
       logWarn(ctx, `[Upload] Rejected ${file.path}. Size (${(buf.length / 1024 / 1024).toFixed(2)}MB) exceeds limit.`);
@@ -26,9 +26,10 @@ export function handleFileUpload(
       return; 
     } 
 
-    // Verify SHA1 — reject corrupted uploads silently (client will retry on next sync)
+    // ✅ FIX 2: Use native Node crypto to hash the RAW binary buffer safely
     if (file.sha1) {
-      const computed = sha1(buf);
+      const computed = crypto.createHash("sha1").update(buf).digest("hex");
+      
       if (computed !== file.sha1) {
         logWarn(ctx, `[file_data] SHA1 mismatch for ${file.path} — rejecting upload`);
         return;
@@ -37,7 +38,7 @@ export function handleFileUpload(
 
     ctx.storage.write(file.path, file.mtime, buf);
 
-    // ✅ FIX 2: Help the Garbage Collector clear the RAM instantly
+    // Help the Garbage Collector clear the RAM instantly
     msg.content = "";
   }
 

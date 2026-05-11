@@ -1,12 +1,13 @@
 import type { FileEntry } from "@ionsync/protocol";
-import type { App } from "obsidian";
+import { TFile, TFolder, type App } from "obsidian";
 import { FSAdapter } from "./FSAdapter.js";
 import { ExclusionFilter } from "./ExclusionFilter.js";
 import Utils from "./Utils.js";
 import type { PluginSettings } from "./main.js";
 
 /**
- * Manages local file metadata, vault I/O, and Delta-Sync Shadow Copies.
+ * Manages local file metadata, vault I/O, Delta-Sync Shadow Copies,
+ * and lightning-fast boot tree calculations.
  */
 export class Storage {
   tree: Record<string, FileEntry> = {};
@@ -16,6 +17,7 @@ export class Storage {
   private metadata: Record<string, FileEntry> = {};
   private aborted = false;
   private saveTimeout: ReturnType<typeof setTimeout> | null = null;
+  private deleteQueueData: Record<string, { metadata: Partial<FileEntry>; timestamp: number }> = {};
 
   constructor(private app: App, private settings: PluginSettings, private pluginDir: string) {
     this.fsVault = new FSAdapter(app, "");
@@ -98,8 +100,6 @@ export class Storage {
 
   // ── Delete queue ───────────────────────────────────────────────────────────
 
-  private deleteQueueData: Record<string, { metadata: Partial<FileEntry>; timestamp: number }> = {};
-
   async loadDeleteQueue(): Promise<Record<string, { metadata: Partial<FileEntry>; timestamp: number }>> {
     try {
       const raw = await this.fsInternal.read("data/delete-queue.json");
@@ -124,7 +124,7 @@ export class Storage {
     }
   }
 
-  // ── Tree computation ───────────────────────────────────────────────────────
+  // ── Tree computation (Fast Boot Edition) ───────────────────────────────────
 
   abortTree(): void { this.aborted = true; }
 
@@ -133,74 +133,128 @@ export class Storage {
     this.tree = {};
     const exclusionFilter = new ExclusionFilter(this.settings, this.app.vault.configDir);
 
-    await this.fsVault.iterate(async ({ path, stat, isFolder }) => {
-      if (this.aborted || exclusionFilter.isExcluded(path)) return;
-      if (path.startsWith(this.pluginDir.replace(/^\//, "") + "/data/")) return;
+    // 🚀 THE DATAVIEW SECRET: Use Obsidian's in-memory cache! Zero disk I/O.
+    const files = this.app.vault.getAllLoadedFiles();
 
-      if (isFolder) {
-        const mtime = await this.getFolderMTime(path);
-        if (mtime === null) return;
-        const stored = this.readMetadata(path);
-        if (stored && stored.mtime === mtime) return;
-        this.tree[path] = { path, sha1: "", mtime, action: "active", fileType: "folder" };
-      } else {
-        if (!stat) return;
-        const mtime = stat.mtime;
-        const stored = this.readMetadata(path);
+    for (const file of files) {
+      if (this.aborted) break;
+      if (exclusionFilter.isExcluded(file.path)) continue;
+      
+      // Ignore plugin's internal shadow/metadata files
+      if (file.path.startsWith(this.pluginDir.replace(/^\//, "") + "/data/")) continue;
+
+      if (file instanceof TFolder) {
+        this.tree[file.path] = { path: file.path, sha1: "", mtime: 0, action: "active", fileType: "folder" };
+      } 
+      else if (file instanceof TFile) {
+        const mtime = file.stat.mtime;
+        const stored = this.readMetadata(file.path);
+
+        // 🔥 FAST PATH: Memory mtime matches stored mtime -> Instant skip
         if (stored && stored.mtime === mtime && stored.sha1 && stored.sha1.length === 40) {
-          this.tree[path] = stored;
-          return;
+          this.tree[file.path] = stored;
+          continue;
         }
 
         const MAX_FILE_SIZE = 40 * 1024 * 1024; // 40MB limit
-        if (stat.size > MAX_FILE_SIZE) {
-          this.tree[path] = { path, sha1: "", mtime, action: "active", fileType: "file" };
-          return;
+        if (file.stat.size > MAX_FILE_SIZE) {
+          this.tree[file.path] = { path: file.path, sha1: "", mtime, action: "active", fileType: "file" };
+          continue;
         }
 
-        const isBinary = Utils.isBinary(path);
+        // 🐢 SLOW PATH: File changed offline. Read disk to hash it.
+        const isBinary = Utils.isBinary(file.path);
         let sha1: string | null = null;
         if (isBinary) {
-          const buf = await this.fsVault.readBinary(path);
+          const buf = await this.fsVault.readBinary(file.path);
           sha1 = buf ? await Utils.getSHABinary(buf) : null;
         } else {
-          const txt = await this.fsVault.read(path);
+          const txt = await this.fsVault.read(file.path);
           sha1 = txt != null ? await Utils.getSHA(txt) : null;
         }
-        this.tree[path] = { path, sha1: sha1 ?? "", mtime, action: "active", fileType: "file" };
+        
+        this.tree[file.path] = { path: file.path, sha1: sha1 ?? "", mtime, action: "active", fileType: "file" };
       }
-    }, this.pluginDir.replace(/^\//, "") + "/data");
+    }
+
+    // Obsidian's cache hides the .obsidian config folder, so we check them manually.
+    await this._computeHiddenConfigFiles(exclusionFilter);
   }
 
-  private async getFolderMTime(path: string): Promise<number | null> {
-    try {
-      const stat = await this.app.vault.adapter.stat(path);
-      return stat ? stat.mtime : 0;
-    } catch { 
-      return null; 
+  private async _computeHiddenConfigFiles(exclusionFilter: ExclusionFilter): Promise<void> {
+    const configDir = this.app.vault.configDir;
+    const targets = [
+      `${configDir}/app.json`, 
+      `${configDir}/appearance.json`, 
+      `${configDir}/hotkeys.json`, 
+      `${configDir}/community-plugins.json`
+    ];
+
+    for (const path of targets) {
+      if (this.aborted) break;
+      if (exclusionFilter.isExcluded(path)) continue;
+
+      try {
+        const stat = await this.app.vault.adapter.stat(path);
+        if (!stat) continue;
+
+        const mtime = stat.mtime;
+        const stored = this.readMetadata(path);
+
+        if (stored && stored.mtime === mtime && stored.sha1) {
+          this.tree[path] = stored;
+          continue;
+        }
+
+        const txt = await this.fsVault.read(path);
+        const sha1 = txt != null ? await Utils.getSHA(txt) : "";
+        this.tree[path] = { path, sha1: sha1 ?? "", mtime, action: "active", fileType: "file" };
+      } catch {
+        // File doesn't exist, just skip
+      }
     }
-  } 
+  }
 
   // ── Vault I/O ─────────────────────────────────────────────────────────────
+
+  // ✅ New Bulletproof Guard: Recursively creates parent folders if they are missing
+  private async ensureParentDir(filePath: string): Promise<void> {
+    const parts = filePath.split("/");
+    parts.pop(); // Remove the file name to get just the directory path
+    let current = "";
+    
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      if (!(await this.app.vault.adapter.exists(current))) {
+        try {
+          await this.app.vault.adapter.mkdir(current);
+        } catch (e) {
+          // Safely ignore: Another concurrent WebSocket file push might have just created it a millisecond ago
+        }
+      }
+    }
+  }
 
   async read(path: string): Promise<string | null> { return this.fsVault.read(path); }
 
   async readBinary(path: string): Promise<ArrayBuffer | null> { return this.fsVault.readBinary(path); }
 
   async write(path: string, content: string, entry: FileEntry): Promise<void> {
+    await this.ensureParentDir(path); // ✅ Call the guard before writing
+
     const text = Buffer.from(content, "base64").toString("utf-8");
     await this.fsVault.write(path, text, entry.mtime);
     await this.writeMetadata(entry);
-    // ✅ Keep shadow copy perfectly synchronized with server pushes
     await this.writeShadow(path, text); 
   }
 
   async writeBinary(path: string, content: string, entry: FileEntry): Promise<void> {
+    await this.ensureParentDir(path); // ✅ Call the guard before writing
+
     const buf = Buffer.from(content, "base64");
     await this.fsVault.writeBinary(path, buf.buffer, entry.mtime);
     await this.writeMetadata(entry);
-  }
-
+}
   async makeFolder(path: string, entry: FileEntry): Promise<void> {
     await this.fsVault.makeFolder(path);
     await this.writeMetadata(entry);

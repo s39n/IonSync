@@ -226,10 +226,16 @@ export class XSync {
   }
 
   private async _applyServerFile(file: FileEntry, content: string): Promise<void> {
+    // ✅ Emergency Guard: Instantly drop massive developer folders
+    if (file.path.includes("node_modules/") || file.path.includes(".git/")) {
+      return;
+    }
+
     if (this.exclusionFilter?.isExcluded(file.path)) return;
 
     try {
       const localStat = await this.plugin.app.vault.adapter.stat(file.path);
+
       const localMeta = this.storage.readMetadata(file.path);
 
       if (file.action !== "deleted" && file.fileType === "file" && localStat && localStat.type === "file") {
@@ -344,21 +350,32 @@ export class XSync {
   // ✅ PHASE 2: Delta Sync integration for bulk uploads
   private async _uploadFile(path: string): Promise<void> {
     if (!this.ws.isConnected) return;
-    const isBinary = Utils.isBinary(path);
+
+    // ✅ Emergency Fix: Hardcoded safety net for all media types so we NEVER text-diff an image
+    const hardcodedBinaryCheck = /\.(jpeg|jpg|png|gif|bmp|webp|ico|svg|pdf|mp3|mp4|wav|mov|zip|rar|7z)$/i.test(path);
+    const isBinary = Utils.isBinary(path) || hardcodedBinaryCheck;
+
     const stored = this.storage.readMetadata(path);
     const entry: FileEntry | null = (this.storage.tree[path] ?? stored) ?? null;
     if (!entry) return;
 
     let content = "";
     let mode: "apply" | "patch" = "apply";
+    let liveSha1 = entry.sha1; 
 
     if (entry.action === "active" && entry.fileType === "file") {
       if (isBinary) {
         const buf = await this.storage.readBinary(path);
-        if (buf) content = Buffer.from(buf).toString("base64");
+        if (buf) {
+          // ✅ Wrap ArrayBuffer in Uint8Array for flawless Base64 conversion
+          content = Buffer.from(new Uint8Array(buf)).toString("base64");
+          liveSha1 = (await Utils.getSHABinary(buf)) ?? ""; 
+        }
       } else {
         const currentText = await this.storage.read(path);
         if (currentText !== null) {
+          liveSha1 = (await Utils.getSHA(currentText)) ?? ""; 
+          
           const shadowText = await this.storage.readShadow(path);
           
           if (shadowText !== null && shadowText !== currentText) {
@@ -383,10 +400,13 @@ export class XSync {
       }
     }
 
-    // ✅ Bypass TS cache with 'as any'
-	this.ws.send({ type: "file_data", mode: mode as any, file: entry, content });
+    entry.sha1 = liveSha1;
+
+    // Bypass TS cache with 'as any'
+    this.ws.send({ type: "file_data", mode: mode as any, file: entry, content });
     this.addActivity("up", path);
     this.syncUpCount++;
+    
     await this.storage.writeMetadata(entry);
   }
 
@@ -401,6 +421,11 @@ export class XSync {
   }
 
   async _processLocalEvent(action: VaultAction, file: TAbstractFile, forceChanged = false, args: unknown[] = []): Promise<void> {
+    // ✅ Emergency Guard: Do not process local edits in developer folders
+    if (file.path.includes("node_modules/") || file.path.includes(".git/")) {
+      return;
+    }
+
     if (this.exclusionFilter?.isExcluded(file.path)) return;
 
     if (action === "rename") {
@@ -500,7 +525,13 @@ export class XSync {
   private async _onConnected(): Promise<void> {
     this.xNotify.notifyStatus(NotifyType.CONNECTED);
     if (Object.keys(this.deleteQueue).length > 0) await this._processDeleteQueue();
-    if (this.plugin.settings.autoSync) await this.sync();
+    
+    if (this.plugin.settings.autoSync) {
+      // ✅ Wait for Obsidian's engine to fully load the 20k+ files into memory BEFORE syncing
+      this.plugin.app.workspace.onLayoutReady(() => {
+        void this.sync();
+      });
+    }
   }
 
   private _onDisconnected(): void {
