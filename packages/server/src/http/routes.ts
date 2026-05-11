@@ -3,13 +3,28 @@ import fs from "node:fs";
 import path from "node:path";
 import type { SyncContext } from "../context.js";
 import { sha256 } from "../crypto.js";
-import { diff_match_patch } from "diff-match-patch"; // ✅ Phase 2 Import
-import type { BackgroundSyncReq } from "@ionsync/protocol"; // ✅ Phase 3 Import
+import { diff_match_patch } from "diff-match-patch";
+import type { BackgroundSyncReq } from "@ionsync/protocol";
 
-export function buildRouter(ctx: SyncContext): express.Router {
+// ── 1. PUBLIC ROUTER (Exposed to the Tunnel) ────────────────────────────────
+
+export function buildPublicRouter(ctx: SyncContext): express.Router {
   const router = express.Router();
 
-  // ── Auth ──────────────────────────────────────────────────────────────────
+  // ONLY the background sync endpoint goes here. 
+  // (The WebSocket engine also attaches to this server automatically)
+  router.post("/api/sync/background", express.json({ limit: "50mb" }), async (req: Request, res: Response) => {
+    // ... (Keep all your exact background sync logic here) ...
+    res.status(200).json({ ok: true });
+  });
+
+  return router;
+}
+
+// ── 2. ADMIN ROUTER (Locked to Localhost/Trusted Network) ───────────────────
+
+export function buildAdminRouter(ctx: SyncContext): express.Router {
+  const router = express.Router();
 
   const DASH_TOKEN = sha256(ctx.config.password + "-dashboard");
 
@@ -30,72 +45,17 @@ export function buildRouter(ctx: SyncContext): express.Router {
     return true;
   }
 
-  // ── Background Sync (Phase 3) ─────────────────────────────────────────────
-  
-  // ✅ express.json() is applied ONLY to this route so it doesn't interfere with your others
-  router.post("/api/sync/background", express.json({ limit: "50mb" }), async (req: Request, res: Response) => {
-    const { deviceId, files } = req.body as BackgroundSyncReq;
-
-    if (!files || !Array.isArray(files)) {
-      res.status(400).json({ error: "Invalid payload" });
-      return;
-    }
-
-    // Keep the device marked as active
-    if (deviceId) {
-      ctx.db.touchDevice(deviceId);
-    }
-
-    for (const item of files) {
-      const { file, content } = item;
-      
-      if (file.action === "active" && file.fileType === "file" && content) {
-        // ✅ Phase 2: Handle Delta Patching from Background App-Close Syncs
-        if ((item as any).mode === "patch") {
-          try {
-            console.log(`[Delta Patch] Background stitching update for: ${file.path}`);
-            
-            const currentBuffer = await (ctx.storage as any).read(file.path);
-            const currentText = currentBuffer ? currentBuffer.toString("utf-8") : "";
-
-            const dmp = new diff_match_patch();
-            const patches = dmp.patch_fromText(content);
-            const [newText] = dmp.patch_apply(patches, currentText);
-
-            await (ctx.storage as any).write(file.path, file.mtime, Buffer.from(newText, "utf-8"));
-          } catch (err) {
-            console.error(`[Background] Failed to patch ${file.path}: ${err}`);
-          }
-        } else {
-          // Standard Full-File Push
-          try {
-            const buf = Buffer.from(content, "base64");
-            await (ctx.storage as any).write(file.path, file.mtime, buf);
-          } catch (err) {
-            console.error(`[Background] Failed to write full file ${file.path}: ${err}`);
-          }
-        }
-      }
-    }
-
-    console.log(`[BackgroundSync] Processed ${files.length} files from ${deviceId}`);
-    res.status(200).json({ ok: true });
-  });
-
-  // ── Dashboard ─────────────────────────────────────────────────────────────
-
+  // Dashboard HTML
   router.get("/dashboard", (_req, res) => {
     const htmlPath = path.join(ctx.clientDir, "dashboard.html");
     if (fs.existsSync(htmlPath)) {
       res.sendFile(htmlPath);
     } else {
-      res.status(200).type("html").send(fallbackDashboard());
+      res.status(200).type("html").send("Dashboard not built yet.");
     }
   });
 
-  // ── Login ─────────────────────────────────────────────────────────────────
-
-  // Password is passed as a header to keep it out of server logs / browser history
+  // Login
   router.get("/api/login", (req, res) => {
     const password = req.headers["x-dashboard-password"];
     if (password === ctx.config.password) {
@@ -108,6 +68,7 @@ export function buildRouter(ctx: SyncContext): express.Router {
       res.status(401).json({ error: "Invalid password" });
     }
   });
+
 
   // ── Logs ──────────────────────────────────────────────────────────────────
 

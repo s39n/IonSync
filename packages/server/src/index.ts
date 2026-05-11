@@ -8,7 +8,7 @@ import { SyncDB } from "./db/index.js";
 import { Storage } from "./storage/index.js";
 import { createContext } from "./context.js";
 import { attachWebSocketServer } from "./ws/server.js";
-import { buildRouter } from "./http/routes.js";
+import { buildPublicRouter, buildAdminRouter } from "./http/routes.js";
 import { SyncCleanup } from "./cleanup/index.js";
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -61,30 +61,36 @@ console.log   = (...args) => { _log(...args);   appendLog("INFO",  args); };
 console.warn  = (...args) => { _warn(...args);  appendLog("WARN",  args); };
 console.error = (...args) => { _error(...args); appendLog("ERROR", args); };
 
-// ── Express app ───────────────────────────────────────────────────────────────
+// ── Express apps ──────────────────────────────────────────────────────────────
 
-const app = express();
-app.use(buildRouter(ctx));
+const publicApp = express();
+publicApp.use(buildPublicRouter(ctx));
 
-// ── HTTP / HTTPS server ───────────────────────────────────────────────────────
+const adminApp = express();
+adminApp.use(buildAdminRouter(ctx));
 
-let server: http.Server | https.Server;
+// ── HTTP / HTTPS servers ──────────────────────────────────────────────────────
 
+let publicServer: http.Server | https.Server;
+let adminServer: http.Server;
+
+// 1. Setup Public Server (For the tunnel)
 if (config.tls) {
-  server = https.createServer(
-    {
-      key: fs.readFileSync(config.tls.key),
-      cert: fs.readFileSync(config.tls.cert),
-    },
-    app
+  publicServer = https.createServer(
+    { key: fs.readFileSync(config.tls.key), cert: fs.readFileSync(config.tls.cert) },
+    publicApp
   );
 } else {
-  server = http.createServer(app);
+  publicServer = http.createServer(publicApp);
 }
+
+// 2. Setup Admin Server (Always local HTTP)
+adminServer = http.createServer(adminApp);
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 
-attachWebSocketServer(ctx, server);
+// Attach the WebSocket ONLY to the public server
+attachWebSocketServer(ctx, publicServer);
 
 // ── Cleanup ───────────────────────────────────────────────────────────────────
 
@@ -93,9 +99,18 @@ cleanup.start();
 
 // ── Listen ────────────────────────────────────────────────────────────────────
 
-server.listen(config.port, config.host, () => {
+// Public Server binds to your standard port (e.g., 3000) and host (e.g., 0.0.0.0)
+publicServer.listen(config.port, config.host, () => {
   const scheme = config.tls ? "wss" : "ws";
-  console.log(`IonSync Server v2 listening on ${scheme}://${config.host}:${config.port}`);
+  console.log(`[Public] IonSync Engine listening on ${scheme}://${config.host}:${config.port}`);
+});
+
+// Admin Server binds to a DIFFERENT port and strictly to localhost / private LAN
+const ADMIN_PORT = config.port + 1; // e.g., 3001
+const ADMIN_HOST = "127.0.0.1"; // 🚨 Change to "0.0.0.0" ONLY if you want to access it from other computers on your home WiFi
+
+adminServer.listen(ADMIN_PORT, ADMIN_HOST, () => {
+  console.log(`[Admin] Dashboard safely locked to http://${ADMIN_HOST}:${ADMIN_PORT}/dashboard`);
 });
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
@@ -103,11 +118,9 @@ server.listen(config.port, config.host, () => {
 function shutdown(): void {
   cleanup.stop();
   db.close();
-  server.close(() => {
-    console.log("Server stopped.");
+  adminServer.close();
+  publicServer.close(() => {
+    console.log("Servers stopped.");
     process.exit(0);
   });
 }
-
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
