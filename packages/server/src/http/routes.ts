@@ -135,28 +135,17 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
 
   router.get("/api/files", (req, res) => {
     if (!checkAuth(req, res)) return;
-    const filesBase = path.resolve(ctx.config.appDir, ctx.config.dataDir, "files");
-
-    const walk = (dir: string): Array<{ path: string; size: number; mtime: string }> => {
-      if (!fs.existsSync(dir)) return [];
-      const entries: Array<{ path: string; size: number; mtime: string }> = [];
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          entries.push(...walk(full));
-        } else {
-          const stat = fs.statSync(full);
-          entries.push({
-            path: full.replace(filesBase + path.sep, "").replace(/\\/g, "/"),
-            size: stat.size,
-            mtime: stat.mtime.toISOString(),
-          });
-        }
-      }
-      return entries;
-    };
-
-    res.json(walk(filesBase));
+    // Source paths from the DB — the old filesystem walk returned storage-layout
+    // paths (e.g. "notes/foo.md/v_1234567890") which broke preview and delete.
+    const files = ctx.db.getAllFiles()
+      .filter(f => f.action === "active" && f.fileType === "file")
+      .map(f => ({
+        path: f.path,
+        size: ctx.storage.getSizeLatest(f.path) ?? 0,
+        mtime: f.mtime,
+        action: f.action,
+      }));
+    res.json(files);
   });
 
   // ── Read latest version of a file (for dashboard preview) ────────────────
@@ -185,22 +174,24 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   router.delete("/api/delete-file/*", (req, res) => {
     if (!checkAuth(req, res)) return;
 
-    const relativePath = decodeURIComponent((req.params as Record<string, string>)["0"] ?? "");
-    const filesBase = path.resolve(ctx.config.appDir, ctx.config.dataDir, "files");
-    const full = path.resolve(filesBase, relativePath);
-    const rel = path.normalize(path.relative(filesBase, full));
+    const filePath = decodeURIComponent((req.params as Record<string, string>)["0"] ?? "").trim();
+    if (!filePath) { res.status(400).json({ error: "Invalid path" }); return; }
 
-    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    // Reject path traversal
+    const normalized = path.normalize(filePath);
+    if (normalized.startsWith("..") || path.isAbsolute(normalized)) {
       res.status(400).json({ error: "Invalid path" });
       return;
     }
 
-    if (fs.existsSync(full)) {
-      fs.unlinkSync(full);
-      res.json({ ok: true });
-    } else {
-      res.status(404).json({ error: "File not found" });
-    }
+    const existing = ctx.db.getFile(filePath);
+    if (!existing) { res.status(404).json({ error: "File not found" }); return; }
+
+    // Mark deleted in DB and remove all stored version files from disk
+    ctx.db.upsertFile({ ...existing, action: "deleted", mtime: Date.now() });
+    ctx.storage.deleteAllVersions(filePath);
+
+    res.json({ ok: true });
   });
 
   // ── Snapshot export ────────────────────────────────────────────────────────
