@@ -172,6 +172,22 @@ export class SyncDB {
       .map((r) => r.path);
   }
 
+  /**
+   * Returns one version entry per active file — the newest version whose mtime
+   * is <= asOfMs.  Used by the snapshot-export endpoint to reconstruct the
+   * vault as it existed at a specific point in time.
+   */
+  getSnapshotFiles(asOfMs: number): Array<{ path: string; mtime: number }> {
+    return this.db
+      .prepare<[number], { path: string; mtime: number }>(
+        `SELECT path, MAX(mtime) AS mtime
+         FROM file_versions
+         WHERE mtime <= ?
+         GROUP BY path`
+      )
+      .all(asOfMs);
+  }
+
   close(): void {
     this.db.close();
   }

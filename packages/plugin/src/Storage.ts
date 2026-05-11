@@ -93,6 +93,24 @@ export class Storage {
     this.requestSave();
   }
 
+  /**
+   * Bumps every stored file's mtime to now so that on the next sync the server
+   * sees them all as client-newer and requests a fresh upload.  Used when E2EE
+   * is toggled on so the server receives encrypted copies of every file.
+   */
+  async bumpAllMtimesForReEncrypt(): Promise<void> {
+    const now = Date.now();
+    for (const key of Object.keys(this.metadata)) {
+      const entry = this.metadata[key];
+      if (entry && entry.action === "active" && entry.fileType === "file") {
+        this.metadata[key] = { ...entry, mtime: now };
+      }
+    }
+    // Also clear the computed tree so computeTree() recomputes everything fresh
+    this.tree = {};
+    await this.saveMetadata();
+  }
+
   async flushMetadata(): Promise<void> {
     if (this.saveTimeout) { clearTimeout(this.saveTimeout); this.saveTimeout = null; }
     await this.saveMetadata();
@@ -245,16 +263,17 @@ export class Storage {
     const text = Buffer.from(content, "base64").toString("utf-8");
     await this.fsVault.write(path, text, entry.mtime);
     await this.writeMetadata(entry);
-    await this.writeShadow(path, text); 
+    await this.writeShadow(path, text);
   }
 
   async writeBinary(path: string, content: string, entry: FileEntry): Promise<void> {
-    await this.ensureParentDir(path); // ✅ Call the guard before writing
+    await this.ensureParentDir(path);
 
     const buf = Buffer.from(content, "base64");
     await this.fsVault.writeBinary(path, buf.buffer, entry.mtime);
     await this.writeMetadata(entry);
-}
+  }
+
   async makeFolder(path: string, entry: FileEntry): Promise<void> {
     await this.fsVault.makeFolder(path);
     await this.writeMetadata(entry);

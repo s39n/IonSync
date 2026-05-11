@@ -649,6 +649,21 @@ export class XSync {
     });
   }
 
+  /**
+   * Called when the user enables E2EE in settings.
+   * Bumps all local file mtimes so the server treats every file as client-newer
+   * and requests a fresh upload — this time encrypted.
+   */
+  async triggerReEncrypt(): Promise<void> {
+    await this.storage.bumpAllMtimesForReEncrypt();
+    // Invalidate the derived key cache so the new password is picked up
+    this._e2eeKey = null;
+    this._e2eeKeyPassword = "";
+    if (this.ws.isConnected) {
+      void this.sync();
+    }
+  }
+
   async listVersionHistory(path: string): Promise<any> {
     this.ws.send({ type: "file_history", path });
     return this._waitForResponse("file_history_response");

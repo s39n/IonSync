@@ -170,9 +170,15 @@ export class IonSyncSettingsTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(this.plugin.settings.encryptionEnabled)
           .onChange(async (v) => {
+            const wasDisabled = !this.plugin.settings.encryptionEnabled;
             this.plugin.settings.encryptionEnabled = v;
             await this.plugin.saveSettings();
             this.display();
+            // When E2EE is turned on, re-upload every file so the server ends
+            // up with a fully-encrypted vault rather than a mixed one.
+            if (v && wasDisabled && this.plugin.xSync) {
+              void this.plugin.xSync.triggerReEncrypt();
+            }
           })
       );
 
