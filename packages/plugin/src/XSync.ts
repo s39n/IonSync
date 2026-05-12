@@ -650,17 +650,68 @@ export class XSync {
   }
 
   /**
-   * Called when the user enables E2EE in settings.
-   * Bumps all local file mtimes so the server treats every file as client-newer
-   * and requests a fresh upload — this time encrypted.
+   * Directly re-uploads every active file with E2EE encryption, bypassing the
+   * sync protocol's pendingUploads / sync_done machinery.
+   *
+   * Why bypass sync? The server sends all file_event_result messages at once.
+   * If the WS drops mid-upload, the new session resets pendingUploads and the
+   * remaining files are silently skipped.  Here the CLIENT drives the queue
+   * sequentially so a disconnect shows progress and can be resumed.
    */
+  private _reEncrypting = false;
+
   async triggerReEncrypt(): Promise<void> {
-    await this.storage.bumpAllMtimesForReEncrypt();
-    // Invalidate the derived key cache so the new password is picked up
+    if (this._reEncrypting) return;
+    if (!this.ws.isConnected) {
+      this.xNotify.showNotification(STATUS_WARN, "Re-encrypt: connect to server first");
+      return;
+    }
+
+    this._reEncrypting = true;
     this._e2eeKey = null;
     this._e2eeKeyPassword = "";
-    if (this.ws.isConnected) {
-      void this.sync();
+
+    try {
+      await this.storage.bumpAllMtimesForReEncrypt();
+      await this.storage.computeTree();
+
+      const paths = Object.entries(this.storage.tree)
+        .filter(([, e]) => e.fileType === "file" && e.action === "active")
+        .map(([p]) => p);
+
+      if (paths.length === 0) {
+        this.xNotify.showNotification("#4caf50", "Re-encrypt: vault is empty");
+        return;
+      }
+
+      this.plugin.log(`[ReEncrypt] Starting — ${paths.length} files to re-upload`);
+      this.xNotify.notifyStatus(NotifyType.SYNCING);
+
+      let done = 0;
+      for (const path of paths) {
+        if (!this.ws.isConnected) {
+          this.xNotify.showNotification(STATUS_WARN,
+            `Re-encrypt paused — disconnected after ${done}/${paths.length} files. Press button again to resume.`);
+          return;
+        }
+        try {
+          await this._uploadFile(path);
+          done++;
+          if (done % 25 === 0 || done === paths.length) {
+            this.plugin.log(`[ReEncrypt] ${done}/${paths.length} files done`);
+          }
+        } catch (e) {
+          this.plugin.log(`[ReEncrypt] Error on ${path}: ${e}`);
+        }
+      }
+
+      await this.storage.flushMetadata();
+      this.plugin.log(`[ReEncrypt] Complete — ${done}/${paths.length} files re-encrypted`);
+      this.xNotify.showNotification("#4caf50", `Re-encryption complete (${done}/${paths.length} files)`);
+      this.xNotify.notifyStatus(NotifyType.CONNECTED);
+    } finally {
+      this._reEncrypting = false;
+      this.storage.tree = {};
     }
   }
 
@@ -669,9 +720,23 @@ export class XSync {
     return this._waitForResponse("file_history_response");
   }
 
-  async downloadVersion(path: string): Promise<any> {
-    this.ws.send({ type: "file_data", mode: "send", path });
+  async downloadVersion(path: string, mtime?: number): Promise<any> {
+    this.ws.send({ type: "file_data", mode: "send", path, ...(mtime !== undefined ? { mtime } : {}) });
     return this._waitForResponse("file_data_response");
+  }
+
+  /** Derive and return the current E2EE decryption key, or null if E2EE is off. */
+  async getE2eeKey(): Promise<CryptoKey | null> {
+    return this._getEncryptionKey();
+  }
+
+  /**
+   * Push a local file to the server immediately, bypassing the debounce timer.
+   * Used after a version restore so peers receive the restored content right away
+   * rather than waiting for the next sync cycle.
+   */
+  async pushFile(path: string): Promise<void> {
+    await this._sendFileEvent({ path } as TAbstractFile, true);
   }
 
   addActivity(direction: "up" | "down" | "delete", path: string): void {

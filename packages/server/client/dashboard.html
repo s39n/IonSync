@@ -276,6 +276,31 @@
       max-height: 460px; overflow-y: auto;
     }
 
+    /* ── Version history list inside preview modal ──────────────────────────── */
+    #version-list { display: flex; flex-direction: column; gap: 0; }
+    .version-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 14px; border-bottom: 1px solid var(--border);
+      transition: background .08s; cursor: pointer;
+    }
+    .version-row:last-child { border-bottom: none; }
+    .version-row:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+    .version-row.current { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+    .version-num { font-size: 11px; color: var(--muted); font-family: var(--mono); width: 28px; flex-shrink: 0; text-align: right; }
+    .version-date { flex: 1; font-size: 13px; }
+    .version-sha { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+    .version-size { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .version-badge { font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 10px;
+      background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); white-space: nowrap; }
+    #preview-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); background: var(--bg3); flex-shrink: 0; }
+    .preview-tab {
+      padding: 9px 16px; font-size: 12px; font-weight: 500; cursor: pointer;
+      border: none; background: none; color: var(--muted); font-family: inherit;
+      border-bottom: 2px solid transparent; transition: color .12s, border-color .12s;
+    }
+    .preview-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .preview-tab:hover:not(.active) { color: var(--text); }
+
     /* ── File tree explorer ─────────────────────────────────────────────────── */
     #file-tree-root { font-size: 13px; }
     .tree-row {
@@ -323,6 +348,14 @@
     </style>
 </head>
 <body>
+
+<!-- ── Insecure-context warning (auto-hidden in localhost/HTTPS) ────────────── -->
+<div id="crypto-warning" style="display:none;background:#7c3aed;color:#fff;padding:10px 18px;font-size:13px;text-align:center;position:sticky;top:0;z-index:9999">
+  ⚠️ <strong>Web Crypto unavailable</strong> — E2EE decryption and snapshot export require a secure context.
+  Open this dashboard at <code style="background:rgba(255,255,255,.15);padding:2px 6px;border-radius:4px">http://localhost:PORT/dashboard</code> or over HTTPS.
+  <button onclick="document.getElementById('crypto-warning').style.display='none'" style="margin-left:12px;background:rgba(255,255,255,.2);border:none;color:#fff;padding:3px 10px;border-radius:4px;cursor:pointer">Dismiss</button>
+</div>
+<script>if (!window.crypto?.subtle) document.getElementById('crypto-warning').style.display = '';</script>
 
 <!-- ── Login ───────────────────────────────────────────────────────────────── -->
 <div id="login">
@@ -477,8 +510,15 @@
       <span id="preview-title">—</span>
       <button id="preview-close" title="Close">✕</button>
     </div>
+    <div id="preview-tabs" style="display:none">
+      <button class="preview-tab active" data-tab="content" onclick="switchPreviewTab('content')">Preview</button>
+      <button class="preview-tab" data-tab="history" onclick="switchPreviewTab('history')">History</button>
+    </div>
     <div id="preview-body">
       <!-- Rendered by openPreview() -->
+    </div>
+    <div id="history-body" style="display:none;overflow-y:auto;flex:1">
+      <!-- Rendered by loadVersionHistory() -->
     </div>
   </div>
 </div>
@@ -761,6 +801,7 @@ function renderTreeNode(node, depth) {
       `<span class="tree-meta">${escHtml(fmtDate(f.mtime))}</span>` +
       `<div class="tree-actions">` +
       `<button class="btn" onclick="openPreview('${escHtml(f.path)}')">Preview</button>` +
+      `<button class="btn" onclick="openHistory('${escHtml(f.path)}')">History</button>` +
       `<button class="btn danger" onclick="deleteFile('${escHtml(f.path)}',this)">Delete</button>` +
       `</div>` +
       `</div>`;
@@ -915,8 +956,15 @@ async function openPreview(filePath) {
   previewCurrentPath = filePath;
   previewIsEncrypted = false;
   previewCurrentB64 = '';
+  previewActiveTab = 'content';
 
   document.getElementById('preview-title').textContent = filePath;
+  document.getElementById('preview-tabs').style.display = '';
+  document.querySelectorAll('.preview-tab').forEach(el => {
+    el.classList.toggle('active', el.dataset.tab === 'content');
+  });
+  document.getElementById('preview-body').style.display = '';
+  document.getElementById('history-body').style.display = 'none';
   document.getElementById('preview-body').innerHTML =
     '<div style="text-align:center;padding:30px"><span class="spinner"></span></div>';
   document.getElementById('preview-overlay').classList.add('open');
@@ -979,6 +1027,10 @@ async function decryptPreview() {
   const pw = document.getElementById('e2ee-pw').value;
   const errEl = document.getElementById('e2ee-err');
   const btn = document.getElementById('e2ee-btn');
+  if (!crypto?.subtle) {
+    errEl.textContent = 'Web Crypto unavailable — open the dashboard via http://localhost:PORT or over HTTPS. Non-localhost plain HTTP blocks browser crypto.';
+    return;
+  }
   if (!pw) { errEl.textContent = 'Enter a password.'; return; }
 
   btn.disabled = true;
@@ -1041,6 +1093,9 @@ async function decryptPreview() {
 
 function closePreview() {
   document.getElementById('preview-overlay').classList.remove('open');
+  document.getElementById('preview-tabs').style.display = 'none';
+  document.getElementById('history-body').style.display = 'none';
+  document.getElementById('preview-body').style.display = '';
   previewCurrentB64 = '';
 }
 
@@ -1071,6 +1126,10 @@ function loadScript(src) {
 async function exportSnapshot(event) {
   const dateInput = document.getElementById('snapshot-date').value;
   if (!dateInput) { toast('Pick a snapshot date first', 'error'); return; }
+  if (!crypto?.subtle) {
+    toast('Web Crypto unavailable — open the dashboard via http://localhost:PORT or HTTPS to use encryption features.', 'error');
+    return;
+  }
 
   const btn = event.currentTarget;
   const origText = btn.textContent;
@@ -1154,6 +1213,110 @@ async function exportSnapshot(event) {
 
   btn.disabled = false;
   btn.textContent = origText;
+}
+
+// ── Version history ────────────────────────────────────────────────────────
+
+let previewActiveTab = 'content'; // 'content' | 'history'
+
+function switchPreviewTab(tab) {
+  previewActiveTab = tab;
+  document.querySelectorAll('.preview-tab').forEach(el => {
+    el.classList.toggle('active', el.dataset.tab === tab);
+  });
+  document.getElementById('preview-body').style.display = tab === 'content' ? '' : 'none';
+  document.getElementById('history-body').style.display = tab === 'history' ? '' : 'none';
+}
+
+// Open the preview modal directly on the History tab
+async function openHistory(filePath) {
+  previewCurrentPath = filePath;
+  previewIsEncrypted = false;
+  previewCurrentB64 = '';
+  previewActiveTab = 'history';
+
+  document.getElementById('preview-title').textContent = filePath;
+  document.getElementById('preview-tabs').style.display = '';
+  document.querySelectorAll('.preview-tab').forEach(el => {
+    el.classList.toggle('active', el.dataset.tab === 'history');
+  });
+  document.getElementById('preview-body').style.display = 'none';
+  document.getElementById('history-body').style.display = '';
+  document.getElementById('history-body').innerHTML =
+    '<div style="text-align:center;padding:30px"><span class="spinner"></span></div>';
+  document.getElementById('preview-overlay').classList.add('open');
+
+  await loadVersionHistory(filePath);
+}
+
+async function loadVersionHistory(filePath) {
+  const el = document.getElementById('history-body');
+  try {
+    const r = await api('/api/file-versions?path=' + encodeURIComponent(filePath));
+    const data = await r.json();
+    const versions = data.versions || [];
+
+    if (!versions.length) {
+      el.innerHTML = '<div class="empty" style="padding:32px">No version history found</div>';
+      return;
+    }
+
+    const rows = versions.map((v, i) => {
+      const isLatest = i === 0;
+      const sha = v.sha1 ? v.sha1.substring(0, 8) : '—';
+      return `<div class="version-row${isLatest ? ' current' : ''}" onclick="previewVersion('${escHtml(filePath)}', ${v.mtime})">
+        <span class="version-num">#${versions.length - i}</span>
+        <span class="version-date">
+          <span style="font-weight:500">${escHtml(fmtDate(v.mtime))}</span>
+          ${isLatest ? '<span class="version-badge" style="margin-left:8px">latest</span>' : ''}
+          <span style="display:block;font-size:11px;color:var(--muted);margin-top:1px">received ${escHtml(fmtDate(v.receivedAt))}</span>
+        </span>
+        <span class="version-sha" title="${escHtml(v.sha1 || '')}">${escHtml(sha)}…</span>
+        <span class="version-size">${fmtSize(v.size)}</span>
+        <button class="btn" style="font-size:11px;padding:3px 9px" onclick="event.stopPropagation();previewVersion('${escHtml(filePath)}', ${v.mtime})">View</button>
+      </div>`;
+    }).join('');
+
+    el.innerHTML = `<div id="version-list">${rows}</div>`;
+  } catch (e) {
+    el.innerHTML = `<p style="color:var(--red);padding:20px">Failed to load versions: ${escHtml(e.message)}</p>`;
+  }
+}
+
+// Preview a specific historical version (switches to the content tab)
+async function previewVersion(filePath, mtime) {
+  previewCurrentPath = filePath;
+  previewIsEncrypted = false;
+  previewCurrentB64 = '';
+
+  // Switch to content tab to show the file
+  previewActiveTab = 'content';
+  document.querySelectorAll('.preview-tab').forEach(el => {
+    el.classList.toggle('active', el.dataset.tab === 'content');
+  });
+  document.getElementById('preview-body').style.display = '';
+  document.getElementById('history-body').style.display = 'none';
+
+  const ts = new Date(mtime).toLocaleString();
+  document.getElementById('preview-title').textContent = `${filePath}  ·  ${ts}`;
+  document.getElementById('preview-body').innerHTML =
+    '<div style="text-align:center;padding:30px"><span class="spinner"></span></div>';
+
+  try {
+    const r = await api('/api/file-content?path=' + encodeURIComponent(filePath) + '&mtime=' + mtime);
+    const data = await r.json();
+    previewCurrentB64 = data.content;
+    previewIsEncrypted = data.encrypted;
+
+    if (previewIsEncrypted) {
+      renderE2eeUnlock();
+    } else {
+      renderPlainPreview(previewCurrentB64);
+    }
+  } catch (e) {
+    document.getElementById('preview-body').innerHTML =
+      `<p style="color:var(--red)">Failed to load version: ${escHtml(e.message)}</p>`;
+  }
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────

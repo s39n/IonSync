@@ -249,7 +249,9 @@ Versioned file content on disk. Layout: `<dataDir>/files/<vault-path>/v_<mtime>`
 - `GET /api/devices` — all registered devices with last_online timestamp.
 - `GET /api/peers` — currently connected WS peers.
 - `POST /api/action/:action/:peerId` — `disconnect` or `sync` a specific peer.
-- `GET /api/files` — lists all files in the DB (path, sha1, mtime, action).
+- `GET /api/files` — lists all active files in the DB (path, size, mtime, action). Folders and deleted entries are excluded.
+- `GET /api/file-versions?path=<encoded>` — returns `{ versions: Array<{ sha1, mtime, receivedAt, size }> }` newest-first for a file. Used by the dashboard history tab.
+- `GET /api/file-content?path=<encoded>[&mtime=<ms>]` — returns `{ content: base64, encrypted: boolean, mtime, size }`. Omit `mtime` for latest; pass it to fetch a specific stored version.
 - `DELETE /api/delete-file/*` — marks a file deleted in DB and removes storage versions.
 
 Dashboard auth uses a derived token: `SHA-256(password + "-dashboard")` stored as a cookie.
@@ -307,6 +309,11 @@ The core sync engine.
 - If `autoSync` is off or disconnected, events accumulate in `unsentSessionEvents` and are flushed at the start of the next `sync()` call.
 
 **One-shot response listeners** (`responseListeners` array): used to await `file_history_response` and `file_data_response` from async callers (modal dialogs). Each listener is a predicate; returning `true` removes it from the list.
+
+**Public helpers for modals:**
+- `listVersionHistory(path)` — sends `file_history` and resolves with the response.
+- `downloadVersion(path, mtime?)` — sends `file_data mode:"send"` with optional mtime; resolves with `file_data_response`. Omit mtime for latest.
+- `getE2eeKey()` — returns the cached/derived `CryptoKey` for the current encryption password, or `null` if E2EE is off. Exposed so modal code can decrypt content without accessing private state.
 
 **Wake lock:** acquired during sync on mobile to prevent the screen from sleeping mid-transfer.
 
@@ -397,8 +404,11 @@ Server → Peers:  { type: "file_push", file: FileEntry, content: "<base64>" }  
 
 ```
 Client → Server: { type: "file_data", mode: "send", path: "notes/foo.md" }
+             or: { type: "file_data", mode: "send", path: "notes/foo.md", mtime: 1700000000000 }
 Server → Client: { type: "file_data_response", file: FileEntry, content: "<base64>" }
 ```
+
+`mtime` is optional. When omitted the server returns the latest stored version. When provided the server calls `storage.readVersion(path, mtime)` to return that specific historical version. Used by `VersionHistoryModal` to preview and restore individual versions.
 
 ### File history
 
@@ -433,6 +443,12 @@ Last-write-wins by **client mtime** (millisecond epoch). `compareFiles(client, s
 **esbuild `alias` for `@ionsync/protocol`** points directly at `packages/protocol/src/index.ts`. This means protocol changes are picked up immediately on the next dev build without running `tsc` in the protocol package first. The server still needs the protocol compiled (`npx tsc` in `packages/protocol`) when running tests with `tsx`.
 
 **File content is always base64** on the wire, for both text and binary files. The plugin encodes with `Buffer.from(text).toString("base64")` and decodes with `Buffer.from(content, "base64").toString("utf-8")`. Binary files skip the UTF-8 step and go straight to `ArrayBuffer`.
+
+**Version restore pushes to peers immediately.** `VersionHistoryModal` restores a file by writing it to the vault via `vault.adapter.write()`, then calls `xSync.pushFile(path)` to upload and broadcast to all connected peers right away. `pushFile` is a public wrapper around `_sendFileEvent` with `forceChanged: true`, bypassing the mtime-equality short-circuit that would otherwise skip unchanged files.
+
+**`VersionHistoryModal` preview is text-only.** `_fetchVersionText` decodes content as UTF-8. Binary files (images, PDFs, audio) will display as garbled text or an empty string — there is currently no binary preview in the modal. If adding binary support, check the file extension before decoding and display a placeholder instead.
+
+**Do not use `color-mix()` in `styles.css`.** Obsidian's Electron version does not support it — the rule silently fails and elements render unstyled. Use standard Obsidian CSS variables (`--background-secondary-alt`, `--background-modifier-hover`, `--background-modifier-border`, etc.) for all tinting and hover states.
 
 ---
 

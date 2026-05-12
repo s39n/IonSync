@@ -69,11 +69,13 @@ export interface FileDataUploadMsg {
   content: string;
 }
 
-/** Client requesting a file from the server (server_newer case). */
+/** Client requesting a file from the server (server_newer case, or version restore). */
 export interface FileDataRequestMsg {
   type: "file_data";
   mode: "send";
   path: string;
+  /** Optional: request a specific stored version by its mtime. Omit for latest. */
+  mtime?: number;
 }
 
 export interface FileHistoryRequestMsg {

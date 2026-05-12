@@ -213,6 +213,28 @@ export class IonSyncSettingsTab extends PluginSettingTab {
         "you will permanently lose access to all encrypted files stored on the server. " +
         "Store it in a password manager before enabling."
       );
+
+      new Setting(containerEl)
+        .setName("Re-encrypt all files")
+        .setDesc(
+          "Force every file to be re-uploaded as encrypted. Use this if some files " +
+          "were synced before E2EE was enabled and are still stored in plaintext on the server."
+        )
+        .addButton((btn) => {
+          btn.setButtonText("Re-encrypt all files now")
+            .setCta()
+            .onClick(async () => {
+              if (!this.plugin.xSync) return;
+              btn.setButtonText("Re-encrypting…");
+              btn.setDisabled(true);
+              await this.plugin.xSync.triggerReEncrypt();
+              btn.setButtonText("Done — syncing now");
+              setTimeout(() => {
+                btn.setButtonText("Re-encrypt all files now");
+                btn.setDisabled(false);
+              }, 4000);
+            });
+        });
     }
 
     // ── Exclusion list ──────────────────────────────────────────────────────

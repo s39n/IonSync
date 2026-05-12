@@ -190,8 +190,11 @@ export class Storage {
           const txt = await this.fsVault.read(file.path);
           sha1 = txt != null ? await Utils.getSHA(txt) : null;
         }
-        
-        this.tree[file.path] = { path: file.path, sha1: sha1 ?? "", mtime, action: "active", fileType: "file" };
+
+        // If metadata was bumped for re-encryption (stored.mtime > filesystem mtime),
+        // honour the bumped mtime so the server sees this file as client_newer.
+        const effectiveMtime = stored && stored.mtime > mtime ? stored.mtime : mtime;
+        this.tree[file.path] = { path: file.path, sha1: sha1 ?? "", mtime: effectiveMtime, action: "active", fileType: "file" };
       }
     }
 
@@ -226,7 +229,8 @@ export class Storage {
 
         const txt = await this.fsVault.read(path);
         const sha1 = txt != null ? await Utils.getSHA(txt) : "";
-        this.tree[path] = { path, sha1: sha1 ?? "", mtime, action: "active", fileType: "file" };
+        const effectiveMtime = stored && stored.mtime > mtime ? stored.mtime : mtime;
+        this.tree[path] = { path, sha1: sha1 ?? "", mtime: effectiveMtime, action: "active", fileType: "file" };
       } catch {
         // File doesn't exist, just skip
       }

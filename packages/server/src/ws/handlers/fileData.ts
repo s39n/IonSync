@@ -94,7 +94,9 @@ export function handleFileDownload(
 
   let content = "";
   if (file.action === "active" && file.fileType === "file") {
-    const buf = ctx.storage.readLatest(file.path);
+    const buf = msg.mtime !== undefined
+      ? ctx.storage.readVersion(file.path, msg.mtime)
+      : ctx.storage.readLatest(file.path);
     content = buf ? buf.toString("base64") : "";
   }
 

@@ -148,8 +148,23 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     res.json(files);
   });
 
-  // ── Read latest version of a file (for dashboard preview) ────────────────
-  // Returns { content: base64, encrypted: boolean }.
+  // ── List all stored versions of a file ───────────────────────────────────
+  // Returns { versions: Array<{ sha1, mtime, receivedAt, size }> } newest-first.
+  router.get("/api/file-versions", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const filePath = decodeURIComponent(String(req.query.path ?? "")).trim();
+    if (!filePath) { res.status(400).json({ error: "Missing path" }); return; }
+
+    const versions = ctx.db.getVersions(filePath).map(v => ({
+      ...v,
+      size: ctx.storage.getSizeVersion(filePath, v.mtime) ?? 0,
+    }));
+    res.json({ versions });
+  });
+
+  // ── Read a specific (or latest) version of a file ────────────────────────
+  // Returns { content: base64, encrypted: boolean, mtime: number }.
+  // Pass ?mtime=<epoch-ms> to fetch a specific version; omit for latest.
   // "content" is the raw stored bytes encoded as base64 — if the file was
   // uploaded with E2EE enabled the bytes begin with the IONENCv1 magic and
   // must be decrypted client-side in the browser using the user's passphrase.
@@ -158,7 +173,21 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     const filePath = decodeURIComponent(String(req.query.path ?? "")).trim();
     if (!filePath) { res.status(400).json({ error: "Missing path" }); return; }
 
-    const buf = ctx.storage.readLatest(filePath);
+    const mtimeParam = String(req.query.mtime ?? "").trim();
+    let buf: Buffer | null;
+    let resolvedMtime: number | undefined;
+
+    if (mtimeParam) {
+      const mtime = parseInt(mtimeParam, 10);
+      if (isNaN(mtime)) { res.status(400).json({ error: "Invalid mtime" }); return; }
+      buf = ctx.storage.readVersion(filePath, mtime);
+      resolvedMtime = mtime;
+    } else {
+      buf = ctx.storage.readLatest(filePath);
+      const versions = ctx.db.getVersions(filePath);
+      resolvedMtime = versions[0]?.mtime;
+    }
+
     if (!buf) { res.status(404).json({ error: "File not found" }); return; }
 
     // Detect E2EE magic ("IONENCv1") so the dashboard can show the lock icon
@@ -166,7 +195,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     const E2EE_MAGIC = Buffer.from([0x49, 0x4f, 0x4e, 0x45, 0x4e, 0x43, 0x76, 0x31]);
     const encrypted = buf.length >= E2EE_MAGIC.length && buf.slice(0, E2EE_MAGIC.length).equals(E2EE_MAGIC);
 
-    res.json({ content: buf.toString("base64"), encrypted, size: buf.length });
+    res.json({ content: buf.toString("base64"), encrypted, size: buf.length, mtime: resolvedMtime });
   });
 
   // ── Delete a file from server storage ─────────────────────────────────────
