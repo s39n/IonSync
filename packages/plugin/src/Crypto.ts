@@ -5,7 +5,7 @@
  * Wire format for encrypted content:
  *   base64( MAGIC[8] + IV[12] + AES-GCM-ciphertext[N] )
  *
- *   MAGIC = ASCII "IONENCv1"  →  0x49 0x4F 0x4E 0x45 0x4E 0x43 0x76 0x31
+ *   MAGIC = ASCII "IONENCv1"  ->  0x49 0x4F 0x4E 0x45 0x4E 0x43 0x76 0x31
  *   IV    = 12 random bytes, generated fresh for every encryption
  *
  * The MAGIC prefix lets any component (plugin, dashboard, server) detect
@@ -15,7 +15,7 @@
  *
  * Key derivation:
  *   PBKDF2-SHA256, 100 000 iterations, fixed application-level salt.
- *   A fixed salt is intentional — all devices must derive the same AES key
+ *   A fixed salt is intentional -- all devices must derive the same AES key
  *   from the same user password in order to decrypt each other's files.
  *
  * SHA1 field:
@@ -40,12 +40,12 @@ export const E2EE_BASE64_PREFIX = "SU9ORU5D";
 const IV_BYTES = 12;
 const PBKDF2_ITERATIONS = 100_000;
 
-// Fixed application-level salt — provides domain separation so the derived
-// key can't be confused with keys for other apps, without requiring per-vault
+// Fixed application-level salt -- provides domain separation so the derived
+// key cannot be confused with keys for other apps, without requiring per-vault
 // state that would break cross-device sync.
 const PBKDF2_SALT = new TextEncoder().encode("IonSync-AES-GCM-v1-salt");
 
-// ── Key derivation ──────────────────────────────────────────────────────────
+// Key derivation
 
 /** Derives an AES-256-GCM CryptoKey from an encryption password using PBKDF2. */
 export async function deriveKey(password: string): Promise<CryptoKey> {
@@ -70,7 +70,7 @@ export async function deriveKey(password: string): Promise<CryptoKey> {
   );
 }
 
-// ── Encrypt ─────────────────────────────────────────────────────────────────
+// Encrypt
 
 /**
  * Encrypts raw plaintext bytes.
@@ -94,32 +94,42 @@ export async function encryptToBase64(
   out.set(iv, E2EE_MAGIC.length);
   out.set(new Uint8Array(ciphertext), E2EE_MAGIC.length + IV_BYTES);
 
-  return Buffer.from(out).toString("base64");
+  // Use btoa (native WebAPI) -- Buffer is not available on Android WebView.
+  let binary = "";
+  for (let i = 0; i < out.length; i++) binary += String.fromCharCode(out[i]!);
+  return btoa(binary);
 }
 
-// ── Detect ──────────────────────────────────────────────────────────────────
+// Detect
 
 /**
  * Returns true when a base64 content string carries an E2EE-encrypted blob.
- * Uses a fast string prefix check — no decoding required.
+ * Uses a fast string prefix check -- no decoding required.
  */
 export function isEncryptedBase64(content: string): boolean {
   return content.startsWith(E2EE_BASE64_PREFIX);
 }
 
-// ── Decrypt ─────────────────────────────────────────────────────────────────
+// Decrypt
 
 /**
  * Decrypts a base64 string produced by encryptToBase64.
  * Throws DOMException if the key is wrong or the data has been tampered with
  * (AES-GCM authentication tag mismatch).
+ *
+ * Uses atob (native WebAPI) instead of Buffer.from(..., "base64") so behaviour
+ * is identical on desktop Electron, iOS WebKit, and Android WebView.
+ * The Buffer polyfill on Obsidian mobile produces typed-array views whose
+ * backing-ArrayBuffer layout confuses WebCrypto on both iOS and Android.
  */
 export async function decryptFromBase64(
   key: CryptoKey,
   content: string
 ): Promise<ArrayBuffer> {
-  const buf = Buffer.from(content, "base64");
-  const iv = buf.slice(E2EE_MAGIC.length, E2EE_MAGIC.length + IV_BYTES);
-  const ciphertext = buf.slice(E2EE_MAGIC.length + IV_BYTES);
+  const binary = atob(content);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const iv = bytes.slice(E2EE_MAGIC.length, E2EE_MAGIC.length + IV_BYTES);
+  const ciphertext = bytes.slice(E2EE_MAGIC.length + IV_BYTES);
   return crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
 }

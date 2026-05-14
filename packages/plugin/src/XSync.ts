@@ -186,13 +186,13 @@ export class XSync {
       if (isBinary) {
         const buf = await this.storage.readBinary(ev.file.path);
         if (buf) {
-          content = Buffer.from(buf).toString("base64");
+          content = Utils.toBase64(new Uint8Array(buf));
           sha1 = await Utils.getSHABinary(buf);
         }
       } else {
         const txt = await this.storage.read(ev.file.path);
         if (txt !== null) {
-          content = Buffer.from(txt).toString("base64");
+          content = Utils.toBase64(txt);
           sha1 = await Utils.getSHA(txt);
         }
       }
@@ -266,7 +266,7 @@ export class XSync {
       try {
         const plainBytes = await decryptFromBase64(key, content);
         // Re-encode as plain base64 so the existing write path handles it normally.
-        content = Buffer.from(new Uint8Array(plainBytes)).toString("base64");
+        content = Utils.toBase64(new Uint8Array(plainBytes));
       } catch (e) {
         console.error(`[IonSync] E2EE: decryption failed for ${file.path} — wrong password or corrupted data:`, e);
         this.xNotify.showNotification(STATUS_WARN, `E2EE decrypt failed: ${file.path}`);
@@ -300,6 +300,13 @@ export class XSync {
       }
 
       if (file.action === "deleted") {
+        // Never recursively trash an entire folder — trashFile() on a TFolder
+        // removes all of its contents in one call, causing mass data loss if a
+        // folder entry is accidentally or spuriously marked deleted on the server.
+        // Individual file deletions propagate correctly; folder-level deletes are
+        // simply ignored and the folder will disappear naturally once all files
+        // inside it are deleted.
+        if (file.fileType === "folder") return;
         await this.storage.delete(file.path, file);
         this.addActivity("delete", file.path);
       } else if (file.fileType === "folder") {
@@ -308,9 +315,29 @@ export class XSync {
       } else {
         if (localStat && localStat.type === "folder") return;
 
-        if (Utils.isBinary(file.path)) await this.storage.writeBinary(file.path, content, file);
-        else await this.storage.write(file.path, content, file);
-        
+        // Retry once on write failure (Android FILE_NOTCREATED can be transient
+        // if the mkdir races with the write on a slow filesystem).
+        let writeErr: unknown;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            console.log(`[IonSync] Applying file ${file.path}, attempt ${attempt + 1}`);
+            if (Utils.isBinary(file.path)) await this.storage.writeBinary(file.path, content, file);
+            else await this.storage.write(file.path, content, file);
+            writeErr = null;
+            break;
+          } catch (e) {
+            console.warn(`[IonSync] Failed write for ${file.path} on attempt ${attempt + 1}:`, e);
+            writeErr = e;
+            // On first failure ensure parent dirs exist then retry.
+            if (attempt === 0) {
+              const parent = file.path.split("/").slice(0, -1).join("/");
+              if (parent) await this.storage.makeFolder(parent, { ...file, fileType: "folder", action: "active" });
+              await new Promise(r => setTimeout(r, 80));
+            }
+          }
+        }
+        if (writeErr) throw writeErr;
+
         this.addActivity("down", file.path);
         this.syncDownCount++;
       }
@@ -411,7 +438,7 @@ export class XSync {
           liveSha1 = (await Utils.getSHABinary(buf)) ?? "";
           content = e2eeKey
             ? await encryptToBase64(e2eeKey, buf)
-            : Buffer.from(new Uint8Array(buf)).toString("base64");
+            : Utils.toBase64(new Uint8Array(buf));
         }
       } else {
         const currentText = await this.storage.read(path);
@@ -420,7 +447,7 @@ export class XSync {
 
           if (e2eeKey) {
             // E2EE: always send full ciphertext — patches are meaningless on ciphertext
-            content = await encryptToBase64(e2eeKey, Buffer.from(currentText));
+            content = await encryptToBase64(e2eeKey, new TextEncoder().encode(currentText));
           } else {
             // Delta sync: send a patch when it's smaller than the full file
             const shadowText = await this.storage.readShadow(path);
@@ -435,10 +462,10 @@ export class XSync {
                 content = patchText;
                 this.plugin.log(`[Delta] Sending patch for ${path}`);
               } else {
-                content = Buffer.from(currentText).toString("base64");
+                content = Utils.toBase64(currentText);
               }
             } else {
-              content = Buffer.from(currentText).toString("base64");
+              content = Utils.toBase64(currentText);
             }
             await this.storage.writeShadow(path, currentText);
           }
@@ -530,7 +557,7 @@ export class XSync {
         sha1 = await Utils.getSHABinary(buf);
         content = e2eeKey
           ? await encryptToBase64(e2eeKey, buf)
-          : Buffer.from(buf).toString("base64");
+          : Utils.toBase64(new Uint8Array(buf));
       }
     } else {
       const currentText = await this.storage.read(file.path);
@@ -539,7 +566,7 @@ export class XSync {
 
         if (e2eeKey) {
           // E2EE: full ciphertext only — no delta patching on encrypted data
-          content = await encryptToBase64(e2eeKey, Buffer.from(currentText));
+          content = await encryptToBase64(e2eeKey, new TextEncoder().encode(currentText));
         } else {
           const shadowText = await this.storage.readShadow(file.path);
           if (shadowText !== null && shadowText !== currentText) {
@@ -553,10 +580,10 @@ export class XSync {
               content = patchText;
               this.plugin.log(`[Delta] Sending patch for ${file.path}`);
             } else {
-              content = Buffer.from(currentText).toString("base64");
+              content = Utils.toBase64(currentText);
             }
           } else {
-            content = Buffer.from(currentText).toString("base64");
+            content = Utils.toBase64(currentText);
           }
           await this.storage.writeShadow(file.path, currentText);
         }

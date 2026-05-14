@@ -188,6 +188,21 @@ export class SyncDB {
       .all(asOfMs);
   }
 
+  // Factory reset
+
+  /**
+   * Wipes all data from the database: file versions, file metadata, and
+   * device records. The schema itself is preserved so the server can
+   * continue operating immediately after a reset.
+   */
+  resetAll(): void {
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM file_versions").run();
+      this.db.prepare("DELETE FROM files").run();
+      this.db.prepare("DELETE FROM devices").run();
+    })();
+  }
+
   close(): void {
     this.db.close();
   }

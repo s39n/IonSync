@@ -58,14 +58,35 @@ class Utils {
     return bufToHex(new Uint8Array(digest));
   }
 
-  /** Returns a debounced version of `func` with the given delay (ms) */
-  debounce<T extends (...args: unknown[]) => void>(func: T, delay: number): T {
-    let timeout: ReturnType<typeof setTimeout> | null = null;
-    return ((...args: unknown[]) => {
-      if (timeout) clearTimeout(timeout);
-      timeout = setTimeout(() => func(...args), delay);
-    }) as T;
+  /** Converts a Uint8Array or string to a base64 string */
+  toBase64(data: Uint8Array | string): string {
+    if (typeof data === "string") {
+      return btoa(unescape(encodeURIComponent(data)));
+    }
+    let binary = "";
+    for (let i = 0; i < data.byteLength; i++) {
+      binary += String.fromCharCode(data[i]!);
+    }
+    return btoa(binary);
   }
+
+  /** Converts a base64 string to a Uint8Array */
+  fromBase64(base64: string): Uint8Array {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  /** Returns a debounced version of fn that fires after delay ms of silence. */
+  debounce<T extends unknown[]>(fn: (...args: T) => void, delay: number): (...args: T) => void {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    return (...args: T) => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { timer = null; fn(...args); }, delay);
+    };
+  }
+
 }
 
 export default new Utils();

@@ -223,6 +223,25 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     res.json({ ok: true });
   });
 
+  // ── Factory reset ─────────────────────────────────────────────────────────
+
+  router.post("/api/reset", (req, res) => {
+    if (!checkAuth(req, res)) return;
+
+    // Disconnect all connected peers so they re-sync cleanly from scratch
+    for (const peer of ctx.peers.values()) {
+      peer.disconnect("Server reset");
+    }
+
+    // Wipe DB (files, file_versions, devices)
+    ctx.db.resetAll();
+
+    // Wipe all stored file content from disk
+    ctx.storage.deleteAllFiles();
+
+    res.json({ ok: true });
+  });
+
   // ── Snapshot export ────────────────────────────────────────────────────────
   // Returns JSON: { files: Array<{ path, mtime, encrypted, content: base64 }> }
   // The browser builds the final ZIP (via JSZip) and decrypts E2EE entries

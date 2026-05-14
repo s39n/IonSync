@@ -33,8 +33,12 @@ export class Storage {
 
   /** Converts a vault path to a safe, flat hex filename for shadow storage */
   private _getShadowPath(vaultPath: string): string {
-    const safeName = Buffer.from(vaultPath).toString("hex");
-    return `data/shadow/${safeName}.md`;
+    const encoder = new TextEncoder();
+    const data = encoder.encode(vaultPath);
+    const hex = Array.from(data)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    return `data/shadow/${hex}.md`;
   }
 
   async readShadow(vaultPath: string): Promise<string | null> {
@@ -137,7 +141,7 @@ export class Storage {
 
   async updatePlugin(files: { name: string; content: string }[]): Promise<void> {
     for (const f of files) {
-      const data = Buffer.from(f.content, "base64").toString("utf-8");
+      const data = atob(f.content);
       await this.fsInternal.write("../" + f.name, data);
     }
   }
@@ -239,20 +243,19 @@ export class Storage {
 
   // ── Vault I/O ─────────────────────────────────────────────────────────────
 
-  // ✅ New Bulletproof Guard: Recursively creates parent folders if they are missing
+  // Recursively creates parent folders if they are missing.
   private async ensureParentDir(filePath: string): Promise<void> {
     const parts = filePath.split("/");
-    parts.pop(); // Remove the file name to get just the directory path
+    parts.pop(); // strip filename, keep only the directory components
     let current = "";
-    
     for (const part of parts) {
       current = current ? `${current}/${part}` : part;
-      if (!(await this.app.vault.adapter.exists(current))) {
-        try {
-          await this.app.vault.adapter.mkdir(current);
-        } catch (e) {
-          // Safely ignore: Another concurrent WebSocket file push might have just created it a millisecond ago
-        }
+      // vault.getAbstractFileByPath checks Obsidian's in-memory vault index
+      // (always accurate on Android).  vault.createFolder goes through
+      // Obsidian's vault layer which handles Android storage correctly, unlike
+      // vault.adapter.mkdir which silently fails in some Android environments.
+      if (!this.app.vault.getAbstractFileByPath(current)) {
+        try { await this.app.vault.createFolder(current); } catch { /* already exists */ }
       }
     }
   }
@@ -264,7 +267,7 @@ export class Storage {
   async write(path: string, content: string, entry: FileEntry): Promise<void> {
     await this.ensureParentDir(path); // ✅ Call the guard before writing
 
-    const text = Buffer.from(content, "base64").toString("utf-8");
+    const text = atob(content);
     await this.fsVault.write(path, text, entry.mtime);
     await this.writeMetadata(entry);
     await this.writeShadow(path, text);
@@ -273,19 +276,23 @@ export class Storage {
   async writeBinary(path: string, content: string, entry: FileEntry): Promise<void> {
     await this.ensureParentDir(path);
 
-    const buf = Buffer.from(content, "base64");
-    await this.fsVault.writeBinary(path, buf.buffer, entry.mtime);
-    await this.writeMetadata(entry);
-  }
-
-  async makeFolder(path: string, entry: FileEntry): Promise<void> {
-    await this.fsVault.makeFolder(path);
+    const binaryString = atob(content);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    
+    await this.fsVault.writeBinary(path, bytes.buffer, entry.mtime);
     await this.writeMetadata(entry);
   }
 
   async delete(path: string, entry: FileEntry): Promise<void> {
     await this.fsVault.delete(path);
-    entry.action = "deleted";
+    await this.deleteMetadata(path);
+  }
+
+  async makeFolder(path: string, entry: FileEntry): Promise<void> {
+    await this.fsVault.makeFolder(path);
     await this.writeMetadata(entry);
   }
 }

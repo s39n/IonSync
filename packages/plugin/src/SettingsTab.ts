@@ -198,6 +198,10 @@ export class IonSyncSettingsTab extends PluginSettingTab {
               await this.plugin.saveSettings();
             });
           t.inputEl.setAttribute("type", "password");
+          t.inputEl.setAttribute("autocomplete", "new-password");
+          t.inputEl.setAttribute("autocorrect", "off");
+          t.inputEl.setAttribute("autocapitalize", "none");
+          t.inputEl.setAttribute("spellcheck", "false");
           t.inputEl.style.width = "260px";
           return t;
         });

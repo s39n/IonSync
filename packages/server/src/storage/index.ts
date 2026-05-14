@@ -116,4 +116,16 @@ export class Storage {
     for (const mtime of toDelete) this.deleteVersion(filePath, mtime);
     return toDelete;
   }
+
+  /**
+   * Wipes all stored file content (factory reset).
+   * Removes the entire base directory and recreates it empty so the server
+   * can continue operating immediately after a reset.
+   */
+  deleteAllFiles(): void {
+    if (fs.existsSync(this.base)) {
+      fs.rmSync(this.base, { recursive: true, force: true });
+    }
+    fs.mkdirSync(this.base, { recursive: true });
+  }
 }

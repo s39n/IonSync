@@ -391,6 +391,8 @@
       <button class="nav-btn" data-panel="files"><span class="icon">📁</span> Files</button>
       <div class="nav-section">Debug</div>
       <button class="nav-btn" data-panel="logs"><span class="icon">📋</span> Logs</button>
+      <div class="nav-section">Admin</div>
+      <button class="nav-btn" data-panel="danger"><span class="icon">⚠️</span> Danger Zone</button>
     </nav>
 
     <main>
@@ -497,6 +499,24 @@
           <button class="btn" onclick="loadLogs()">Refresh</button>
         </div>
         <div id="log-output"></div>
+      </div>
+
+      <!-- ── Danger Zone ── -->
+      <div class="panel" id="panel-danger">
+        <h2>Danger Zone</h2>
+        <div class="card" style="border-color:var(--red)">
+          <div class="card-header" style="background:var(--bg3)">
+            <h3 style="color:var(--red)">Factory Reset</h3>
+          </div>
+          <div style="padding:16px 20px">
+            <p style="margin:0 0 8px;font-size:13px">
+              Permanently deletes <strong>all synced files, version history, and device records</strong>
+              from the server. Connected plugins will be disconnected and must re-sync from scratch.
+            </p>
+            <p style="margin:0 0 16px;font-size:12px;color:var(--muted)">This cannot be undone.</p>
+            <button class="btn danger" id="reset-btn" onclick="resetServer(this)">Reset Server</button>
+          </div>
+        </div>
       </div>
 
     </main>
@@ -633,6 +653,40 @@ async function loadLogs() {
   const r = await api('/api/logs');
   const text = await r.text();
   renderLogs(text);
+}
+
+// ── Factory reset ──────────────────────────────────────────────────────────
+async function resetServer(btn) {
+  // Two-step confirmation: first click arms the button, second fires.
+  if (!btn.dataset.armed) {
+    btn.dataset.armed = '1';
+    btn.textContent = '⚠️ Click again to confirm reset';
+    btn.style.opacity = '1';
+    // Disarm automatically after 5 s if the user doesn't follow through
+    setTimeout(() => {
+      if (btn.dataset.armed) {
+        delete btn.dataset.armed;
+        btn.textContent = 'Reset Server';
+        btn.style.opacity = '';
+      }
+    }, 5000);
+    return;
+  }
+
+  delete btn.dataset.armed;
+  btn.disabled = true;
+  btn.textContent = 'Resetting…';
+  try {
+    await api('/api/reset', { method: 'POST' });
+    toast('Server reset — all data wiped. Plugins will re-sync on next connect.', 'success');
+    // Reload dashboard state so counts show zero
+    await Promise.all([loadOverview(), loadPeers(), loadDevices()]);
+    if (document.getElementById('panel-files').classList.contains('active')) await loadFiles();
+  } catch (e) {
+    toast(`Reset failed: ${e.message}`, 'error');
+  }
+  btn.disabled = false;
+  btn.textContent = 'Reset Server';
 }
 
 // ── Peer actions ───────────────────────────────────────────────────────────
