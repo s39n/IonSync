@@ -20,7 +20,8 @@ export class XNotify {
   private statusBarItem: HTMLElement | null = null;
   private statusBarIcon: HTMLElement | null = null;
   private statusBarMsg: HTMLElement | null = null;
-  
+  private _currentStatusLabel = "";
+
   private mobileIndicator: HTMLElement | null = null;
   private mobileIcon: HTMLElement | null = null;
   private mobileBadge: HTMLElement | null = null;
@@ -48,6 +49,7 @@ export class XNotify {
     this.statusBarIcon.style.cssText = `padding-right:4px;color:${STATUS_ERROR};`;
     this.statusBarIcon.innerHTML = this.xSync.plugin.getSVGIcon();
     this.statusBarMsg = wrap.createEl("span");
+    this.statusBarMsg.style.display = "none";
 
     el.onClickEvent((evt) => this.showMenu(evt));
 
@@ -77,7 +79,7 @@ export class XNotify {
     const autoSync = plugin.settings.autoSync;
 
     menu.addItem((i) =>
-      i.setTitle(`Status: ${this.lastNoticeType ?? (connected ? "Connected" : "Disconnected")}`).setIcon("info").setDisabled(true)
+      i.setTitle(`Status: ${this._currentStatusLabel || (connected ? "Connected" : "Disconnected")}`).setIcon("info").setDisabled(true)
     );
     menu.addSeparator();
     menu.addItem((i) =>
@@ -122,16 +124,19 @@ export class XNotify {
 
   setStatusMessage(text: string, keep = false, duration = 2_000): void {
     if (!this.statusBarMsg) return;
+    this._currentStatusLabel = text;
     this.statusBarMsg.innerText = text;
+    if (this.statusBarItem) this.statusBarItem.setAttr("title", `IonSync — ${text}`);
     if (this.msgTimeout !== null) { clearTimeout(this.msgTimeout); this.msgTimeout = null; }
     if (!keep) {
       this.msgTimeout = setTimeout(() => {
         this.msgTimeout = null;
-        if (this.statusBarMsg) {
-          this.statusBarMsg.innerText = this._pendingCount > 0
-            ? `${this._pendingCount} remaining`
-            : (this.xSync.ws.isConnected ? "Connected" : "");
-        }
+        const fallback = this._pendingCount > 0
+          ? `${this._pendingCount} remaining`
+          : (this.xSync.ws.isConnected ? "Connected" : "Disconnected");
+        this._currentStatusLabel = fallback;
+        if (this.statusBarMsg) this.statusBarMsg.innerText = fallback;
+        if (this.statusBarItem) this.statusBarItem.setAttr("title", `IonSync — ${fallback}`);
       }, duration);
     }
   }
@@ -151,7 +156,10 @@ export class XNotify {
 
     // 2. Update Desktop Status Bar Text
     if (this.xSync.isSyncing || !this.statusBarMsg || this.msgTimeout !== null) return;
-    this.statusBarMsg.innerText = count > 0 ? `${count} remaining` : (this.xSync.ws.isConnected ? "Connected" : "");
+    const label = count > 0 ? `${count} remaining` : (this.xSync.ws.isConnected ? "Connected" : "Disconnected");
+    this._currentStatusLabel = label;
+    this.statusBarMsg.innerText = label;
+    if (this.statusBarItem) this.statusBarItem.setAttr("title", `IonSync — ${label}`);
   }
 
   updateSyncProgress(detail: string): void {

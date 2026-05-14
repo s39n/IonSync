@@ -680,8 +680,7 @@ async function resetServer(btn) {
     await api('/api/reset', { method: 'POST' });
     toast('Server reset — all data wiped. Plugins will re-sync on next connect.', 'success');
     // Reload dashboard state so counts show zero
-    await Promise.all([loadOverview(), loadPeers(), loadDevices()]);
-    if (document.getElementById('panel-files').classList.contains('active')) await loadFiles();
+    await Promise.all([loadPeers(), loadDevices(), loadFiles()]);
   } catch (e) {
     toast(`Reset failed: ${e.message}`, 'error');
   }
