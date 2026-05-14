@@ -164,9 +164,11 @@ export class XNotify {
 
   updateSyncProgress(detail: string): void {
     if (!this.statusBarMsg) return;
+    const text = `${NotifyType.SYNCING} ${detail}`;
+    this._currentStatusLabel = text;
     if (this.msgTimeout !== null) { clearTimeout(this.msgTimeout); this.msgTimeout = null; }
-    this.statusBarMsg.innerText = `${NotifyType.SYNCING} ${detail}`;
-    
+    this.statusBarMsg.innerText = text;
+    if (this.statusBarItem) this.statusBarItem.setAttr("title", `IonSync — ${text}`);
     if (this.mobileIndicator) this.mobileIndicator.addClass("syncing");
   }
 

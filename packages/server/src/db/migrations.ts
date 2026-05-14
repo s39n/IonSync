@@ -44,6 +44,18 @@ export const MIGRATIONS: Array<{ version: number; up: (db: Database.Database) =>
       `);
     },
   },
+  {
+    version: 2,
+    up(db) {
+      // Key-value store used by server features (e.g. TOTP secret).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS settings (
+          key   TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

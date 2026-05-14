@@ -267,7 +267,7 @@ export class Storage {
   async write(path: string, content: string, entry: FileEntry): Promise<void> {
     await this.ensureParentDir(path); // ✅ Call the guard before writing
 
-    const text = atob(content);
+    const text = new TextDecoder("utf-8").decode(Utils.fromBase64(content));
     await this.fsVault.write(path, text, entry.mtime);
     await this.writeMetadata(entry);
     await this.writeShadow(path, text);

@@ -38,6 +38,7 @@ export class XSync {
 
   private syncUpCount = 0;
   private syncDownCount = 0;
+  private syncApplyCount = 0;
 
   private configCheckInterval: number | null = null;
   private wakeLock: WakeLockSentinel | null = null;
@@ -326,6 +327,14 @@ export class XSync {
       } else {
         if (localStat && localStat.type === "folder") return;
 
+        // Show applying-file progress in the status bar.
+        this.syncApplyCount++;
+        // Throttle to every 5th file to avoid excessive repaints on large syncs.
+        if (this.syncApplyCount === 1 || this.syncApplyCount % 5 === 0) {
+          const name = file.path.split("/").pop() ?? file.path;
+          this.xNotify.updateSyncProgress(`↓ ${name}`);
+        }
+
         // Retry once on write failure (Android FILE_NOTCREATED can be transient
         // if the mkdir races with the write on a slow filesystem).
         let writeErr: unknown;
@@ -382,6 +391,7 @@ export class XSync {
     this.isSyncing = true;
     this.syncUpCount = 0;
     this.syncDownCount = 0;
+    this.syncApplyCount = 0;
 
     try {
       for (const [, ev] of Object.entries(this.unsentSessionEvents)) {
@@ -422,6 +432,7 @@ export class XSync {
     this.xNotify.setSyncSummary(this.syncUpCount, this.syncDownCount);
     this.syncUpCount = 0;
     this.syncDownCount = 0;
+    this.syncApplyCount = 0;
     this.storage.tree = {};
     await this.storage.flushMetadata();
   }

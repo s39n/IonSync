@@ -203,6 +203,29 @@ export class SyncDB {
     })();
   }
 
+
+  // ─── Settings (key-value store) ─────────────────────────────────────────
+
+  getSetting(key: string): string | null {
+    const row = this.db
+      .prepare<[string], { value: string }>("SELECT value FROM settings WHERE key = ?")
+      .get(key);
+    return row?.value ?? null;
+  }
+
+  setSetting(key: string, value: string): void {
+    this.db
+      .prepare<[string, string]>(
+        `INSERT INTO settings (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+      )
+      .run(key, value);
+  }
+
+  deleteSetting(key: string): void {
+    this.db.prepare<[string]>("DELETE FROM settings WHERE key = ?").run(key);
+  }
+
   close(): void {
     this.db.close();
   }

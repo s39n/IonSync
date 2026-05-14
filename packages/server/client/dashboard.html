@@ -60,6 +60,16 @@
     }
     .login-card input[type=password]:focus { border-color: var(--accent); }
     .login-error { color: var(--red); font-size: 12px; margin-top: 8px; min-height: 18px; }
+    .login-card .totp-step-title { font-size: 13px; color: var(--muted); margin-bottom: 20px; }
+    .login-card input[type=text] {
+      width: 100%; padding: 9px 12px; border-radius: var(--radius);
+      border: 1px solid var(--border); background: var(--bg3); color: var(--text);
+      font-size: 22px; letter-spacing: 6px; text-align: center; font-family: var(--mono);
+    }
+    .login-card input[type=text]:focus { border-color: var(--accent); outline: none; }
+    .btn-back { background: none; border: none; color: var(--muted); font-size: 12px;
+      cursor: pointer; margin-top: 10px; width: 100%; text-align: center; padding: 4px; }
+    .btn-back:hover { color: var(--text); }
 
     #app { display: none; height: 100vh; flex-direction: column; }
     #app.visible { display: flex; }
@@ -346,6 +356,7 @@
     input[type="date"].date-input:focus { border-color: var(--accent); }
     .export-group { display: flex; align-items: center; gap: 8px; margin-left: auto; }
     </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
 <body>
 
@@ -361,11 +372,25 @@
 <div id="login">
   <div class="login-card">
     <h1 style="display:flex;align-items:center;gap:9px"><svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1.5" fill="var(--accent)" stroke="none"></circle><ellipse cx="12" cy="12" rx="10" ry="3.5"></ellipse><ellipse cx="12" cy="12" rx="10" ry="3.5" transform="rotate(60 12 12)"></ellipse><ellipse cx="12" cy="12" rx="10" ry="3.5" transform="rotate(120 12 12)"></ellipse></svg>Ion<span style="color:var(--accent)">Sync</span></h1>
-    <p>Enter your server password to access the dashboard.</p>
-    <label for="pw-input">Password</label>
-    <input id="pw-input" type="password" placeholder="••••••••••" autocomplete="current-password">
-    <div class="login-error" id="login-error"></div>
-    <button class="btn primary" id="login-btn" style="width:100%;margin-top:20px;padding:10px">Sign in</button>
+
+    <!-- Step 1: Password -->
+    <div id="login-pw-step">
+      <p>Enter your server password to access the dashboard.</p>
+      <label for="pw-input">Password</label>
+      <input id="pw-input" type="password" placeholder="••••••••••" autocomplete="current-password">
+      <div class="login-error" id="login-error"></div>
+      <button class="btn primary" id="login-btn" style="width:100%;margin-top:20px;padding:10px">Sign in</button>
+    </div>
+
+    <!-- Step 2: TOTP code (shown only when 2FA is enabled) -->
+    <div id="login-totp-step" style="display:none">
+      <p class="totp-step-title">Enter the 6-digit code from your authenticator app.</p>
+      <label for="totp-login-input">Authenticator Code</label>
+      <input id="totp-login-input" type="text" inputmode="numeric" maxlength="6" placeholder="000000" autocomplete="one-time-code">
+      <div class="login-error" id="totp-login-error"></div>
+      <button class="btn primary" id="totp-login-btn" style="width:100%;margin-top:20px;padding:10px">Verify</button>
+      <button class="btn-back" onclick="backToPassword()">← Back to password</button>
+    </div>
   </div>
 </div>
 
@@ -392,6 +417,7 @@
       <div class="nav-section">Debug</div>
       <button class="nav-btn" data-panel="logs"><span class="icon">📋</span> Logs</button>
       <div class="nav-section">Admin</div>
+      <button class="nav-btn" data-panel="security"><span class="icon">🔒</span> Security</button>
       <button class="nav-btn" data-panel="danger"><span class="icon">⚠️</span> Danger Zone</button>
     </nav>
 
@@ -501,6 +527,17 @@
         <div id="log-output"></div>
       </div>
 
+      <!-- ── Security ── -->
+      <div class="panel" id="panel-security">
+        <h2>Security</h2>
+        <div class="card">
+          <div class="card-header"><h3>Two-Factor Authentication (2FA)</h3></div>
+          <div style="padding:16px 20px" id="totp-mgmt-section">
+            <p style="color:var(--muted);font-size:13px">Loading…</p>
+          </div>
+        </div>
+      </div>
+
       <!-- ── Danger Zone ── -->
       <div class="panel" id="panel-danger">
         <h2>Danger Zone</h2>
@@ -554,6 +591,15 @@ let pollTimer = null;
 let allFiles = [];
 
 // ── Auth ───────────────────────────────────────────────────────────────────
+let _pendingTempToken = null;
+
+function _onLoginSuccess() {
+  S.authed = true;
+  document.getElementById('login').style.display = 'none';
+  document.getElementById('app').classList.add('visible');
+  startPolling();
+}
+
 async function login() {
   const pw = document.getElementById('pw-input').value;
   const err = document.getElementById('login-error');
@@ -567,10 +613,18 @@ async function login() {
   try {
     const r = await fetch('/api/login', { headers: { 'X-Dashboard-Password': pw } });
     if (r.ok) {
-      S.authed = true;
-      document.getElementById('login').style.display = 'none';
-      document.getElementById('app').classList.add('visible');
-      startPolling();
+      const data = await r.json();
+      if (data.requireTotp) {
+        // 2FA is enabled — show the TOTP step
+        _pendingTempToken = data.tempToken;
+        document.getElementById('login-pw-step').style.display = 'none';
+        document.getElementById('login-totp-step').style.display = 'block';
+        document.getElementById('totp-login-input').value = '';
+        document.getElementById('totp-login-error').textContent = '';
+        document.getElementById('totp-login-input').focus();
+      } else {
+        _onLoginSuccess();
+      }
     } else {
       err.textContent = 'Incorrect password.';
     }
@@ -579,6 +633,42 @@ async function login() {
   }
   btn.disabled = false;
   btn.textContent = 'Sign in';
+}
+
+async function submitTotpLogin() {
+  const code = document.getElementById('totp-login-input').value.replace(/\s/g, '');
+  const err = document.getElementById('totp-login-error');
+  const btn = document.getElementById('totp-login-btn');
+  if (!/^\d{6}$/.test(code)) { err.textContent = 'Enter a 6-digit code.'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Verifying…';
+  err.textContent = '';
+
+  try {
+    const r = await fetch('/api/totp/verify-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tempToken: _pendingTempToken, code }),
+    });
+    if (r.ok) {
+      _onLoginSuccess();
+    } else {
+      err.textContent = 'Incorrect code. Try again.';
+    }
+  } catch {
+    err.textContent = 'Could not reach server.';
+  }
+  btn.disabled = false;
+  btn.textContent = 'Verify';
+}
+
+function backToPassword() {
+  _pendingTempToken = null;
+  document.getElementById('login-pw-step').style.display = 'block';
+  document.getElementById('login-totp-step').style.display = 'none';
+  document.getElementById('totp-login-input').value = '';
+  document.getElementById('totp-login-error').textContent = '';
 }
 
 function logout() {
@@ -962,6 +1052,8 @@ function showPanel(name) {
 
   // Load files on demand when switching to files panel
   if (name === 'files' && !allFiles.length) loadFiles();
+  // Load TOTP status on demand when switching to security panel
+  if (name === 'security') loadTotpStatus();
 }
 
 // ── Toast ──────────────────────────────────────────────────────────────────
@@ -974,9 +1066,157 @@ function toast(msg, type = 'success') {
   toastTimer = setTimeout(() => { el.className = ''; }, 2800);
 }
 
+
+// ── Security / TOTP management ─────────────────────────────────────────────
+let _totpSetupSecret = null;
+
+async function loadTotpStatus() {
+  const el = document.getElementById('totp-mgmt-section');
+  if (!el) return;
+  try {
+    const r = await api('/api/totp/status');
+    const { enabled } = await r.json();
+    renderTotpStatus(enabled);
+  } catch {
+    el.innerHTML = '<p style="color:var(--red);font-size:13px">Failed to load 2FA status.</p>';
+  }
+}
+
+function renderTotpStatus(enabled) {
+  const el = document.getElementById('totp-mgmt-section');
+  if (!el) return;
+
+  if (enabled) {
+    el.innerHTML = `
+      <p style="margin:0 0 16px;font-size:13px">
+        <span style="color:var(--green);font-weight:600">● Enabled</span>
+        &nbsp;— Two-factor authentication is active on this dashboard.
+      </p>
+      <div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap">
+        <div>
+          <label style="display:block;font-size:11px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Current Authenticator Code</label>
+          <input id="totp-disable-code" type="text" inputmode="numeric" maxlength="6"
+            placeholder="000000"
+            style="width:140px;padding:8px 12px;border-radius:var(--radius);border:1px solid var(--border);background:var(--bg3);color:var(--text);font-size:16px;letter-spacing:4px;text-align:center;font-family:var(--mono)">
+        </div>
+        <button class="btn danger" onclick="disableTotp()">Disable 2FA</button>
+      </div>
+      <div class="login-error" id="totp-disable-error" style="margin-top:8px"></div>
+    `;
+  } else {
+    el.innerHTML = `
+      <p style="margin:0 0 16px;font-size:13px;color:var(--muted)">
+        Two-factor authentication is not enabled.
+        Add an extra layer of security to your dashboard login.
+      </p>
+      <button class="btn primary" onclick="startTotpSetup()">Enable 2FA…</button>
+      <div id="totp-setup-area" style="display:none;margin-top:24px;padding-top:20px;border-top:1px solid var(--border)"></div>
+    `;
+  }
+}
+
+async function startTotpSetup() {
+  const area = document.getElementById('totp-setup-area');
+  area.style.display = 'block';
+  area.innerHTML = '<p style="color:var(--muted);font-size:13px">Generating secret…</p>';
+  try {
+    const r = await api('/api/totp/generate', { method: 'POST' });
+    const { secret, uri } = await r.json();
+    _totpSetupSecret = secret;
+
+    area.innerHTML = `
+      <p style="font-size:13px;margin-bottom:16px">
+        Scan the QR code with your authenticator app (Google Authenticator, Authy, 1Password, etc.),
+        then enter the 6-digit code below to confirm it works.
+      </p>
+      <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start;margin-bottom:20px">
+        <div>
+          <div id="totp-qr-canvas" style="display:inline-block;padding:12px;background:#fff;border-radius:10px"></div>
+        </div>
+        <div style="flex:1;min-width:200px">
+          <p style="font-size:11px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em;font-weight:500">Manual entry key</p>
+          <code style="font-size:13px;word-break:break-all;background:var(--bg3);padding:8px 10px;border-radius:6px;display:block;letter-spacing:2px">${secret}</code>
+        </div>
+      </div>
+      <div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap">
+        <div>
+          <label style="display:block;font-size:11px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Verification Code</label>
+          <input id="totp-setup-code" type="text" inputmode="numeric" maxlength="6"
+            placeholder="000000"
+            style="width:140px;padding:8px 12px;border-radius:var(--radius);border:1px solid var(--border);background:var(--bg3);color:var(--text);font-size:16px;letter-spacing:4px;text-align:center;font-family:var(--mono)">
+        </div>
+        <button class="btn primary" onclick="enableTotp()">Activate 2FA</button>
+      </div>
+      <div class="login-error" id="totp-setup-error" style="margin-top:8px"></div>
+    `;
+
+    // Render QR code into the canvas div
+    new QRCode(document.getElementById('totp-qr-canvas'), {
+      text: uri,
+      width: 180,
+      height: 180,
+      correctLevel: QRCode.CorrectLevel.M,
+    });
+
+    // Allow Enter to submit
+    document.getElementById('totp-setup-code').addEventListener('keydown', e => {
+      if (e.key === 'Enter') enableTotp();
+    });
+  } catch (e) {
+    area.innerHTML = '<p style="color:var(--red);font-size:13px">Failed to generate secret.</p>';
+  }
+}
+
+async function enableTotp() {
+  const code = (document.getElementById('totp-setup-code').value || '').replace(/\s/g, '');
+  const err = document.getElementById('totp-setup-error');
+  if (!/^\d{6}$/.test(code)) { err.textContent = 'Enter a 6-digit code from your app.'; return; }
+
+  try {
+    const r = await fetch('/api/totp/enable', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret: _totpSetupSecret, code }),
+    });
+    if (r.ok) {
+      toast('2FA enabled — you will need your authenticator on next login.', 'success');
+      loadTotpStatus();
+    } else {
+      const data = await r.json().catch(() => ({}));
+      err.textContent = data.error || 'Incorrect code. Make sure the app is showing the right account.';
+    }
+  } catch {
+    err.textContent = 'Request failed.';
+  }
+}
+
+async function disableTotp() {
+  const code = (document.getElementById('totp-disable-code').value || '').replace(/\s/g, '');
+  const err = document.getElementById('totp-disable-error');
+  if (!/^\d{6}$/.test(code)) { err.textContent = 'Enter a 6-digit code to confirm.'; return; }
+
+  try {
+    const r = await fetch('/api/totp/disable', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    if (r.ok) {
+      toast('2FA disabled.', 'info');
+      loadTotpStatus();
+    } else {
+      err.textContent = 'Incorrect code.';
+    }
+  } catch {
+    err.textContent = 'Request failed.';
+  }
+}
+
 // ── Event wiring ───────────────────────────────────────────────────────────
 document.getElementById('login-btn').addEventListener('click', login);
 document.getElementById('pw-input').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+document.getElementById('totp-login-btn').addEventListener('click', submitTotpLogin);
+document.getElementById('totp-login-input').addEventListener('keydown', e => { if (e.key === 'Enter') submitTotpLogin(); });
 document.getElementById('logout-btn').addEventListener('click', logout);
 document.querySelectorAll('.nav-btn').forEach(btn => {
   btn.addEventListener('click', () => showPanel(btn.dataset.panel));
@@ -1326,65 +1566,4 @@ async function loadVersionHistory(filePath) {
         </span>
         <span class="version-sha" title="${escHtml(v.sha1 || '')}">${escHtml(sha)}…</span>
         <span class="version-size">${fmtSize(v.size)}</span>
-        <button class="btn" style="font-size:11px;padding:3px 9px" onclick="event.stopPropagation();previewVersion('${escHtml(filePath)}', ${v.mtime})">View</button>
-      </div>`;
-    }).join('');
-
-    el.innerHTML = `<div id="version-list">${rows}</div>`;
-  } catch (e) {
-    el.innerHTML = `<p style="color:var(--red);padding:20px">Failed to load versions: ${escHtml(e.message)}</p>`;
-  }
-}
-
-// Preview a specific historical version (switches to the content tab)
-async function previewVersion(filePath, mtime) {
-  previewCurrentPath = filePath;
-  previewIsEncrypted = false;
-  previewCurrentB64 = '';
-
-  // Switch to content tab to show the file
-  previewActiveTab = 'content';
-  document.querySelectorAll('.preview-tab').forEach(el => {
-    el.classList.toggle('active', el.dataset.tab === 'content');
-  });
-  document.getElementById('preview-body').style.display = '';
-  document.getElementById('history-body').style.display = 'none';
-
-  const ts = new Date(mtime).toLocaleString();
-  document.getElementById('preview-title').textContent = `${filePath}  ·  ${ts}`;
-  document.getElementById('preview-body').innerHTML =
-    '<div style="text-align:center;padding:30px"><span class="spinner"></span></div>';
-
-  try {
-    const r = await api('/api/file-content?path=' + encodeURIComponent(filePath) + '&mtime=' + mtime);
-    const data = await r.json();
-    previewCurrentB64 = data.content;
-    previewIsEncrypted = data.encrypted;
-
-    if (previewIsEncrypted) {
-      renderE2eeUnlock();
-    } else {
-      renderPlainPreview(previewCurrentB64);
-    }
-  } catch (e) {
-    document.getElementById('preview-body').innerHTML =
-      `<p style="color:var(--red)">Failed to load version: ${escHtml(e.message)}</p>`;
-  }
-}
-
-// ── Init ───────────────────────────────────────────────────────────────────
-// Restore global E2EE password from sessionStorage
-(function restoreE2eePw() {
-  const saved = sessionStorage.getItem('e2ee-pw');
-  if (saved) {
-    const el = document.getElementById('global-e2ee-pw');
-    if (el) el.value = saved;
-  }
-  // Default snapshot date to today
-  const dateEl = document.getElementById('snapshot-date');
-  if (dateEl) dateEl.value = new Date().toISOString().slice(0, 10);
-})();
-
-</script>
-</body>
-</html>
+        <button class="btn" style="font-size:11px;padding:3px 9px" onclick="event.stopPropagation();previewVersion('${escHtml(fi

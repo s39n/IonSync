@@ -5,6 +5,7 @@ import type { SyncContext } from "../context.js";
 import { sha256 } from "../crypto.js";
 import { diff_match_patch } from "diff-match-patch";
 import type { BackgroundSyncReq } from "@ionsync/protocol";
+import { verifyTOTP, generateSecret, totpUri, createPendingToken, consumePendingToken } from "../totp.js";
 
 // ── 1. PUBLIC ROUTER (Exposed to the Tunnel) ────────────────────────────────
 
@@ -17,6 +18,7 @@ export function buildPublicRouter(ctx: SyncContext): express.Router {
     // ... (Keep all your exact background sync logic here) ...
     res.status(200).json({ ok: true });
   });
+
 
   return router;
 }
@@ -55,18 +57,52 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     }
   });
 
-  // Login
+  // Login — step 1: password
+  // If TOTP is enabled, returns { requireTotp: true, tempToken } instead of
+  // setting the session cookie immediately. The client then posts the
+  // 6-digit code to /api/totp/verify-login to complete authentication.
   router.get("/api/login", (req, res) => {
     const password = req.headers["x-dashboard-password"];
-    if (password === ctx.config.password) {
+    if (password !== ctx.config.password) {
+      res.status(401).json({ error: "Invalid password" });
+      return;
+    }
+    const totpSecret = ctx.db.getSetting("totp_secret");
+    if (totpSecret) {
+      // TOTP is configured — issue a short-lived bridge token
+      const tempToken = createPendingToken();
+      res.status(200).json({ requireTotp: true, tempToken });
+    } else {
+      // No TOTP — grant session immediately
       const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toUTCString();
       res
         .setHeader("Set-Cookie", `dash_token=${DASH_TOKEN}; Path=/; Expires=${expires}; HttpOnly`)
         .status(200)
         .json({ ok: true });
-    } else {
-      res.status(401).json({ error: "Invalid password" });
     }
+  });
+
+  // Login — step 2: TOTP verification
+  router.post("/api/totp/verify-login", express.json(), (req, res) => {
+    const { tempToken, code } = req.body as { tempToken?: string; code?: string };
+    if (!tempToken || !code) { res.status(400).json({ error: "Missing fields" }); return; }
+
+    if (!consumePendingToken(tempToken)) {
+      res.status(401).json({ error: "Token expired or invalid" });
+      return;
+    }
+
+    const totpSecret = ctx.db.getSetting("totp_secret");
+    if (!totpSecret || !verifyTOTP(totpSecret, code)) {
+      res.status(401).json({ error: "Invalid code" });
+      return;
+    }
+
+    const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toUTCString();
+    res
+      .setHeader("Set-Cookie", `dash_token=${DASH_TOKEN}; Path=/; Expires=${expires}; HttpOnly`)
+      .status(200)
+      .json({ ok: true });
   });
 
 
@@ -269,21 +305,120 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   });
 
 
+
+  // ── TOTP management ──────────────────────────────────────────────────────
+
+  // Status — is TOTP configured?
+  router.get("/api/totp/status", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const enabled = ctx.db.getSetting("totp_secret") !== null;
+    res.json({ enabled });
+  });
+
+  // Generate a fresh TOTP secret + URI for the setup QR code.
+  // Does NOT save the secret — the client must call /api/totp/enable once
+  // the user has verified the code works in their authenticator app.
+  router.post("/api/totp/generate", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const secret = generateSecret();
+    const uri = totpUri(secret, "IonSync", "dashboard");
+    res.json({ secret, uri });
+  });
+
+  // Enable TOTP — save secret only after verifying that the supplied code
+  // is correct (prevents locking yourself out with a mis-scanned QR code).
+  router.post("/api/totp/enable", express.json(), (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const { secret, code } = req.body as { secret?: string; code?: string };
+    if (!secret || !code) { res.status(400).json({ error: "Missing fields" }); return; }
+    if (!verifyTOTP(secret, code)) {
+      res.status(401).json({ error: "Code does not match — check your authenticator app" });
+      return;
+    }
+    ctx.db.setSetting("totp_secret", secret);
+    res.json({ ok: true });
+  });
+
+  // Disable TOTP — requires the current TOTP code as confirmation.
+  router.post("/api/totp/disable", express.json(), (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const totpSecret = ctx.db.getSetting("totp_secret");
+    if (!totpSecret) { res.json({ ok: true }); return; } // already disabled
+    const { code } = req.body as { code?: string };
+    if (!code) { res.status(400).json({ error: "Missing code" }); return; }
+    if (!verifyTOTP(totpSecret, code)) {
+      res.status(401).json({ error: "Invalid code" });
+      return;
+    }
+    ctx.db.deleteSetting("totp_secret");
+    res.json({ ok: true });
+  });
+
+
+  // ── TOTP management (authenticated) ─────────────────────────────────────
+
+  // Status — is TOTP configured?
+  router.get("/api/totp/status", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const enabled = ctx.db.getSetting("totp_secret") !== null;
+    res.json({ enabled });
+  });
+
+  // Generate a fresh TOTP secret + URI for the setup QR code.
+  // Does NOT save the secret — the client must call /api/totp/enable once
+  // the user has verified the code works in their authenticator app.
+  router.post("/api/totp/generate", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const secret = generateSecret();
+    const uri = totpUri(secret, "IonSync", "dashboard");
+    res.json({ secret, uri });
+  });
+
+  // Enable TOTP — save secret only after verifying that the supplied code
+  // is correct (prevents locking yourself out with a mis-scanned QR code).
+  router.post("/api/totp/enable", express.json(), (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const { secret, code } = req.body as { secret?: string; code?: string };
+    if (!secret || !code) { res.status(400).json({ error: "Missing fields" }); return; }
+    if (!verifyTOTP(secret, code)) {
+      res.status(401).json({ error: "Code does not match — check your authenticator app" });
+      return;
+    }
+    ctx.db.setSetting("totp_secret", secret);
+    res.json({ ok: true });
+  });
+
+  // Disable TOTP — requires the current TOTP code as confirmation.
+  router.post("/api/totp/disable", express.json(), (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const totpSecret = ctx.db.getSetting("totp_secret");
+    if (!totpSecret) { res.json({ ok: true }); return; } // already disabled
+    const { code } = req.body as { code?: string };
+    if (!code) { res.status(400).json({ error: "Missing code" }); return; }
+    if (!verifyTOTP(totpSecret, code)) {
+      res.status(401).json({ error: "Invalid code" });
+      return;
+    }
+    ctx.db.deleteSetting("totp_secret");
+    res.json({ ok: true });
+  });
+
   return router;
 }
 
-// ── Fallback dashboard HTML ───────────────────────────────────────────────────
-function fallbackDashboard(): string {
-  return `<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><title>IonSync v2</title>
-<style>body{font-family:system-ui,sans-serif;max-width:640px;margin:4rem auto;padding:0 1rem;color:#222}
-h1{font-size:1.4rem}code{background:#f4f4f4;padding:.2em .4em;border-radius:3px}</style>
-</head>
-<body>
-<h1>IonSync Server v2</h1>
-<p>Server is running. The dashboard UI hasn't been built yet.</p>
-<p>Build the plugin package and copy <code>dashboard.html</code> into <code>client/</code>.</p>
-</body>
-</html>`;
+// ── Fallback dashboard HTML ────────────────────────
+
+// ── Combined router (used by tests and the main server) ─────────────────────
+
+/**
+ * Returns a single router that mounts both the public and admin sub-routers.
+ * Tests use this; the production server may mount them separately for
+ * network-level isolation (public vs. localhost-only), but a combined mount
+ * works fine in any single-network environment.
+ */
+export function buildRouter(ctx: SyncContext): express.Router {
+  const router = express.Router();
+  router.use(buildPublicRouter(ctx));
+  router.use(buildAdminRouter(ctx));
+  return router;
 }
