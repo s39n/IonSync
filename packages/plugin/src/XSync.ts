@@ -272,6 +272,17 @@ export class XSync {
         this.xNotify.showNotification(STATUS_WARN, `E2EE decrypt failed: ${file.path}`);
         return;
       }
+    } else if (file.action !== "deleted" && content) {
+      // Reverse guard: this device has E2EE enabled but the incoming content
+      // is plaintext (no magic header). A peer sent this file without encryption,
+      // which means writing it would silently corrupt the vault by mixing
+      // unencrypted content alongside encrypted content.
+      const key = await this._getEncryptionKey();
+      if (key) {
+        console.warn(`[IonSync] E2EE: received unencrypted file from a peer without E2EE — skipping ${file.path}`);
+        this.xNotify.showNotification(STATUS_WARN, "Unencrypted file received — another device has E2EE disabled");
+        return;
+      }
     }
 
     try {
