@@ -1566,4 +1566,65 @@ async function loadVersionHistory(filePath) {
         </span>
         <span class="version-sha" title="${escHtml(v.sha1 || '')}">${escHtml(sha)}…</span>
         <span class="version-size">${fmtSize(v.size)}</span>
-        <button class="btn" style="font-size:11px;padding:3px 9px" onclick="event.stopPropagation();previewVersion('${escHtml(fi
+        <button class="btn" style="font-size:11px;padding:3px 9px" onclick="event.stopPropagation();previewVersion('${escHtml(filePath)}', ${v.mtime})">View</button>
+      </div>`;
+    }).join('');
+
+    el.innerHTML = `<div id="version-list">${rows}</div>`;
+  } catch (e) {
+    el.innerHTML = `<p style="color:var(--red);padding:20px">Failed to load versions: ${escHtml(e.message)}</p>`;
+  }
+}
+
+// Preview a specific historical version (switches to the content tab)
+async function previewVersion(filePath, mtime) {
+  previewCurrentPath = filePath;
+  previewIsEncrypted = false;
+  previewCurrentB64 = '';
+
+  // Switch to content tab to show the file
+  previewActiveTab = 'content';
+  document.querySelectorAll('.preview-tab').forEach(el => {
+    el.classList.toggle('active', el.dataset.tab === 'content');
+  });
+  document.getElementById('preview-body').style.display = '';
+  document.getElementById('history-body').style.display = 'none';
+
+  const ts = new Date(mtime).toLocaleString();
+  document.getElementById('preview-title').textContent = `${filePath}  ·  ${ts}`;
+  document.getElementById('preview-body').innerHTML =
+    '<div style="text-align:center;padding:30px"><span class="spinner"></span></div>';
+
+  try {
+    const r = await api('/api/file-content?path=' + encodeURIComponent(filePath) + '&mtime=' + mtime);
+    const data = await r.json();
+    previewCurrentB64 = data.content;
+    previewIsEncrypted = data.encrypted;
+
+    if (previewIsEncrypted) {
+      renderE2eeUnlock();
+    } else {
+      renderPlainPreview(previewCurrentB64);
+    }
+  } catch (e) {
+    document.getElementById('preview-body').innerHTML =
+      `<p style="color:var(--red)">Failed to load version: ${escHtml(e.message)}</p>`;
+  }
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+// Restore global E2EE password from sessionStorage
+(function restoreE2eePw() {
+  const saved = sessionStorage.getItem('e2ee-pw');
+  if (saved) {
+    const el = document.getElementById('global-e2ee-pw');
+    if (el) el.value = saved;
+  }
+  // Default snapshot date to today
+  const dateEl = document.getElementById('snapshot-date');
+  if (dateEl) dateEl.value = new Date().toISOString().slice(0, 10);
+})();
+
+</script>
+</body>
+</html>
