@@ -252,5 +252,20 @@ export class IonSyncSettingsTab extends PluginSettingTab {
           .onChange(async (v) => { this.plugin.settings.exclusionList = v; await this.plugin.saveSettings(); })
       )
       .settingEl.style.flexDirection = "column";
+
+    // ── Support ─────────────────────────────────────────────────────────────
+    const supportEl = containerEl.createEl("div");
+    supportEl.style.cssText =
+      "margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--background-modifier-border); text-align: center;";
+    const coffeeLink = supportEl.createEl("a", {
+      text: "☕ Buy me a coffee",
+      href: "https://buymeacoffee.com/seanseanric",
+    });
+    coffeeLink.style.cssText =
+      "color: var(--text-accent); font-size: 13px; text-decoration: none;";
+    coffeeLink.setAttribute("target", "_blank");
+    coffeeLink.setAttribute("rel", "noopener");
+    supportEl.createEl("p", { text: "IonSync is free and open source. Tips are appreciated!" })
+      .style.cssText = "margin-top: 6px; font-size: 12px; color: var(--text-muted);";
   }
 }
