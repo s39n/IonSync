@@ -425,6 +425,7 @@
       <button class="nav-btn" data-panel="devices"><span class="icon">💻</span> Devices</button>
       <div class="nav-section">Storage</div>
       <button class="nav-btn" data-panel="files"><span class="icon">📁</span> Files</button>
+      <button class="nav-btn" data-panel="dbmgr"><span class="icon">🗄️</span> Database</button>
       <div class="nav-section">Debug</div>
       <button class="nav-btn" data-panel="logs"><span class="icon">📋</span> Logs</button>
       <div class="nav-section">Admin</div>
@@ -552,6 +553,66 @@
           <div class="card-header"><h3>Two-Factor Authentication (2FA)</h3></div>
           <div style="padding:16px 20px" id="totp-mgmt-section">
             <p style="color:var(--muted);font-size:13px">Loading…</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Database Manager ── -->
+      <div class="panel" id="panel-dbmgr">
+        <h2>Database</h2>
+
+        <!-- Stats row -->
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:20px" id="db-stats-row">
+          <div class="card" style="padding:14px;text-align:center">
+            <div style="font-size:22px;font-weight:700;color:var(--accent)" id="dbs-active">—</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">Active files</div>
+          </div>
+          <div class="card" style="padding:14px;text-align:center">
+            <div style="font-size:22px;font-weight:700;color:var(--red)" id="dbs-deleted">—</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">Deleted files</div>
+          </div>
+          <div class="card" style="padding:14px;text-align:center">
+            <div style="font-size:22px;font-weight:700" id="dbs-versions">—</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">Total versions</div>
+          </div>
+          <div class="card" style="padding:14px;text-align:center">
+            <div style="font-size:22px;font-weight:700" id="dbs-storage">—</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">Storage used</div>
+          </div>
+          <div class="card" style="padding:14px;text-align:center">
+            <div style="font-size:22px;font-weight:700" id="dbs-devices">—</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">Devices</div>
+          </div>
+        </div>
+
+        <!-- File browser -->
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <h3 style="margin:0;flex:1">Files</h3>
+            <div style="display:flex;gap:6px">
+              <button class="btn dbmgr-tab active" data-tab="all" onclick="dbSetTab(this,'all')">All</button>
+              <button class="btn dbmgr-tab" data-tab="active" onclick="dbSetTab(this,'active')">Active</button>
+              <button class="btn dbmgr-tab" data-tab="deleted" onclick="dbSetTab(this,'deleted')">Deleted</button>
+              <button class="btn dbmgr-tab" data-tab="conflicts" onclick="dbSetTab(this,'conflicts')">Conflicts</button>
+            </div>
+            <input id="db-search" type="search" placeholder="Search paths…"
+              style="padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg3);color:var(--text);font-size:12px;width:200px"
+              oninput="dbRenderFiles()">
+            <button class="btn" onclick="dbLoadFiles()" title="Refresh">↻</button>
+          </div>
+          <div id="db-files-body" style="max-height:480px;overflow-y:auto">
+            <div class="empty" style="padding:32px">Click refresh to load files</div>
+          </div>
+        </div>
+
+        <!-- Devices -->
+        <div class="card">
+          <div class="card-header" style="display:flex;align-items:center;gap:10px">
+            <h3 style="margin:0;flex:1">Devices</h3>
+            <button class="btn" onclick="dbLoadDevices()">↻ Refresh</button>
+          </div>
+          <div id="db-devices-body">
+            <div class="empty" style="padding:24px">Click refresh to load devices</div>
           </div>
         </div>
       </div>
@@ -815,6 +876,181 @@ async function loadLogs() {
   const text = await r.text();
   renderLogs(text);
 }
+
+// ── Database Manager ────────────────────────────────────────────────────────
+
+let dbAllFiles = [];       // raw file list from server
+let dbCurrentTab = 'all';  // all | active | deleted | conflicts
+
+async function dbLoadStats() {
+  try {
+    const r = await api('/api/db/stats');
+    const s = await r.json();
+    document.getElementById('dbs-active').textContent   = s.activeFiles.toLocaleString();
+    document.getElementById('dbs-deleted').textContent  = s.deletedFiles.toLocaleString();
+    document.getElementById('dbs-versions').textContent = s.totalVersions.toLocaleString();
+    document.getElementById('dbs-storage').textContent  = fmtSize(s.totalBytes ?? 0);
+    document.getElementById('dbs-devices').textContent  = s.deviceCount.toLocaleString();
+  } catch(e) { /* non-fatal */ }
+}
+
+async function dbLoadFiles() {
+  document.getElementById('db-files-body').innerHTML =
+    '<div style="text-align:center;padding:32px"><span class="spinner"></span></div>';
+  try {
+    const r = await api('/api/db/files?action=all');
+    dbAllFiles = await r.json();
+    dbRenderFiles();
+  } catch(e) {
+    document.getElementById('db-files-body').innerHTML =
+      `<p style="color:var(--red);padding:20px">Failed: ${escHtml(e.message)}</p>`;
+  }
+}
+
+function dbSetTab(btn, tab) {
+  dbCurrentTab = tab;
+  document.querySelectorAll('.dbmgr-tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  dbRenderFiles();
+}
+
+function dbRenderFiles() {
+  const q = (document.getElementById('db-search')?.value || '').toLowerCase();
+  let files = dbAllFiles;
+
+  if (dbCurrentTab === 'active')    files = files.filter(f => f.action === 'active');
+  if (dbCurrentTab === 'deleted')   files = files.filter(f => f.action === 'deleted');
+  if (dbCurrentTab === 'conflicts') files = files.filter(f => f.path.toLowerCase().includes('conflicted'));
+  if (q) files = files.filter(f => f.path.toLowerCase().includes(q));
+
+  if (!files.length) {
+    document.getElementById('db-files-body').innerHTML =
+      '<div class="empty" style="padding:32px">No files match</div>';
+    return;
+  }
+
+  const rows = files.map(f => {
+    const isDeleted = f.action === 'deleted';
+    const isConflict = f.path.toLowerCase().includes('conflicted');
+    const statusBadge = isDeleted
+      ? `<span class="badge-pill red" style="font-size:10px">deleted</span>`
+      : isConflict
+        ? `<span class="badge-pill" style="font-size:10px;background:var(--yellow,#f0a500);color:#000">conflict</span>`
+        : `<span class="badge-pill" style="font-size:10px;background:var(--green,#22c55e);color:#000">active</span>`;
+
+    const actions = isDeleted
+      ? `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbRestoreFile('${escHtml(f.path)}',this)">Restore</button>
+         <button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbPermDelete('${escHtml(f.path)}',this)">Delete</button>`
+      : `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="openHistory('${escHtml(f.path)}')">Versions</button>
+         <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openPreview('${escHtml(f.path)}')">Preview</button>`;
+
+    const name = f.path.split('/').pop();
+    return `<div style="display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--border);font-size:12px">
+      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(f.path)}">
+        <span style="font-weight:500">${escHtml(name)}</span>
+        <span style="color:var(--muted);font-size:10px;display:block">${escHtml(f.path)}</span>
+      </span>
+      ${statusBadge}
+      <span style="color:var(--muted);white-space:nowrap">${fmtSize(f.size)}</span>
+      <span style="color:var(--muted);white-space:nowrap;font-size:11px">${fmtDate(f.mtime)}</span>
+      <div style="display:flex;gap:4px;flex-shrink:0">${actions}</div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('db-files-body').innerHTML =
+    `<div style="font-size:11px;color:var(--muted);padding:6px 12px;border-bottom:1px solid var(--border)">${files.length} file${files.length===1?'':'s'}</div>` + rows;
+}
+
+async function dbRestoreFile(filePath, btn) {
+  btn.disabled = true; btn.textContent = '…';
+  try {
+    await api('/api/db/restore-file', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: filePath }) });
+    // Update local state without a full reload
+    const f = dbAllFiles.find(x => x.path === filePath);
+    if (f) f.action = 'active';
+    dbRenderFiles();
+    dbLoadStats();
+    toast('Restored — reconnect plugin to sync', 'success');
+  } catch(e) {
+    toast('Restore failed: ' + e.message, 'error');
+    btn.disabled = false; btn.textContent = 'Restore';
+  }
+}
+
+async function dbPermDelete(filePath, btn) {
+  if (!btn.dataset.armed) {
+    btn.dataset.armed = '1'; btn.textContent = 'Confirm?';
+    setTimeout(() => { if(btn.dataset.armed){ delete btn.dataset.armed; btn.textContent='Delete'; }}, 4000);
+    return;
+  }
+  btn.disabled = true; btn.textContent = '…';
+  try {
+    await api('/api/delete-file/' + encodeURIComponent(filePath), { method: 'DELETE' });
+    dbAllFiles = dbAllFiles.filter(x => x.path !== filePath);
+    dbRenderFiles(); dbLoadStats();
+    toast('Permanently deleted', 'success');
+  } catch(e) {
+    toast('Delete failed: ' + e.message, 'error');
+    btn.disabled = false; btn.textContent = 'Delete';
+  }
+}
+
+async function dbLoadDevices() {
+  const el = document.getElementById('db-devices-body');
+  el.innerHTML = '<div style="text-align:center;padding:24px"><span class="spinner"></span></div>';
+  try {
+    const [dr, pr] = await Promise.all([api('/api/devices'), api('/api/peers')]);
+    const devices = await dr.json();
+    const peers   = await pr.json();
+    const connectedIds = new Set(peers.map(p => p.deviceId));
+
+    if (!devices.length) {
+      el.innerHTML = '<div class="empty" style="padding:24px">No devices registered</div>';
+      return;
+    }
+
+    const rows = devices.map(d => {
+      const online = connectedIds.has(d.id);
+      const pill = online
+        ? `<span class="badge-pill" style="background:var(--green,#22c55e);color:#000;font-size:10px">online</span>`
+        : `<span class="badge-pill" style="font-size:10px">offline</span>`;
+      return `<div style="display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--border);font-size:12px">
+        <span style="flex:1;font-family:var(--mono);font-size:11px;word-break:break-all">${escHtml(d.id)}</span>
+        ${pill}
+        <span style="color:var(--muted);white-space:nowrap">last: ${fmtDate(d.lastOnline)}</span>
+        <button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbRemoveDevice('${escHtml(d.id)}',this)">Remove</button>
+      </div>`;
+    }).join('');
+
+    el.innerHTML = rows;
+  } catch(e) {
+    el.innerHTML = `<p style="color:var(--red);padding:16px">Failed: ${escHtml(e.message)}</p>`;
+  }
+}
+
+async function dbRemoveDevice(id, btn) {
+  if (!btn.dataset.armed) {
+    btn.dataset.armed = '1'; btn.textContent = 'Confirm?';
+    setTimeout(() => { if(btn.dataset.armed){ delete btn.dataset.armed; btn.textContent='Remove'; }}, 4000);
+    return;
+  }
+  btn.disabled = true; btn.textContent = '…';
+  try {
+    await api('/api/db/device/' + encodeURIComponent(id), { method: 'DELETE' });
+    dbLoadDevices(); dbLoadStats();
+    toast('Device removed', 'success');
+  } catch(e) {
+    toast('Failed: ' + e.message, 'error');
+    btn.disabled = false; btn.textContent = 'Remove';
+  }
+}
+
+// Load DB panel data when navigating to it
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelector('[data-panel="dbmgr"]')?.addEventListener('click', () => {
+    dbLoadStats();
+  });
+});
 
 // ── Restore deleted files ───────────────────────────────────────────────────
 async function restoreDeleted(btn) {

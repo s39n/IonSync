@@ -279,6 +279,70 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     res.json({ ok: true });
   });
 
+  // ── Database manager ──────────────────────────────────────────────────────
+
+  // Aggregate stats
+  router.get("/api/db/stats", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const stats = ctx.db.getStats();
+    // Sum storage from disk
+    let totalBytes = 0;
+    try {
+      const allPaths = ctx.db.getAllFilePaths();
+      for (const p of allPaths) {
+        const size = ctx.storage.getSizeLatest(p);
+        if (size) totalBytes += size;
+      }
+    } catch { /* non-fatal */ }
+    res.json({ ...stats, totalBytes });
+  });
+
+  // All files with optional action filter: ?action=all|active|deleted
+  router.get("/api/db/files", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const action = (String(req.query.action ?? "all")) as "active" | "deleted" | "all";
+    const files = ctx.db.getFilesByAction(action).map(f => ({
+      path: f.path,
+      sha1: f.sha1,
+      mtime: f.mtime,
+      action: f.action,
+      size: ctx.storage.getSizeLatest(f.path) ?? 0,
+    }));
+    res.json(files);
+  });
+
+  // Restore a single deleted file
+  router.post("/api/db/restore-file", express.json(), (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const { path: filePath } = req.body as { path?: string };
+    if (!filePath) { res.status(400).json({ error: "Missing path" }); return; }
+    const ok = ctx.db.restoreFile(filePath);
+    res.json({ ok });
+  });
+
+  // Delete a specific file version from storage + DB
+  router.delete("/api/db/version", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const filePath = decodeURIComponent(String(req.query.path ?? "")).trim();
+    const mtime = parseInt(String(req.query.mtime ?? ""), 10);
+    if (!filePath || isNaN(mtime)) { res.status(400).json({ error: "Missing path or mtime" }); return; }
+    ctx.storage.deleteVersion(filePath, mtime);
+    ctx.db.deleteVersionRecord(filePath, mtime);
+    res.json({ ok: true });
+  });
+
+  // Remove a device record
+  router.delete("/api/db/device/:id", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const { id } = req.params as { id: string };
+    // Disconnect the peer if currently connected
+    for (const peer of ctx.peers.values()) {
+      if (peer.deviceId === id) peer.disconnect("Device removed by admin");
+    }
+    ctx.db.deleteDevice(id);
+    res.json({ ok: true });
+  });
+
   // ── Restore deleted files ─────────────────────────────────────────────────
 
   router.post("/api/restore-deleted", (req, res) => {

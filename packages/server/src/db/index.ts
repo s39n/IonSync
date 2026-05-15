@@ -215,6 +215,50 @@ export class SyncDB {
   }
 
 
+  // ─── Database manager helpers ───────────────────────────────────────────
+
+  getStats(): { activeFiles: number; deletedFiles: number; totalVersions: number; deviceCount: number } {
+    const row = this.db.prepare<[], { active: number; deleted: number }>(`
+      SELECT
+        COUNT(CASE WHEN action = 'active' AND file_type = 'file' THEN 1 END) AS active,
+        COUNT(CASE WHEN action = 'deleted' THEN 1 END) AS deleted
+      FROM files
+    `).get()!;
+    const versions = (this.db.prepare<[], { n: number }>("SELECT COUNT(*) AS n FROM file_versions").get()!).n;
+    const devices  = (this.db.prepare<[], { n: number }>("SELECT COUNT(*) AS n FROM devices").get()!).n;
+    return { activeFiles: row.active, deletedFiles: row.deleted, totalVersions: versions, deviceCount: devices };
+  }
+
+  getFilesByAction(action: "active" | "deleted" | "all"): FileEntry[] {
+    if (action === "all") {
+      return this.db
+        .prepare<[], DbFileRow>("SELECT * FROM files WHERE file_type = 'file' ORDER BY path")
+        .all()
+        .map(rowToFileEntry);
+    }
+    return this.db
+      .prepare<[string], DbFileRow>("SELECT * FROM files WHERE action = ? AND file_type = 'file' ORDER BY path")
+      .all(action)
+      .map(rowToFileEntry);
+  }
+
+  restoreFile(filePath: string): boolean {
+    const result = this.db
+      .prepare<[string]>("UPDATE files SET action = 'active' WHERE path = ? AND action = 'deleted'")
+      .run(filePath);
+    return result.changes > 0;
+  }
+
+  deleteVersionRecord(filePath: string, mtime: number): void {
+    this.db
+      .prepare<[string, number]>("DELETE FROM file_versions WHERE path = ? AND mtime = ?")
+      .run(filePath, mtime);
+  }
+
+  deleteDevice(id: string): void {
+    this.db.prepare<[string]>("DELETE FROM devices WHERE id = ?").run(id);
+  }
+
   // ─── Settings (key-value store) ─────────────────────────────────────────
 
   getSetting(key: string): string | null {
