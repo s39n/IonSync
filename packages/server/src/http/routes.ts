@@ -279,6 +279,14 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     res.json({ ok: true });
   });
 
+  // ── Restore deleted files ─────────────────────────────────────────────────
+
+  router.post("/api/restore-deleted", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const count = ctx.db.restoreDeletedFiles();
+    res.json({ ok: true, restored: count });
+  });
+
   // ── Factory reset ─────────────────────────────────────────────────────────
 
   router.post("/api/reset", (req, res) => {

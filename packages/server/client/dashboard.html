@@ -559,6 +559,24 @@
       <!-- ── Danger Zone ── -->
       <div class="panel" id="panel-danger">
         <h2>Danger Zone</h2>
+
+        <div class="card" style="border-color:var(--accent);margin-bottom:16px">
+          <div class="card-header" style="background:var(--bg3)">
+            <h3>Restore Deleted Files</h3>
+          </div>
+          <div style="padding:16px">
+            <p style="margin:0 0 10px">
+              Marks all files currently flagged as <em>deleted</em> on the server back to <em>active</em>.
+              Use this if a sync accident caused files to disappear — your connected plugins will
+              pull the restored files down on their next sync.
+            </p>
+            <p style="margin:0 0 16px;font-size:12px;color:var(--muted)">
+              File content must still be present in server storage (within the 7-day retention window).
+            </p>
+            <button class="btn primary" id="restore-btn" onclick="restoreDeleted(this)">Restore Deleted Files</button>
+          </div>
+        </div>
+
         <div class="card" style="border-color:var(--red)">
           <div class="card-header" style="background:var(--bg3)">
             <h3 style="color:var(--red)">Factory Reset</h3>
@@ -796,6 +814,34 @@ async function loadLogs() {
   const r = await api('/api/logs');
   const text = await r.text();
   renderLogs(text);
+}
+
+// ── Restore deleted files ───────────────────────────────────────────────────
+async function restoreDeleted(btn) {
+  if (!btn.dataset.armed) {
+    btn.dataset.armed = '1';
+    btn.textContent = '⚠️ Click again to confirm restore';
+    setTimeout(() => {
+      if (btn.dataset.armed) {
+        delete btn.dataset.armed;
+        btn.textContent = 'Restore Deleted Files';
+      }
+    }, 5000);
+    return;
+  }
+  delete btn.dataset.armed;
+  btn.disabled = true;
+  btn.textContent = 'Restoring…';
+  try {
+    const r = await api('/api/restore-deleted', { method: 'POST' });
+    const data = await r.json();
+    toast(`Restored ${data.restored} file${data.restored === 1 ? '' : 's'} — reconnect your plugins to sync them back.`, 'success');
+    await loadFiles();
+  } catch (e) {
+    toast('Restore failed: ' + e.message, 'error');
+  }
+  btn.disabled = false;
+  btn.textContent = 'Restore Deleted Files';
 }
 
 // ── Factory reset ──────────────────────────────────────────────────────────

@@ -203,6 +203,17 @@ export class SyncDB {
     })();
   }
 
+  /**
+   * Marks all files with action = "deleted" back to action = "active".
+   * Returns the number of files restored.
+   */
+  restoreDeletedFiles(): number {
+    const result = this.db
+      .prepare("UPDATE files SET action = 'active' WHERE action = 'deleted'")
+      .run();
+    return result.changes;
+  }
+
 
   // ─── Settings (key-value store) ─────────────────────────────────────────
 
