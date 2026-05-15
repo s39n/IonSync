@@ -1,5 +1,4 @@
-import { createHmac, randomBytes } from "node:crypto";
-import { randomUUID } from "node:crypto";
+import { createHmac, createHash, randomBytes, randomUUID } from "node:crypto";
 
 // ── Base32 helpers ──────────────────────────────────────────────────────────
 
@@ -113,4 +112,34 @@ export function consumePendingToken(token: string): boolean {
   if (!entry) return false;
   pendingTokens.delete(token);
   return entry.expiresAt > Date.now();
+}
+
+// ── Recovery codes ────────────────────────────────────────────────────────────
+
+// Unambiguous characters (no 0/O, 1/I/L)
+const RECOVERY_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const RECOVERY_CODE_LEN = 10; // displayed as XXXXX-XXXXX
+const RECOVERY_CODE_COUNT = 8;
+
+/** Generate a fresh set of plaintext recovery codes. */
+export function generateRecoveryCodes(): string[] {
+  return Array.from({ length: RECOVERY_CODE_COUNT }, () => {
+    const buf = randomBytes(RECOVERY_CODE_LEN);
+    return Array.from(buf, (b) => RECOVERY_CHARS[b % RECOVERY_CHARS.length]).join("");
+  });
+}
+
+/** Format for display: XXXXX-XXXXX */
+export function formatRecoveryCode(code: string): string {
+  return code.slice(0, 5) + "-" + code.slice(5);
+}
+
+/** Strip formatting so we can compare consistently. */
+export function normalizeRecoveryCode(input: string): string {
+  return input.toUpperCase().replace(/[-\s]/g, "");
+}
+
+/** One-way hash for safe DB storage. */
+export function hashRecoveryCode(code: string): string {
+  return createHash("sha256").update("recovery:" + code).digest("hex");
 }

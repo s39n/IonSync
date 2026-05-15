@@ -70,6 +70,16 @@
     .btn-back { background: none; border: none; color: var(--muted); font-size: 12px;
       cursor: pointer; margin-top: 10px; width: 100%; text-align: center; padding: 4px; }
     .btn-back:hover { color: var(--text); }
+    .recovery-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 12px 0 16px; }
+    .recovery-code { font-family: var(--mono); font-size: 13px; padding: 7px 10px;
+      background: var(--bg3); border: 1px solid var(--border); border-radius: 6px;
+      text-align: center; letter-spacing: 2px; user-select: all; }
+    .recovery-notice { background: rgba(255,179,71,.12); border: 1px solid rgba(255,179,71,.3);
+      border-radius: 8px; padding: 12px 14px; font-size: 12px; color: var(--yellow); margin-bottom: 14px; }
+    .use-recovery-link { background: none; border: none; color: var(--muted); font-size: 11px;
+      cursor: pointer; text-decoration: underline; margin-top: 10px; display: block;
+      text-align: center; padding: 2px; }
+    .use-recovery-link:hover { color: var(--text); }
 
     #app { display: none; height: 100vh; flex-direction: column; }
     #app.visible { display: flex; }
@@ -390,6 +400,7 @@
       <div class="login-error" id="totp-login-error"></div>
       <button class="btn primary" id="totp-login-btn" style="width:100%;margin-top:20px;padding:10px">Verify</button>
       <button class="btn-back" onclick="backToPassword()">← Back to password</button>
+      <button class="use-recovery-link" id="toggle-recovery-btn" onclick="toggleRecoveryMode()">Use a recovery code instead</button>
     </div>
   </div>
 </div>
@@ -659,9 +670,16 @@ async function submitTotpLogin() {
       body: JSON.stringify({ tempToken: _pendingTempToken, code }),
     });
     if (r.ok) {
+      const data = await r.json();
+      if (data.usedRecoveryCode) {
+        toast(
+          `Recovery code used. ${data.codesRemaining} code${data.codesRemaining === 1 ? '' : 's'} remaining — generate new ones in Security settings.`,
+          'info'
+        );
+      }
       _onLoginSuccess();
     } else {
-      err.textContent = 'Incorrect code. Try again.';
+      err.textContent = _recoveryMode ? 'Invalid recovery code.' : 'Incorrect code. Try again.';
     }
   } catch {
     err.textContent = 'Could not reach server.';
@@ -672,10 +690,38 @@ async function submitTotpLogin() {
 
 function backToPassword() {
   _pendingTempToken = null;
+  _recoveryMode = false;
   document.getElementById('login-pw-step').style.display = 'block';
   document.getElementById('login-totp-step').style.display = 'none';
   document.getElementById('totp-login-input').value = '';
   document.getElementById('totp-login-error').textContent = '';
+}
+
+let _recoveryMode = false;
+function toggleRecoveryMode() {
+  _recoveryMode = !_recoveryMode;
+  const input = document.getElementById('totp-login-input');
+  const label = input.previousElementSibling; // the <label>
+  const btn   = document.getElementById('toggle-recovery-btn');
+  const err   = document.getElementById('totp-login-error');
+  err.textContent = '';
+  input.value = '';
+  if (_recoveryMode) {
+    label.textContent = 'Recovery Code';
+    input.placeholder = 'XXXXX-XXXXX';
+    input.maxLength = 12;
+    input.style.letterSpacing = '2px';
+    input.style.fontSize = '15px';
+    btn.textContent = 'Use authenticator code instead';
+  } else {
+    label.textContent = 'Authenticator Code';
+    input.placeholder = '000000';
+    input.maxLength = 6;
+    input.style.letterSpacing = '6px';
+    input.style.fontSize = '';
+    btn.textContent = 'Use a recovery code instead';
+  }
+  input.focus();
 }
 
 function logout() {
@@ -1186,8 +1232,8 @@ async function enableTotp() {
       body: JSON.stringify({ secret: _totpSetupSecret, code }),
     });
     if (r.ok) {
-      toast('2FA enabled — you will need your authenticator on next login.', 'success');
-      loadTotpStatus();
+      const data = await r.json();
+      showRecoveryCodes(data.recoveryCodes || []);
     } else {
       const data = await r.json().catch(() => ({}));
       err.textContent = data.error || 'Incorrect code. Make sure the app is showing the right account.';
@@ -1195,6 +1241,33 @@ async function enableTotp() {
   } catch {
     err.textContent = 'Request failed.';
   }
+}
+
+function showRecoveryCodes(codes) {
+  const el = document.getElementById('totp-mgmt-section');
+  const codesHtml = codes.map(c =>
+    `<div class="recovery-code">${c}</div>`
+  ).join('');
+  el.innerHTML = `
+    <div class="recovery-notice">
+      ⚠ Save these recovery codes now — they will not be shown again.
+      Each code can only be used once to sign in if you lose your authenticator.
+    </div>
+    <div class="recovery-grid">${codesHtml}</div>
+    <button class="btn" style="margin-right:8px" onclick="copyRecoveryCodes(${JSON.stringify(codes)})">Copy all</button>
+    <button class="btn primary" onclick="loadTotpStatus()">Done — I've saved these</button>
+    <p style="font-size:11px;color:var(--muted);margin-top:14px">
+      Store them in a password manager or print them and keep somewhere safe.
+    </p>
+  `;
+}
+
+function copyRecoveryCodes(codes) {
+  navigator.clipboard.writeText(codes.join('\n')).then(() => {
+    toast('Recovery codes copied to clipboard', 'success');
+  }).catch(() => {
+    toast('Could not copy — select and copy manually', 'error');
+  });
 }
 
 async function disableTotp() {
@@ -1619,19 +1692,4 @@ async function previewVersion(filePath, mtime) {
   }
 }
 
-// ── Init ───────────────────────────────────────────────────────────────────
-// Restore global E2EE password from sessionStorage
-(function restoreE2eePw() {
-  const saved = sessionStorage.getItem('e2ee-pw');
-  if (saved) {
-    const el = document.getElementById('global-e2ee-pw');
-    if (el) el.value = saved;
-  }
-  // Default snapshot date to today
-  const dateEl = document.getElementById('snapshot-date');
-  if (dateEl) dateEl.value = new Date().toISOString().slice(0, 10);
-})();
-
-</script>
-</body>
-</html>
+// ── Init ──────────────────────────────────────────

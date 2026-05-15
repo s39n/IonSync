@@ -5,7 +5,8 @@ import type { SyncContext } from "../context.js";
 import { sha256 } from "../crypto.js";
 import { diff_match_patch } from "diff-match-patch";
 import type { BackgroundSyncReq } from "@ionsync/protocol";
-import { verifyTOTP, generateSecret, totpUri, createPendingToken, consumePendingToken } from "../totp.js";
+import { verifyTOTP, generateSecret, totpUri, createPendingToken, consumePendingToken,
+  generateRecoveryCodes, formatRecoveryCode, normalizeRecoveryCode, hashRecoveryCode } from "../totp.js";
 
 // ── 1. PUBLIC ROUTER (Exposed to the Tunnel) ────────────────────────────────
 
@@ -29,6 +30,14 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   const router = express.Router();
 
   const DASH_TOKEN = sha256(ctx.config.password + "-dashboard");
+
+  function grantSession(res: Response, extra: Record<string, unknown> = {}): void {
+    const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toUTCString();
+    res
+      .setHeader("Set-Cookie", `dash_token=${DASH_TOKEN}; Path=/; Expires=${expires}; HttpOnly`)
+      .status(200)
+      .json({ ok: true, ...extra });
+  }
 
   function getDashCookie(req: Request): string | undefined {
     const cookieHeader = req.headers["cookie"] ?? "";
@@ -74,15 +83,11 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
       res.status(200).json({ requireTotp: true, tempToken });
     } else {
       // No TOTP — grant session immediately
-      const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toUTCString();
-      res
-        .setHeader("Set-Cookie", `dash_token=${DASH_TOKEN}; Path=/; Expires=${expires}; HttpOnly`)
-        .status(200)
-        .json({ ok: true });
+      grantSession(res);
     }
   });
 
-  // Login — step 2: TOTP verification
+  // Login — step 2: TOTP code OR recovery code
   router.post("/api/totp/verify-login", express.json(), (req, res) => {
     const { tempToken, code } = req.body as { tempToken?: string; code?: string };
     if (!tempToken || !code) { res.status(400).json({ error: "Missing fields" }); return; }
@@ -93,16 +98,31 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     }
 
     const totpSecret = ctx.db.getSetting("totp_secret");
-    if (!totpSecret || !verifyTOTP(totpSecret, code)) {
-      res.status(401).json({ error: "Invalid code" });
+    if (!totpSecret) { res.status(401).json({ error: "2FA not configured" }); return; }
+
+    // Try TOTP first
+    if (verifyTOTP(totpSecret, code.replace(/\s/g, ""))) {
+      grantSession(res);
       return;
     }
 
-    const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toUTCString();
-    res
-      .setHeader("Set-Cookie", `dash_token=${DASH_TOKEN}; Path=/; Expires=${expires}; HttpOnly`)
-      .status(200)
-      .json({ ok: true });
+    // Try recovery code
+    const normalized = normalizeRecoveryCode(code);
+    const codesJson = ctx.db.getSetting("totp_recovery_codes");
+    if (codesJson) {
+      const hashes: string[] = JSON.parse(codesJson);
+      const inputHash = hashRecoveryCode(normalized);
+      const idx = hashes.indexOf(inputHash);
+      if (idx !== -1) {
+        // Consume the code — it can only be used once
+        const remaining = hashes.filter((_, i) => i !== idx);
+        ctx.db.setSetting("totp_recovery_codes", JSON.stringify(remaining));
+        grantSession(res, { usedRecoveryCode: true, codesRemaining: remaining.length });
+        return;
+      }
+    }
+
+    res.status(401).json({ error: "Invalid code" });
   });
 
 
@@ -325,8 +345,8 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     res.json({ secret, uri });
   });
 
-  // Enable TOTP — save secret only after verifying that the supplied code
-  // is correct (prevents locking yourself out with a mis-scanned QR code).
+  // Enable TOTP — verify code, save secret, generate recovery codes.
+  // Recovery codes are returned ONCE and never stored in plaintext.
   router.post("/api/totp/enable", express.json(), (req, res) => {
     if (!checkAuth(req, res)) return;
     const { secret, code } = req.body as { secret?: string; code?: string };
@@ -335,8 +355,11 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
       res.status(401).json({ error: "Code does not match — check your authenticator app" });
       return;
     }
+    const rawCodes = generateRecoveryCodes();
+    const hashes = rawCodes.map(hashRecoveryCode);
     ctx.db.setSetting("totp_secret", secret);
-    res.json({ ok: true });
+    ctx.db.setSetting("totp_recovery_codes", JSON.stringify(hashes));
+    res.json({ ok: true, recoveryCodes: rawCodes.map(formatRecoveryCode) });
   });
 
   // Disable TOTP — requires the current TOTP code as confirmation.
@@ -351,6 +374,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
       return;
     }
     ctx.db.deleteSetting("totp_secret");
+    ctx.db.deleteSetting("totp_recovery_codes");
     res.json({ ok: true });
   });
 
@@ -374,8 +398,8 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     res.json({ secret, uri });
   });
 
-  // Enable TOTP — save secret only after verifying that the supplied code
-  // is correct (prevents locking yourself out with a mis-scanned QR code).
+  // Enable TOTP — verify code, save secret, generate recovery codes.
+  // Recovery codes are returned ONCE and never stored in plaintext.
   router.post("/api/totp/enable", express.json(), (req, res) => {
     if (!checkAuth(req, res)) return;
     const { secret, code } = req.body as { secret?: string; code?: string };
@@ -384,8 +408,11 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
       res.status(401).json({ error: "Code does not match — check your authenticator app" });
       return;
     }
+    const rawCodes = generateRecoveryCodes();
+    const hashes = rawCodes.map(hashRecoveryCode);
     ctx.db.setSetting("totp_secret", secret);
-    res.json({ ok: true });
+    ctx.db.setSetting("totp_recovery_codes", JSON.stringify(hashes));
+    res.json({ ok: true, recoveryCodes: rawCodes.map(formatRecoveryCode) });
   });
 
   // Disable TOTP — requires the current TOTP code as confirmation.
@@ -400,6 +427,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
       return;
     }
     ctx.db.deleteSetting("totp_secret");
+    ctx.db.deleteSetting("totp_recovery_codes");
     res.json({ ok: true });
   });
 
