@@ -25,8 +25,18 @@ export class Storage {
   }
 
   async init(): Promise<void> {
+    await this.ensureDataDir();
     await this.loadMetadata();
     await this.loadDeleteQueue();
+  }
+
+  private async ensureDataDir(): Promise<void> {
+    const dataDir = this.pluginDir + "/data";
+    try {
+      await this.app.vault.adapter.mkdir(dataDir);
+    } catch {
+      // Already exists — that's fine
+    }
   }
 
   // ── Delta Sync: Shadow Storage ─────────────────────────────────────────────
@@ -86,6 +96,10 @@ export class Storage {
   }
 
   readMetadata(path: string): FileEntry | null { return this.metadata[path] ?? null; }
+
+  /** True when this device has at least one file recorded in its sync metadata,
+   *  i.e. it has completed at least one successful sync session before. */
+  hasAnyMetadata(): boolean { return Object.keys(this.metadata).length > 0; }
 
   async writeMetadata(entry: FileEntry): Promise<void> {
     this.metadata[entry.path] = entry;
@@ -208,12 +222,36 @@ export class Storage {
 
   private async _computeHiddenConfigFiles(exclusionFilter: ExclusionFilter): Promise<void> {
     const configDir = this.app.vault.configDir;
-    const targets = [
-      `${configDir}/app.json`, 
-      `${configDir}/appearance.json`, 
-      `${configDir}/hotkeys.json`, 
-      `${configDir}/community-plugins.json`
+
+    // Seed with files that have dedicated exclusion toggles.
+    // core-plugins.json / core-plugins-migration.json added here so
+    // syncActiveCorePlugins is honoured even when syncHiddenFiles is off.
+    const targets: string[] = [
+      `${configDir}/app.json`,
+      `${configDir}/appearance.json`,
+      `${configDir}/hotkeys.json`,
+      `${configDir}/community-plugins.json`,
+      `${configDir}/core-plugins.json`,
+      `${configDir}/core-plugins-migration.json`,
     ];
+
+    // Core plugin settings: any remaining JSON files directly in .obsidian/
+    // (e.g. daily-notes.json, templates.json). Not subdirectories.
+    try {
+      const listing = await this.app.vault.adapter.list(configDir);
+      for (const f of listing.files) {
+        if (f.endsWith(".json") && !targets.includes(f)) targets.push(f);
+      }
+    } catch { /* configDir unreadable — skip */ }
+
+    // Installed community plugins — .obsidian/plugins/ (recursive).
+    // The exclusion filter gates on syncInstalledCommunityPlugins and always
+    // strips the ion-sync directory, so we enumerate unconditionally here.
+    await this._enumerateConfigDir(`${configDir}/plugins`, targets);
+
+    // Themes and CSS snippets
+    await this._enumerateConfigDir(`${configDir}/themes`, targets);
+    await this._enumerateConfigDir(`${configDir}/snippets`, targets);
 
     for (const path of targets) {
       if (this.aborted) break;
@@ -236,9 +274,18 @@ export class Storage {
         const effectiveMtime = stored && stored.mtime > mtime ? stored.mtime : mtime;
         this.tree[path] = { path, sha1: sha1 ?? "", mtime: effectiveMtime, action: "active", fileType: "file" };
       } catch {
-        // File doesn't exist, just skip
+        // File doesn't exist or can't be read — skip silently
       }
     }
+  }
+
+  /** Recursively lists all files under `dir` and appends their vault-relative paths to `out`. */
+  private async _enumerateConfigDir(dir: string, out: string[]): Promise<void> {
+    try {
+      const listing = await this.app.vault.adapter.list(dir);
+      for (const f of listing.files) out.push(f);
+      for (const sub of listing.folders) await this._enumerateConfigDir(sub, out);
+    } catch { /* directory doesn't exist or is unreadable — skip silently */ }
   }
 
   // ── Vault I/O ─────────────────────────────────────────────────────────────
@@ -269,7 +316,15 @@ export class Storage {
 
     const text = new TextDecoder("utf-8").decode(Utils.fromBase64(content));
     await this.fsVault.write(path, text, entry.mtime);
-    await this.writeMetadata(entry);
+
+    // Stat the file after writing to capture the mtime the OS actually assigned.
+    // vault.adapter.write() does not honour the mtime argument — it always stamps
+    // the file with the current clock.  If we store the server's mtime instead,
+    // _checkConfigFiles and _sendFileEvent see stored.mtime ≠ stat.mtime every 5 s
+    // and re-upload the file indefinitely, causing a cross-device ping-pong loop.
+    const stat = await this.app.vault.adapter.stat(path);
+    const metaEntry = stat ? { ...entry, mtime: stat.mtime } : entry;
+    await this.writeMetadata(metaEntry);
     await this.writeShadow(path, text);
   }
 
@@ -281,9 +336,14 @@ export class Storage {
     for (let i = 0; i < binaryString.length; i++) {
       bytes[i] = binaryString.charCodeAt(i);
     }
-    
+
     await this.fsVault.writeBinary(path, bytes.buffer, entry.mtime);
-    await this.writeMetadata(entry);
+
+    // Same mtime fix as write() above — store the OS-assigned mtime, not the
+    // server's, so the fast-path check in _sendFileEvent stays stable.
+    const stat = await this.app.vault.adapter.stat(path);
+    const metaEntry = stat ? { ...entry, mtime: stat.mtime } : entry;
+    await this.writeMetadata(metaEntry);
   }
 
   async delete(path: string, entry: FileEntry): Promise<void> {

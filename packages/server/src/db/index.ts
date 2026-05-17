@@ -50,7 +50,7 @@ export class SyncDB {
     runMigrations(this.db);
   }
 
-  // ─── Files ──────────────────────────────────────────────────────────────
+  // --- Files ----------------------------------------------------------------
 
   getFile(filePath: string): FileEntry | undefined {
     const row = this.db
@@ -95,7 +95,14 @@ export class SyncDB {
     this.db.prepare<[string]>("DELETE FROM file_versions WHERE path = ?").run(filePath);
   }
 
-  // ─── Version history ────────────────────────────────────────────────────
+  /** Update only the mtime of a file record — does NOT create a new version row. */
+  updateFileMeta(filePath: string, mtime: number): void {
+    this.db
+      .prepare<[number, string]>("UPDATE files SET mtime = ? WHERE path = ?")
+      .run(mtime, filePath);
+  }
+
+  // --- Version history ------------------------------------------------------
 
   getVersions(filePath: string): VersionEntry[] {
     return this.db
@@ -129,7 +136,7 @@ export class SyncDB {
       .run(filePath, filePath, keepCount);
   }
 
-  // ─── Devices ────────────────────────────────────────────────────────────
+  // --- Devices --------------------------------------------------------------
 
   touchDevice(id: string): void {
     this.db
@@ -154,7 +161,7 @@ export class SyncDB {
     return row?.min_lo ?? 0;
   }
 
-  // ─── Cleanup helpers ────────────────────────────────────────────────────
+  // --- Cleanup helpers ------------------------------------------------------
 
   getExpiredDeletedFiles(cutoff: number): FileEntry[] {
     return this.db
@@ -188,7 +195,7 @@ export class SyncDB {
       .all(asOfMs);
   }
 
-  // Factory reset
+  // --- Factory reset --------------------------------------------------------
 
   /**
    * Wipes all data from the database: file versions, file metadata, and
@@ -214,8 +221,7 @@ export class SyncDB {
     return result.changes;
   }
 
-
-  // ─── Database manager helpers ───────────────────────────────────────────
+  // --- Database manager helpers ---------------------------------------------
 
   getStats(): { activeFiles: number; deletedFiles: number; totalVersions: number; deviceCount: number } {
     const row = this.db.prepare<[], { active: number; deleted: number }>(`
@@ -259,7 +265,7 @@ export class SyncDB {
     this.db.prepare<[string]>("DELETE FROM devices WHERE id = ?").run(id);
   }
 
-  // ─── Settings (key-value store) ─────────────────────────────────────────
+  // --- Settings (key-value store) -------------------------------------------
 
   getSetting(key: string): string | null {
     const row = this.db
@@ -283,5 +289,27 @@ export class SyncDB {
 
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * Renames all file records whose path starts with `fromPrefix/` so they
+   * start with `toPrefix/` instead.  Updates both `files` and `file_versions`.
+   * Returns the number of rows updated.
+   */
+  renameFolderPaths(fromPrefix: string, toPrefix: string): number {
+    const like = fromPrefix.replace(/[%_]/g, "\$&") + "/%";
+    const prefixLen = fromPrefix.length;
+    const result = this.db.transaction(() => {
+      const files = this.db
+        .prepare<[string]>("SELECT path FROM files WHERE path LIKE ? ESCAPE '\\'")
+        .all(like) as Array<{ path: string }>;
+      for (const { path: oldPath } of files) {
+        const newPath = toPrefix + oldPath.slice(prefixLen);
+        this.db.prepare<[string, string]>("UPDATE files SET path = ? WHERE path = ?").run(newPath, oldPath);
+        this.db.prepare<[string, string]>("UPDATE file_versions SET path = ? WHERE path = ?").run(newPath, oldPath);
+      }
+      return files.length;
+    })();
+    return result as number;
   }
 }

@@ -330,8 +330,9 @@
     }
     .tree-row:last-child { border-bottom: none; }
     .tree-row.file:hover { background: color-mix(in srgb, var(--accent) 4%, transparent); }
-    .tree-row.folder { cursor: pointer; user-select: none; }
+    .tree-row.folder { cursor: default; user-select: none; }
     .tree-row.folder:hover { background: var(--bg3); }
+    .tree-row .tree-toggle { cursor: pointer; display: flex; align-items: center; gap: 0; flex: 1; min-width: 0; }
     .tree-chevron {
       width: 16px; flex-shrink: 0; color: var(--muted); font-size: 10px;
       transition: transform .15s; display: inline-block; text-align: center;
@@ -365,6 +366,82 @@
     }
     input[type="date"].date-input:focus { border-color: var(--accent); }
     .export-group { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+
+    /* ── Diff view ───────────────────────────────────────────────────────────── */
+    .diff-block { font-family: var(--mono); font-size: 12px; line-height: 1.6; }
+    .diff-line { padding: 1px 10px; white-space: pre-wrap; word-break: break-all; }
+    .diff-add  { background: rgba(61,204,126,.12); color: var(--green); }
+    .diff-del  { background: rgba(255,95,95,.12);  color: var(--red); }
+    .diff-eq   { color: var(--text); }
+
+    /* ── Bulk-select toolbar ─────────────────────────────────────────────────── */
+    #bulk-bar {
+      display: none; align-items: center; gap: 10px;
+      padding: 8px 12px; margin-bottom: 10px;
+      background: color-mix(in srgb, var(--accent) 10%, var(--bg2));
+      border: 1px solid var(--accent); border-radius: var(--radius);
+    }
+    #bulk-bar.visible { display: flex; }
+
+    /* ── Storage chart ───────────────────────────────────────────────────────── */
+    .storage-chart { display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; }
+    .chart-row { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+    .chart-label { width: 160px; flex-shrink: 0; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .chart-bar-wrap { flex: 1; height: 16px; background: var(--bg3); border-radius: 4px; overflow: hidden; }
+    .chart-bar { height: 100%; background: var(--accent); border-radius: 4px; transition: width .3s; }
+    .chart-size { width: 70px; text-align: right; color: var(--muted); flex-shrink: 0; }
+
+    /* ── Activity feed ───────────────────────────────────────────────────────── */
+    .activity-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 7px 14px; border-bottom: 1px solid var(--border); font-size: 12px;
+    }
+    .activity-row:last-child { border-bottom: none; }
+    .activity-kind {
+      font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 10px;
+      white-space: nowrap; flex-shrink: 0; text-transform: uppercase; letter-spacing: .04em;
+    }
+    .activity-kind.upload     { background: rgba(61,204,126,.15); color: var(--green); }
+    .activity-kind.push       { background: rgba(108,142,255,.15); color: var(--accent); }
+    .activity-kind.connect    { background: rgba(61,204,126,.15); color: var(--green); }
+    .activity-kind.disconnect { background: rgba(255,95,95,.15); color: var(--red); }
+    .activity-kind.delete     { background: rgba(255,95,95,.15); color: var(--red); }
+    .activity-kind.rename     { background: rgba(255,179,71,.15); color: var(--yellow); }
+    .activity-path { flex: 1; font-family: var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .activity-time { color: var(--muted); white-space: nowrap; flex-shrink: 0; }
+
+    /* ── Conflict compare overlay ────────────────────────────────────────────── */
+    #compare-overlay {
+      display: none; position: fixed; inset: 0; z-index: 150;
+      background: rgba(0,0,0,.6); align-items: center; justify-content: center;
+    }
+    #compare-overlay.open { display: flex; }
+    #compare-modal {
+      background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
+      width: min(1140px, 96vw); max-height: 90vh; display: flex; flex-direction: column;
+      box-shadow: 0 8px 40px rgba(0,0,0,.5);
+    }
+    #compare-header {
+      padding: 12px 18px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 10px; background: var(--bg3); flex-shrink: 0;
+    }
+    #compare-panes {
+      display: grid; grid-template-columns: 1fr 1fr; flex: 1; overflow: hidden; min-height: 0;
+    }
+    .compare-pane {
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    .compare-pane + .compare-pane { border-left: 1px solid var(--border); }
+    .compare-pane-title {
+      padding: 7px 14px; font-size: 11px; font-family: var(--mono); border-bottom: 1px solid var(--border);
+      background: var(--bg3); flex-shrink: 0; word-break: break-all;
+    }
+    .compare-pane-title.conflict { color: var(--yellow); }
+    .compare-pane-content {
+      flex: 1; overflow-y: auto; padding: 14px; margin: 0;
+      font-family: var(--mono); font-size: 12px; white-space: pre-wrap;
+      word-break: break-all; line-height: 1.65; color: var(--text); background: var(--bg);
+    }
     </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
@@ -470,6 +547,16 @@
             <thead><tr><th>Device ID</th><th>Auto-sync</th><th>Pending</th><th>Actions</th></tr></thead>
             <tbody id="overview-peers-body"></tbody>
           </table>
+        </div>
+        <div class="card" style="margin-top:16px">
+          <div class="card-header" style="display:flex;align-items:center;gap:10px">
+            <h3>Recent Activity</h3>
+            <div style="flex:1"></div>
+            <button class="btn" style="font-size:11px" onclick="loadActivity()">↻ Refresh</button>
+          </div>
+          <div id="activity-feed" style="max-height:320px;overflow-y:auto">
+            <div class="empty" style="padding:24px">No activity recorded yet</div>
+          </div>
         </div>
       </div>
 
@@ -585,6 +672,17 @@
           </div>
         </div>
 
+        <!-- Storage breakdown chart -->
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-header" style="display:flex;align-items:center;gap:10px">
+            <h3 style="margin:0;flex:1">Storage by Folder</h3>
+            <button class="btn" style="font-size:11px" onclick="loadStorageChart()">↻ Refresh</button>
+          </div>
+          <div id="storage-chart-body" class="storage-chart">
+            <p style="color:var(--muted);font-size:12px;padding:4px 0">Click refresh to load</p>
+          </div>
+        </div>
+
         <!-- File browser -->
         <div class="card" style="margin-bottom:16px">
           <div class="card-header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -599,6 +697,13 @@
               style="padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg3);color:var(--text);font-size:12px;width:200px"
               oninput="dbRenderFiles()">
             <button class="btn" onclick="dbLoadFiles()" title="Refresh">↻</button>
+          </div>
+          <!-- Bulk-select bar -->
+          <div id="bulk-bar">
+            <input type="checkbox" id="bulk-select-all" onchange="dbToggleSelectAll(this.checked)" title="Select all">
+            <span id="bulk-count" style="font-size:12px;color:var(--text)">0 selected</span>
+            <div style="flex:1"></div>
+            <button class="btn danger" style="font-size:11px" onclick="dbDeleteSelected()">Delete selected</button>
           </div>
           <div id="db-files-body" style="max-height:480px;overflow-y:auto">
             <div class="empty" style="padding:32px">Click refresh to load files</div>
@@ -673,6 +778,27 @@
     </div>
     <div id="history-body" style="display:none;overflow-y:auto;flex:1">
       <!-- Rendered by loadVersionHistory() -->
+    </div>
+  </div>
+</div>
+
+<!-- ── Conflict compare overlay ── -->
+<div id="compare-overlay">
+  <div id="compare-modal" role="dialog" aria-modal="true">
+    <div id="compare-header">
+      <span style="font-size:14px;font-weight:600">Conflict Comparison</span>
+      <div style="flex:1"></div>
+      <button id="compare-close" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;line-height:1;padding:0 4px" title="Close">✕</button>
+    </div>
+    <div id="compare-panes">
+      <div class="compare-pane">
+        <div class="compare-pane-title" id="compare-original-title">original</div>
+        <pre class="compare-pane-content" id="compare-original-content"></pre>
+      </div>
+      <div class="compare-pane">
+        <div class="compare-pane-title conflict" id="compare-conflict-title">conflicted</div>
+        <pre class="compare-pane-content" id="compare-conflict-content"></pre>
+      </div>
     </div>
   </div>
 </div>
@@ -832,11 +958,15 @@ function startPolling() {
 async function refreshAll() {
   setStatus(true);
   try {
-    await Promise.all([loadPeers(), loadDevices(), loadLogs()]);
+    await Promise.all([loadPeers(), loadDevices(), loadLogs(), loadActivity()]);
     setStatus(true);
     // Lazy-load files only when the panel is active (expensive walk)
     if (document.getElementById('panel-files').classList.contains('active')) {
       await loadFiles();
+    }
+    // Refresh storage chart when database panel is active
+    if (document.getElementById('panel-database').classList.contains('active')) {
+      loadStorageChart();
     }
   } catch {
     setStatus(false);
@@ -941,11 +1071,17 @@ function dbRenderFiles() {
     const actions = isDeleted
       ? `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbRestoreFile('${escHtml(f.path)}',this)">Restore</button>
          <button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbPermDelete('${escHtml(f.path)}',this)">Delete</button>`
-      : `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="openHistory('${escHtml(f.path)}')">Versions</button>
-         <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openPreview('${escHtml(f.path)}')">Preview</button>`;
+      : isConflict
+        ? `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="compareConflict('${escHtml(f.path)}')">Compare</button>
+           <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openHistory('${escHtml(f.path)}')">Versions</button>
+           <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openPreview('${escHtml(f.path)}')">Preview</button>`
+        : `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbEditMeta('${escHtml(f.path)}',${f.mtime},this)">Edit</button>
+           <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openHistory('${escHtml(f.path)}')">Versions</button>
+           <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openPreview('${escHtml(f.path)}')">Preview</button>`;
 
     const name = f.path.split('/').pop();
     return `<div style="display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--border);font-size:12px">
+      <input type="checkbox" class="db-file-checkbox" data-path="${escHtml(f.path)}" ${dbSelected.has(f.path) ? 'checked' : ''} onchange="dbToggleFile('${escHtml(f.path)}', this.checked)" style="flex-shrink:0">
       <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(f.path)}">
         <span style="font-weight:500">${escHtml(name)}</span>
         <span style="color:var(--muted);font-size:10px;display:block">${escHtml(f.path)}</span>
@@ -1139,6 +1275,28 @@ async function deleteFile(path, btn) {
   btn.disabled = false;
 }
 
+async function deleteFolder(folderPath, btn) {
+  const toDelete = allFiles.filter(f => f.path.startsWith(folderPath + '/'));
+  if (!toDelete.length) { toast('No files in folder', 'error'); return; }
+  if (!btn.dataset.armed) {
+    btn.dataset.armed = '1';
+    btn.textContent = `Delete ${toDelete.length} file${toDelete.length !== 1 ? 's' : ''}?`;
+    setTimeout(() => { if (btn.dataset.armed) { delete btn.dataset.armed; btn.textContent = 'Delete'; } }, 4000);
+    return;
+  }
+  delete btn.dataset.armed;
+  btn.disabled = true; btn.textContent = '…';
+  let failed = 0;
+  for (const f of toDelete) {
+    try {
+      await api(`/api/delete-file/${encodeURIComponent(f.path)}`, { method: 'DELETE' });
+    } catch { failed++; }
+  }
+  if (failed) toast(`Deleted ${toDelete.length - failed}, ${failed} failed`, 'error');
+  else toast(`Deleted ${toDelete.length} file${toDelete.length !== 1 ? 's' : ''}`, 'success');
+  await loadFiles();
+}
+
 // ── Render helpers ─────────────────────────────────────────────────────────
 function fmtDate(ms) {
   if (!ms) return '—';
@@ -1258,11 +1416,17 @@ function renderTreeNode(node, depth) {
     const fpath = child._path;
     const isOpen = openFolders.has(fpath);
     const count = countTreeFiles(child);
-    html += `<div class="tree-row folder" onclick="toggleFolder('${escHtml(fpath)}')" style="padding-left:${pad}px">` +
+    html += `<div class="tree-row folder" style="padding-left:${pad}px">` +
+      `<span class="tree-toggle" onclick="toggleFolder('${escHtml(fpath)}')">` +
       `<span class="tree-chevron ${isOpen ? 'open' : ''}">▶</span>` +
       `<span class="tree-icon">📁</span>` +
       `<span class="tree-name">${escHtml(name)}</span>` +
       `<span class="tree-meta">${count} file${count !== 1 ? 's' : ''}</span>` +
+      `</span>` +
+      `<div class="tree-actions">` +
+      `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="openFolderRename('${escHtml(fpath)}')">Rename</button>` +
+      `<button class="btn danger" style="font-size:11px;padding:3px 8px" onclick="deleteFolder('${escHtml(fpath)}',this)">Delete</button>` +
+      `</div>` +
       `</div>` +
       `<div class="tree-children ${isOpen ? 'open' : ''}" data-folder="${escHtml(fpath)}">` +
       renderTreeNode(child, depth + 1) +
@@ -1389,6 +1553,9 @@ function showPanel(name) {
   if (name === 'files' && !allFiles.length) loadFiles();
   // Load TOTP status on demand when switching to security panel
   if (name === 'security') loadTotpStatus();
+  // Load live data for overview and database panels
+  if (name === 'overview') loadActivity();
+  if (name === 'database') loadStorageChart();
 }
 
 // ── Toast ──────────────────────────────────────────────────────────────────
@@ -1574,6 +1741,112 @@ async function disableTotp() {
   }
 }
 
+// ── Metadata editor ────────────────────────────────────────────────────────
+
+function dbEditMeta(filePath, currentMtime, _btn) {
+  const iso = new Date(currentMtime).toISOString().slice(0, 16); // YYYY-MM-DDTHH:mm
+  const overlay = document.createElement('div');
+  overlay.setAttribute('data-meta-overlay', '1');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center';
+  overlay.innerHTML = `
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:22px 24px;min-width:360px;box-shadow:0 8px 32px rgba(0,0,0,.45)">
+      <h3 style="margin:0 0 10px;font-size:14px;font-weight:600">Edit File Metadata</h3>
+      <p style="color:var(--muted);font-size:12px;margin:0 0 16px;font-family:var(--mono);word-break:break-all">${escHtml(filePath)}</p>
+      <label style="display:block;font-size:11px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Modified Time</label>
+      <input id="meta-mtime-input" type="datetime-local" value="${iso}"
+        style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:13px;outline:none;margin-bottom:18px;color-scheme:dark">
+      <p style="color:var(--muted);font-size:11px;margin:-10px 0 16px">Changing mtime affects conflict resolution — last-write-wins uses this value.</p>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn" onclick="this.closest('[data-meta-overlay]').remove()">Cancel</button>
+        <button class="btn primary" onclick="dbSaveMeta('${escHtml(filePath)}',this)">Save</button>
+      </div>
+    </div>`;
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+  setTimeout(() => document.getElementById('meta-mtime-input')?.focus(), 40);
+}
+
+async function dbSaveMeta(filePath, btn) {
+  const overlay = btn.closest('[data-meta-overlay]');
+  const input = overlay.querySelector('#meta-mtime-input');
+  const mtime = new Date(input.value).getTime();
+  if (isNaN(mtime) || mtime <= 0) { toast('Invalid date', 'error'); return; }
+  btn.disabled = true; btn.textContent = '…';
+  try {
+    await api('/api/file-metadata', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: filePath, mtime }),
+    });
+    overlay.remove();
+    const f = dbAllFiles.find(x => x.path === filePath);
+    if (f) f.mtime = mtime;
+    dbRenderFiles();
+    toast('Metadata updated', 'success');
+  } catch (e) {
+    toast('Update failed: ' + e.message, 'error');
+    btn.disabled = false; btn.textContent = 'Save';
+  }
+}
+
+// ── Conflict comparison ────────────────────────────────────────────────────
+
+async function compareConflict(conflictPath) {
+  // Infer the original path by stripping the "(conflicted …)" portion.
+  // Common patterns: "file (conflicted 2024-01-01 at 12-34-56).md"
+  //                  "file (Conflicted Copy 2024-01-01).md"
+  //                  "file (conflicted).md"
+  const dir = conflictPath.includes('/') ? conflictPath.substring(0, conflictPath.lastIndexOf('/') + 1) : '';
+  const filename = conflictPath.includes('/') ? conflictPath.substring(conflictPath.lastIndexOf('/') + 1) : conflictPath;
+  const originalFilename = filename.replace(/\s*\([^)]*conflicted[^)]*\)/i, '').trim();
+  const originalPath = dir + originalFilename;
+
+  document.getElementById('compare-original-title').textContent = originalPath || '(could not infer original)';
+  document.getElementById('compare-conflict-title').textContent = conflictPath;
+  document.getElementById('compare-original-content').textContent = 'Loading…';
+  document.getElementById('compare-conflict-content').textContent = 'Loading…';
+  document.getElementById('compare-overlay').classList.add('open');
+
+  const [leftResult, rightResult] = await Promise.allSettled([
+    _loadFileText(originalPath),
+    _loadFileText(conflictPath),
+  ]);
+
+  document.getElementById('compare-original-content').textContent =
+    leftResult.status === 'fulfilled' ? leftResult.value : `⚠ ${leftResult.reason?.message ?? 'Not found'}`;
+  document.getElementById('compare-conflict-content').textContent =
+    rightResult.status === 'fulfilled' ? rightResult.value : `⚠ ${rightResult.reason?.message ?? 'Not found'}`;
+}
+
+async function _loadFileText(filePath) {
+  const r = await api('/api/file-content?path=' + encodeURIComponent(filePath));
+  const data = await r.json();
+  if (data.encrypted) {
+    // Try auto-decrypt with session password if available
+    const savedPw = sessionStorage.getItem('e2ee-pw') || '';
+    if (savedPw && crypto?.subtle) {
+      try {
+        const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(savedPw), 'PBKDF2', false, ['deriveKey']);
+        const key = await crypto.subtle.deriveKey(
+          { name: 'PBKDF2', salt: E2EE_PBKDF2_SALT, iterations: 100_000, hash: 'SHA-256' },
+          km, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
+        );
+        const raw = Uint8Array.from(atob(data.content), c => c.charCodeAt(0));
+        const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.slice(8, 20) }, key, raw.slice(20));
+        return new TextDecoder('utf-8', { fatal: true }).decode(plain);
+      } catch { /* fall through to locked message */ }
+    }
+    return '🔒 Encrypted — enter vault key in the Files panel to auto-decrypt';
+  }
+  const bytes = Uint8Array.from(atob(data.content), c => c.charCodeAt(0));
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+  catch { return '[Binary file — cannot display as text]'; }
+}
+
+function closeCompare() {
+  document.getElementById('compare-overlay').classList.remove('open');
+}
+
 // ── Event wiring ───────────────────────────────────────────────────────────
 document.getElementById('login-btn').addEventListener('click', login);
 document.getElementById('pw-input').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
@@ -1582,6 +1855,16 @@ document.getElementById('totp-login-input').addEventListener('keydown', e => { i
 document.getElementById('logout-btn').addEventListener('click', logout);
 document.querySelectorAll('.nav-btn').forEach(btn => {
   btn.addEventListener('click', () => showPanel(btn.dataset.panel));
+});
+document.getElementById('compare-close').addEventListener('click', closeCompare);
+document.getElementById('compare-overlay').addEventListener('click', e => {
+  if (e.target === document.getElementById('compare-overlay')) closeCompare();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    closeCompare();
+    closePreview();
+  }
 });
 
 // ── Boot ───────────────────────────────────────────────────────────────────
@@ -1763,12 +2046,12 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') closePreview();
 });
 
-// ── Global E2EE helpers ────────────────────────────────────────────────────
+// ── Global E2EE helpers ──────────────────────────────────────────────────────────────────────────────
 function getE2eePassword() {
   return sessionStorage.getItem('e2ee-pw') || '';
 }
 
-// ── Snapshot export ────────────────────────────────────────────────────────
+// ── Snapshot export ──────────────────────────────────────────────────────────────────────────────
 function loadScript(src) {
   return new Promise((resolve, reject) => {
     if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
@@ -1870,7 +2153,7 @@ async function exportSnapshot(event) {
   btn.textContent = origText;
 }
 
-// ── Version history ────────────────────────────────────────────────────────
+// ── Version history ──────────────────────────────────────────────────────────────────────────────
 
 let previewActiveTab = 'content'; // 'content' | 'history'
 
@@ -1919,7 +2202,7 @@ async function loadVersionHistory(filePath) {
     const rows = versions.map((v, i) => {
       const isLatest = i === 0;
       const sha = v.sha1 ? v.sha1.substring(0, 8) : '—';
-      return `<div class="version-row${isLatest ? ' current' : ''}" onclick="previewVersion('${escHtml(filePath)}', ${v.mtime})">
+      return `<div class="version-row${isLatest ? ' current' : ''}">
         <span class="version-num">#${versions.length - i}</span>
         <span class="version-date">
           <span style="font-weight:500">${escHtml(fmtDate(v.mtime))}</span>
@@ -1928,13 +2211,97 @@ async function loadVersionHistory(filePath) {
         </span>
         <span class="version-sha" title="${escHtml(v.sha1 || '')}">${escHtml(sha)}…</span>
         <span class="version-size">${fmtSize(v.size)}</span>
-        <button class="btn" style="font-size:11px;padding:3px 9px" onclick="event.stopPropagation();previewVersion('${escHtml(filePath)}', ${v.mtime})">View</button>
+        <button class="btn" style="font-size:11px;padding:3px 9px" onclick="previewVersion('${escHtml(filePath)}', ${v.mtime})">View</button>
+        ${!isLatest ? `<button class="btn" style="font-size:11px;padding:3px 9px;margin-left:4px" onclick="previewVersionDiff('${escHtml(filePath)}', ${versions[0].mtime}, ${v.mtime})">Diff</button>` : '<span style="display:inline-block;width:65px"></span>'}
       </div>`;
     }).join('');
 
     el.innerHTML = `<div id="version-list">${rows}</div>`;
   } catch (e) {
     el.innerHTML = `<p style="color:var(--red);padding:20px">Failed to load versions: ${escHtml(e.message)}</p>`;
+  }
+}
+
+// Compute LCS-based line diff between two strings
+// Returns array of {type: 'eq'|'add'|'del', line: string}
+function computeLineDiff(oldText, newText) {
+  const oldLines = oldText.split('\n');
+  const newLines = newText.split('\n');
+  const MAX = 800;
+  if (oldLines.length > MAX || newLines.length > MAX) {
+    return [{ type: 'eq', line: '[File too large to diff — showing new version only]' },
+            ...newLines.map(l => ({ type: 'add', line: l }))];
+  }
+  // LCS DP
+  const m = oldLines.length, n = newLines.length;
+  const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      if (oldLines[i] === newLines[j]) dp[i][j] = dp[i+1][j+1] + 1;
+      else dp[i][j] = Math.max(dp[i+1][j], dp[i][j+1]);
+    }
+  }
+  const result = [];
+  let i = 0, j = 0;
+  while (i < m || j < n) {
+    if (i < m && j < n && oldLines[i] === newLines[j]) {
+      result.push({ type: 'eq', line: oldLines[i] });
+      i++; j++;
+    } else if (j < n && (i >= m || dp[i+1][j] <= dp[i][j+1])) {
+      result.push({ type: 'add', line: newLines[j] });
+      j++;
+    } else {
+      result.push({ type: 'del', line: oldLines[i] });
+      i++;
+    }
+  }
+  return result;
+}
+
+async function previewVersionDiff(filePath, latestMtime, olderMtime) {
+  // Switch to content tab to show the diff
+  switchPreviewTab('content');
+  document.getElementById('preview-title').textContent =
+    `${filePath}  ·  diff vs. ${fmtDate(olderMtime)}`;
+  const body = document.getElementById('preview-body');
+  body.innerHTML = '<div style="text-align:center;padding:30px"><span class="spinner"></span></div>';
+
+  try {
+    const [rNew, rOld] = await Promise.all([
+      api('/api/file-content?path=' + encodeURIComponent(filePath) + '&mtime=' + latestMtime),
+      api('/api/file-content?path=' + encodeURIComponent(filePath) + '&mtime=' + olderMtime),
+    ]);
+    const [dNew, dOld] = await Promise.all([rNew.json(), rOld.json()]);
+
+    if (dNew.encrypted || dOld.encrypted) {
+      body.innerHTML = '<p style="color:var(--muted);padding:20px">Diff is not available for E2EE-encrypted files.</p>';
+      return;
+    }
+
+    const decode = b64 => {
+      try {
+        const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+        return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      } catch { return null; }
+    };
+
+    const oldText = decode(dOld.content);
+    const newText = decode(dNew.content);
+    if (oldText === null || newText === null) {
+      body.innerHTML = '<p style="color:var(--muted);padding:20px">Binary files cannot be diffed.</p>';
+      return;
+    }
+
+    const diff = computeLineDiff(oldText, newText);
+    const lines = diff.map(({ type, line }) => {
+      const cls = type === 'add' ? 'diff-add' : type === 'del' ? 'diff-del' : 'diff-eq';
+      const prefix = type === 'add' ? '+' : type === 'del' ? '-' : ' ';
+      return `<div class="diff-line ${cls}">${escHtml(prefix + line)}</div>`;
+    }).join('');
+
+    body.innerHTML = `<div class="diff-block">${lines || '<div class="diff-eq">(no differences)</div>'}</div>`;
+  } catch (e) {
+    body.innerHTML = `<p style="color:var(--red);padding:20px">Diff failed: ${escHtml(e.message)}</p>`;
   }
 }
 
@@ -1945,12 +2312,7 @@ async function previewVersion(filePath, mtime) {
   previewCurrentB64 = '';
 
   // Switch to content tab to show the file
-  previewActiveTab = 'content';
-  document.querySelectorAll('.preview-tab').forEach(el => {
-    el.classList.toggle('active', el.dataset.tab === 'content');
-  });
-  document.getElementById('preview-body').style.display = '';
-  document.getElementById('history-body').style.display = 'none';
+  switchPreviewTab('content');
 
   const ts = new Date(mtime).toLocaleString();
   document.getElementById('preview-title').textContent = `${filePath}  ·  ${ts}`;
@@ -1974,4 +2336,142 @@ async function previewVersion(filePath, mtime) {
   }
 }
 
-// ── Init ──────────────────────────────────────────
+// ── Activity feed ──────────────────────────────────────────────────────────────────────────────
+
+async function loadActivity() {
+  const el = document.getElementById('activity-feed');
+  if (!el) return;
+  try {
+    const r = await api('/api/activity');
+    const events = await r.json();
+    if (!events.length) {
+      el.innerHTML = '<div class="empty">No activity yet</div>';
+      return;
+    }
+    el.innerHTML = events.map(ev => {
+      const kindLabel = {
+        upload: 'Upload', push: 'Push', delete: 'Delete',
+        connect: 'Connect', disconnect: 'Disconnect', rename: 'Rename'
+      }[ev.kind] || ev.kind;
+      const kindCls = ev.kind;
+      const path = ev.path ? `<span class="activity-path">${escHtml(ev.path)}</span>` : '';
+      const device = ev.deviceId ? `<span class="activity-device">${escHtml(ev.deviceId.substring(0,8))}…</span>` : '';
+      const detail = ev.detail ? `<span class="activity-detail">${escHtml(ev.detail)}</span>` : '';
+      return `<div class="activity-row">
+        <span class="activity-ts">${fmtDate(ev.ts)}</span>
+        <span class="activity-kind ${kindCls}">${kindLabel}</span>
+        ${path}${device}${detail}
+      </div>`;
+    }).join('');
+  } catch (e) {
+    if (el) el.innerHTML = `<div class="empty" style="color:var(--red)">Failed: ${escHtml(e.message)}</div>`;
+  }
+}
+
+// ── Storage breakdown chart ──────────────────────────────────────────────────────────────────────────────
+
+async function loadStorageChart() {
+  const el = document.getElementById('storage-chart-body');
+  if (!el) return;
+  try {
+    const r = await api('/api/db/storage-by-folder');
+    const items = await r.json(); // [{folder, bytes}]
+    if (!items.length) {
+      el.innerHTML = '<div class="empty">No storage data</div>';
+      return;
+    }
+    const maxBytes = items[0].bytes;
+    el.innerHTML = items.map(({ folder, bytes }) => {
+      const pct = maxBytes > 0 ? Math.max(1, Math.round((bytes / maxBytes) * 100)) : 1;
+      return `<div class="chart-row">
+        <span class="chart-label" title="${escHtml(folder)}">${escHtml(folder)}</span>
+        <div class="chart-bar-wrap">
+          <div class="chart-bar" style="width:${pct}%"></div>
+        </div>
+        <span class="chart-bytes">${fmtSize(bytes)}</span>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    if (el) el.innerHTML = `<div class="empty" style="color:var(--red)">Failed: ${escHtml(e.message)}</div>`;
+  }
+}
+
+// ── Bulk file select (Database Manager) ──────────────────────────────────────────────────────────────────────────────
+
+const dbSelected = new Set();
+
+function dbUpdateBulkBar() {
+  const bar = document.getElementById('bulk-bar');
+  const countEl = document.getElementById('bulk-count');
+  if (!bar || !countEl) return;
+  if (dbSelected.size > 0) {
+    bar.style.display = '';
+    countEl.textContent = dbSelected.size + ' file' + (dbSelected.size !== 1 ? 's' : '') + ' selected';
+  } else {
+    bar.style.display = 'none';
+  }
+}
+
+function dbToggleSelectAll(checked) {
+  document.querySelectorAll('.db-file-checkbox').forEach(cb => {
+    cb.checked = checked;
+    if (checked) dbSelected.add(cb.dataset.path);
+    else dbSelected.delete(cb.dataset.path);
+  });
+  dbUpdateBulkBar();
+}
+
+function dbToggleFile(path, checked) {
+  if (checked) dbSelected.add(path);
+  else dbSelected.delete(path);
+  dbUpdateBulkBar();
+}
+
+async function dbDeleteSelected() {
+  if (!dbSelected.size) return;
+  const count = dbSelected.size;
+  if (!confirm(`Delete ${count} file${count !== 1 ? 's' : ''}? This removes them from storage permanently.`)) return;
+  let failed = 0;
+  for (const path of [...dbSelected]) {
+    try {
+      await api('/api/delete-file/' + encodeURIComponent(path), { method: 'DELETE' });
+      dbSelected.delete(path);
+    } catch { failed++; }
+  }
+  dbUpdateBulkBar();
+  toast(failed > 0 ? `Deleted ${count - failed}, ${failed} failed` : `Deleted ${count} file${count !== 1 ? 's' : ''}`,
+        failed > 0 ? 'error' : 'success');
+  await loadDbFiles();
+}
+
+// ── Folder rename ──────────────────────────────────────────────────────────────────────────────
+
+function openFolderRename(folderPath) {
+  const newName = prompt(`Rename folder\n\nCurrent path: ${folderPath}\n\nNew path:`, folderPath);
+  if (!newName || newName === folderPath) return;
+  submitFolderRename(folderPath, newName.trim());
+}
+
+async function submitFolderRename(fromPath, toPath) {
+  if (!toPath || toPath === fromPath) return;
+  try {
+    const r = await api('/api/rename-folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: fromPath, to: toPath }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ error: r.statusText }));
+      toast('Rename failed: ' + (err.error || r.statusText), 'error');
+      return;
+    }
+    const data = await r.json();
+    toast(`Renamed ${data.count} file record${data.count !== 1 ? 's' : ''} — peers disconnected for re-sync`, 'success');
+    await refreshAll();
+  } catch (e) {
+    toast('Rename failed: ' + e.message, 'error');
+  }
+}
+
+// ── Init ─────────────────────────────────────────────────
+refreshAll();

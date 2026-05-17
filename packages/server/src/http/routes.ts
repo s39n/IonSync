@@ -7,6 +7,7 @@ import { diff_match_patch } from "diff-match-patch";
 import type { BackgroundSyncReq } from "@ionsync/protocol";
 import { verifyTOTP, generateSecret, totpUri, createPendingToken, consumePendingToken,
   generateRecoveryCodes, formatRecoveryCode, normalizeRecoveryCode, hashRecoveryCode } from "../totp.js";
+import { pushActivity } from "../context.js";
 
 // ── 1. PUBLIC ROUTER (Exposed to the Tunnel) ────────────────────────────────
 
@@ -21,7 +22,7 @@ export function buildPublicRouter(ctx: SyncContext): express.Router {
   });
 
 
-  return router;
+    return router;
 }
 
 // ── 2. ADMIN ROUTER (Locked to Localhost/Trusted Network) ───────────────────
@@ -279,6 +280,28 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     res.json({ ok: true });
   });
 
+  // ── Update file metadata (mtime only, no new version row) ────────────────
+
+  router.patch("/api/file-metadata", express.json(), (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const { path: filePath, mtime } = req.body as { path?: string; mtime?: unknown };
+    if (!filePath || typeof filePath !== "string" || filePath.trim() === "") {
+      res.status(400).json({ error: "Missing or invalid path" }); return;
+    }
+    if (!Number.isInteger(mtime) || (mtime as number) <= 0) {
+      res.status(400).json({ error: "mtime must be a positive integer (epoch ms)" }); return;
+    }
+    // Reject path traversal
+    const normalized = path.normalize(filePath.trim());
+    if (normalized.startsWith("..") || path.isAbsolute(normalized)) {
+      res.status(400).json({ error: "Invalid path" }); return;
+    }
+    const existing = ctx.db.getFile(filePath.trim());
+    if (!existing) { res.status(404).json({ error: "File not found" }); return; }
+    ctx.db.updateFileMeta(filePath.trim(), mtime as number);
+    res.json({ ok: true });
+  });
+
   // ── Database manager ──────────────────────────────────────────────────────
 
   // Aggregate stats
@@ -502,6 +525,64 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     ctx.db.deleteSetting("totp_recovery_codes");
     res.json({ ok: true });
   });
+
+  // ── Storage breakdown by folder ──────────────────────────────────────────
+  // Returns [ { folder: string, bytes: number }, … ] sorted largest-first.
+  router.get("/api/db/storage-by-folder", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    try {
+      const allPaths = ctx.db.getAllFilePaths();
+      const byFolder: Record<string, number> = {};
+      for (const p of allPaths) {
+        const folder = p.includes("/") ? p.split("/")[0]! : "(root)";
+        const size = ctx.storage.getSizeLatest(p) ?? 0;
+        byFolder[folder] = (byFolder[folder] ?? 0) + size;
+      }
+      const rows = Object.entries(byFolder)
+        .map(([folder, bytes]) => ({ folder, bytes }))
+        .sort((a, b) => b.bytes - a.bytes);
+      res.json(rows);
+    } catch (e: unknown) {
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  // ── Rename folder ─────────────────────────────────────────────────────────
+  // Body: { from: "old/path", to: "new/path" }
+  router.post("/api/rename-folder", express.json(), (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const { from: fromPrefix, to: toPrefix } = req.body as { from?: string; to?: string };
+    if (!fromPrefix || !toPrefix || fromPrefix === toPrefix) {
+      res.status(400).json({ error: "Provide distinct from and to folder prefixes" }); return;
+    }
+    // Basic path-traversal guard
+    for (const p of [fromPrefix, toPrefix]) {
+      const n = path.normalize(p);
+      if (n.startsWith("..") || path.isAbsolute(n)) {
+        res.status(400).json({ error: "Invalid path" }); return;
+      }
+    }
+    try {
+      const moved = ctx.storage.renameFolder(fromPrefix, toPrefix);
+      const count  = ctx.db.renameFolderPaths(fromPrefix, toPrefix);
+      // Disconnect all peers so they re-sync with the new paths
+      for (const peer of ctx.peers.values()) {
+        peer.disconnect("Folder renamed — please reconnect to re-sync");
+      }
+      pushActivity(ctx, { kind: "rename", detail: `${fromPrefix} => ${toPrefix} (${count} files)` });
+      res.json({ ok: true, files: count, storageEntries: moved.length });
+    } catch (e: unknown) {
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  // ── Activity feed ─────────────────────────────────────────────────────────
+  // Returns the last 100 structured activity events, newest-first.
+  router.get("/api/activity", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    res.json([...ctx.activityLog].reverse());
+  });
+
 
   return router;
 }

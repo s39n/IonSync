@@ -50,6 +50,12 @@ export class XSync {
   private messageQueue: ServerMsg[] = [];
   private isProcessingQueue = false;
 
+  // Paths we are actively writing via _applyServerFile.  When the vault fires
+  // a create/modify event for one of these paths we suppress it — otherwise the
+  // plugin would re-upload the file it just received, which can race with edits
+  // on other vaults and produce spurious "Conflicted Copy" files there.
+  private _applyingPaths = new Set<string>();
+
   // ── E2EE key cache ────────────────────────────────────────────────────────
   // PBKDF2 derivation is expensive (~100–200 ms).  Cache the derived key and
   // only re-derive when the password changes.
@@ -341,12 +347,17 @@ export class XSync {
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
             console.log(`[IonSync] Applying file ${file.path}, attempt ${attempt + 1}`);
+            // Register before writing so the vault event is caught by the guard
+            // in _processLocalEvent and suppressed (prevents spurious re-uploads).
+            this._applyingPaths.add(file.path);
             if (Utils.isBinary(file.path)) await this.storage.writeBinary(file.path, content, file);
             else await this.storage.write(file.path, content, file);
             writeErr = null;
             break;
           } catch (e) {
             console.warn(`[IonSync] Failed write for ${file.path} on attempt ${attempt + 1}:`, e);
+            // Write failed — no vault event will fire, so clean up the guard entry.
+            this._applyingPaths.delete(file.path);
             writeErr = e;
             // On first failure ensure parent dirs exist then retry.
             if (attempt === 0) {
@@ -356,7 +367,10 @@ export class XSync {
             }
           }
         }
-        if (writeErr) throw writeErr;
+        if (writeErr) {
+          this._applyingPaths.delete(file.path); // final cleanup if both attempts failed
+          throw writeErr;
+        }
 
         this.addActivity("down", file.path);
         this.syncDownCount++;
@@ -393,6 +407,15 @@ export class XSync {
     this.syncDownCount = 0;
     this.syncApplyCount = 0;
 
+    // Brand-new device: no prior metadata means we have never completed a sync.
+    // Withhold config/settings uploads until sync_done so the server's
+    // authoritative versions come down first, preventing a fresh device from
+    // overwriting other devices' settings with locally-generated defaults.
+    this._isFirstSync = !this.storage.hasAnyMetadata();
+    if (this._isFirstSync) {
+      this.plugin.log("[IonSync] First sync detected — config file uploads deferred until sync_done");
+    }
+
     try {
       for (const [, ev] of Object.entries(this.unsentSessionEvents)) {
         await this._processLocalEvent(ev.action, ev.file, false);
@@ -428,6 +451,7 @@ export class XSync {
 
   private async _onSyncDone(): Promise<void> {
     this.isSyncing = false;
+    this._isFirstSync = false;  // device is now fully synced
     this.releaseWakeLock();
     this.xNotify.setSyncSummary(this.syncUpCount, this.syncDownCount);
     this.syncUpCount = 0;
@@ -439,6 +463,18 @@ export class XSync {
 
   private async _uploadFile(path: string): Promise<void> {
     if (!this.ws.isConnected) return;
+
+    // On a brand-new device (first ever sync), don't upload config/settings
+    // files — let the server push its authoritative versions down instead.
+    // This prevents freshly-created Obsidian defaults from overwriting the
+    // settings that every other device is already using.
+    if (this._isFirstSync) {
+      const configDir = this.plugin.app.vault.configDir;
+      if (path.startsWith(configDir + "/") || path.startsWith(".obsidian/")) {
+        this.plugin.log(`[IonSync] First sync — deferring config upload: ${path}`);
+        return;
+      }
+    }
 
     const hardcodedBinaryCheck = /\.(jpeg|jpg|png|gif|bmp|webp|ico|svg|pdf|mp3|mp4|wav|mov|zip|rar|7z)$/i.test(path);
     const isBinary = Utils.isBinary(path) || hardcodedBinaryCheck;
@@ -519,6 +555,17 @@ export class XSync {
     }
 
     if (this.exclusionFilter?.isExcluded(file.path)) return;
+
+    // Suppress the vault create/modify event that fires immediately after
+    // _applyServerFile writes a file.  Without this guard the plugin would
+    // re-upload the just-received file (often with the OS's current mtime
+    // instead of the server's mtime), causing the server to broadcast a
+    // slightly-different entry back to other connected vaults.  On those vaults
+    // the incoming mtime can trigger the offline-edit conflict detector, which
+    // then creates spurious "(Conflicted Copy)" files.
+    if ((action === "create" || action === "modify") && this._applyingPaths.delete(file.path)) {
+      return;
+    }
 
     if (action === "rename") {
       const oldPath = args[0] as string;
@@ -707,6 +754,11 @@ export class XSync {
    * remaining files are silently skipped.  Here the CLIENT drives the queue
    * sequentially so a disconnect shows progress and can be resumed.
    */
+  // True for the duration of the very first sync on a brand-new device
+  // (no prior metadata).  Config/settings files are withheld from upload
+  // until sync_done so the server's authoritative settings come down first.
+  private _isFirstSync = false;
+
   private _reEncrypting = false;
 
   async triggerReEncrypt(): Promise<void> {
@@ -789,7 +841,7 @@ export class XSync {
   }
 
   addActivity(direction: "up" | "down" | "delete", path: string): void {
-    const icon = direction === "up" ? "↑" : direction === "down" ? "↓" : "🗑";
+    const icon = direction === "up" ? "\u2191" : direction === "down" ? "\u2193" : "\ud83d\uddd1";
     this.activityLog.unshift(`[${new Date().toLocaleTimeString()}] ${icon} ${path}`);
     if (this.activityLog.length > this.MAX_ACTIVITY) this.activityLog.pop();
   }

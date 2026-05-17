@@ -28,6 +28,11 @@ export class ExclusionFilter {
     // 1. IMMUTABLE RULE: Never sync workspace files (prevents infinite loops)
     if (this.dangerousFiles.has(path)) return true;
 
+    // 2. IMMUTABLE RULE: Never sync IonSync's own plugin directory.
+    //    It contains device-specific settings (deviceId, password, metadata)
+    //    that must not bleed across devices regardless of any toggle.
+    if (path.startsWith(`${this.configDir}/plugins/ion-sync/`)) return true;
+
     // Obsidian trash folder
     if (this.isTrashPath(path) && !this.settings.syncTrash) return true;
 
@@ -73,10 +78,18 @@ export class ExclusionFilter {
     return p === `${this.configDir}/core-plugins.json` || p === `${this.configDir}/core-plugins-migration.json`;
   }
   private isCorePluginSettings(p: string) {
-    return p.startsWith(`${this.configDir}/plugins/`) && !p.startsWith(`${this.configDir}/plugins/ion-sync/`);
+    // Core plugin settings are JSON files sitting directly in .obsidian/ (e.g.
+    // daily-notes.json, templates.json).  They live in the config root, never in
+    // a subdirectory.  app.json, appearance.json, hotkeys.json, and core-plugins.json
+    // are already handled by their own dedicated checks above.
+    if (!p.startsWith(`${this.configDir}/`)) return false;
+    const rest = p.slice(this.configDir.length + 1);
+    return !rest.includes("/") && rest.endsWith(".json");
   }
   private isActiveCommunityPlugins(p: string) { return p === `${this.configDir}/community-plugins.json`; }
-  private isInstalledCommunityPlugins(p: string) { return p.startsWith(`${this.configDir}/plugins/`); }
+  private isInstalledCommunityPlugins(p: string) {
+    return p.startsWith(`${this.configDir}/plugins/`);
+  }
 
   private patternToRegex(pattern: string): RegExp {
     // Glob-style: * = any non-separator char, ** = anything

@@ -128,4 +128,56 @@ export class Storage {
     }
     fs.mkdirSync(this.base, { recursive: true });
   }
+
+  /**
+   * Renames a folder prefix by moving all version directories under
+   * `fromPrefix/` to `toPrefix/`.  Used by the folder-rename admin action.
+   * Returns the list of old→new path pairs that were moved.
+   */
+  renameFolder(fromPrefix: string, toPrefix: string): Array<{ oldPath: string; newPath: string }> {
+    const fromDir = this.resolve(fromPrefix);
+    if (!fs.existsSync(fromDir)) return [];
+
+    const moved: Array<{ oldPath: string; newPath: string }> = [];
+
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory() && !entry.name.startsWith("v_")) {
+          walk(full);
+        }
+      }
+    };
+
+    // Collect all vault-path directories under fromDir (leaf dirs contain v_* files)
+    const collectLeafDirs = (dir: string, rel: string): void => {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      const hasVersions = entries.some(e => e.isFile() && e.name.startsWith("v_"));
+      if (hasVersions) {
+        const oldVaultPath = fromPrefix + "/" + rel;
+        const newVaultPath = toPrefix + "/" + rel;
+        moved.push({ oldPath: oldVaultPath.replace(/^\/+/, ""), newPath: newVaultPath.replace(/^\/+/, "") });
+      }
+      for (const e of entries) {
+        if (e.isDirectory()) {
+          collectLeafDirs(path.join(dir, e.name), rel ? rel + "/" + e.name : e.name);
+        }
+      }
+    };
+
+    collectLeafDirs(fromDir, "");
+
+    // Move each leaf storage directory
+    for (const { oldPath, newPath } of moved) {
+      const src = this.resolve(oldPath);
+      const dst = this.resolve(newPath);
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.renameSync(src, dst);
+    }
+
+    // Remove the now-empty fromDir tree
+    try { fs.rmSync(fromDir, { recursive: true, force: true }); } catch { /* non-fatal */ }
+
+    return moved;
+  }
 }

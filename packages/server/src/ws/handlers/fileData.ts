@@ -1,5 +1,6 @@
 import type { FileDataUploadMsg, FileDataRequestMsg } from "@ionsync/protocol";
 import type { SyncContext } from "../../context.js";
+import { pushActivity } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 import { broadcastToPeers, checkSyncDone } from "./sync.js";
 import crypto from "node:crypto";
@@ -61,6 +62,7 @@ export function handleFileUpload(
     ctx.db.upsertFile(file);
     broadcastToPeers(ctx, peer, file);
     logInfo(ctx, `[file_data] saved ${file.path} (action=${file.action}, mtime=${file.mtime})`);
+    pushActivity(ctx, { kind: "upload", deviceId: peer.deviceId ?? undefined, path: file.path });
   }
 
   // ✅ CRITICAL FIX: Always advance the queue, even if the file was rejected!

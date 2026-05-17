@@ -138,7 +138,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
     toggleSetting("Appearance settings", ".obsidian/appearance.json", "syncAppearanceSettings");
     toggleSetting("Hotkeys", ".obsidian/hotkeys.json", "syncHotkeys");
     toggleSetting("Active core plugins", "core-plugins.json", "syncActiveCorePlugins");
-    toggleSetting("Core plugin settings", ".obsidian/plugins/ (built-in)", "syncCorePluginSettings");
+    toggleSetting("Core plugin settings", ".obsidian/*.json (e.g. daily-notes.json, templates.json)", "syncCorePluginSettings");
     toggleSetting("Active community plugins", "community-plugins.json", "syncActiveCommunityPlugins");
     toggleSetting("Installed community plugins", ".obsidian/plugins/", "syncInstalledCommunityPlugins");
 
@@ -211,7 +211,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
         "border: 1px solid var(--color-orange); border-radius: 6px; " +
         "padding: 10px 14px; margin: 4px 0 12px; font-size: 12px; " +
         "color: var(--color-orange); " +
-        "background: color-mix(in srgb, var(--color-orange) 10%, transparent);";
+        "background: var(--background-modifier-error);";
       warn.setText(
         "There is no password recovery. If you forget this passphrase " +
         "you will permanently lose access to all encrypted files stored on the server. " +

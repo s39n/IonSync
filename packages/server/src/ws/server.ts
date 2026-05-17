@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { v4 as uuidv4 } from "uuid";
 import type { ClientMsg } from "@ionsync/protocol";
 import type { SyncContext } from "../context.js";
+import { pushActivity } from "../context.js";
 import { createPeer } from "./peer.js";
 import { handleAuth } from "./handlers/auth.js";
 import { handleSync } from "./handlers/sync.js";
@@ -63,6 +64,9 @@ export function attachWebSocketServer(
         if (msg.type === "auth") {
           clearTimeout(authTimeout);
           handleAuth(ctx, peer, msg);
+          if (peer.authed) {
+            pushActivity(ctx, { kind: "connect", deviceId: peer.deviceId ?? undefined, detail: peer.id });
+          }
         } else {
           peer.disconnect("Not authenticated");
         }
@@ -128,6 +132,9 @@ export function attachWebSocketServer(
 
     ws.on("close", () => {
       clearTimeout(authTimeout);
+      if (peer.authed) {
+        pushActivity(ctx, { kind: "disconnect", deviceId: peer.deviceId ?? undefined, detail: peer.id });
+      }
       ctx.peers.delete(peerId);
     });
 

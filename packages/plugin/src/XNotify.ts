@@ -117,6 +117,17 @@ export class XNotify {
     menu.showAtMouseEvent(evt);
   }
 
+  /** Returns the theme's accent color (--color-accent CSS variable),
+   *  falling back to STATUS_OK green if the variable is not set. */
+  private _themeAccent(): string {
+    try {
+      const c = getComputedStyle(document.body).getPropertyValue("--color-accent").trim();
+      return c || STATUS_OK;
+    } catch {
+      return STATUS_OK;
+    }
+  }
+
   private setColor(color: string): void {
     if (this.statusBarIcon) this.statusBarIcon.style.color = color;
     if (this.mobileIcon) this.mobileIcon.style.color = color;
@@ -173,12 +184,13 @@ export class XNotify {
   }
 
   setSyncSummary(up: number, down: number): void {
-    this.setColor(STATUS_OK);
+    const accent = this._themeAccent();
+    this.setColor(accent);
     const parts: string[] = [];
     if (up > 0) parts.push(`↑${up}`);
     if (down > 0) parts.push(`↓${down}`);
     const summary = parts.length > 0 ? `Synced ${parts.join(" ")}` : "Up to date";
-    if ((this.xSync.plugin.settings.notifications ?? 0) > 1) this._makeNotice(STATUS_OK, summary);
+    if ((this.xSync.plugin.settings.notifications ?? 0) > 1) this._makeNotice(accent, summary);
     this.setStatusMessage(summary, false, 5_000);
     
     if (this.mobileIndicator) this.mobileIndicator.removeClass("syncing");
@@ -211,6 +223,7 @@ export class XNotify {
           this._lastDisconnectTime > 0 &&
           Date.now() - this._lastDisconnectTime < XNotify.TRANSIENT_MS;
         this._lastDisconnectTime = 0;
+        const accent = this._themeAccent();
         if (wasTransient) {
           // The connection blipped back within the threshold — cancel the
           // pending "Connection lost" notice and show nothing for CONNECTED.
@@ -219,9 +232,9 @@ export class XNotify {
             this.pendingNoticeTimeout = null;
           }
         } else if (level > 0) {
-          this._makeNotice(STATUS_OK, type);
+          this._makeNotice(accent, type);
         }
-        this.setColor(STATUS_OK);
+        this.setColor(accent);
         this.setStatusMessage(this._pendingCount > 0 ? `${this._pendingCount} remaining` : type, true);
         break;
       }
@@ -230,11 +243,13 @@ export class XNotify {
         this.setColor(STATUS_SYNC);
         this.setStatusMessage(type, true);
         break;
-      case NotifyType.SYNC_COMPLETED:
-        if (level > 1) this._makeNotice(STATUS_OK, type);
-        this.setColor(STATUS_OK);
+      case NotifyType.SYNC_COMPLETED: {
+        const accent = this._themeAccent();
+        if (level > 1) this._makeNotice(accent, type);
+        this.setColor(accent);
         this.setStatusMessage(type, false, 5_000);
         break;
+      }
       case NotifyType.AUTO_SYNC_DISABLED:
         if (level > 1) this._makeNotice(STATUS_WARN, type);
         this.setColor(STATUS_WARN);
