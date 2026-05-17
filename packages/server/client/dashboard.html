@@ -743,6 +743,20 @@
           </div>
         </div>
 
+        <div class="card" style="border-color:var(--yellow,#f0a500);margin-bottom:16px">
+          <div class="card-header" style="background:var(--bg3)">
+            <h3 style="color:var(--yellow,#f0a500)">Remove All Conflicts</h3>
+          </div>
+          <div style="padding:16px 20px">
+            <p style="margin:0 0 8px;font-size:13px">
+              Deletes every file whose name contains <em>"conflicted"</em> from the server.
+              This resolves all pending conflicts by discarding the conflict copies — the original files are kept untouched.
+            </p>
+            <p style="margin:0 0 16px;font-size:12px;color:var(--muted)">Conflict copies only. Original files are not affected.</p>
+            <button class="btn danger" id="clear-conflicts-btn" onclick="clearAllConflicts(this)">Remove All Conflicts</button>
+          </div>
+        </div>
+
         <div class="card" style="border-color:var(--red)">
           <div class="card-header" style="background:var(--bg3)">
             <h3 style="color:var(--red)">Factory Reset</h3>
@@ -793,10 +807,16 @@
     <div id="compare-panes">
       <div class="compare-pane">
         <div class="compare-pane-title" id="compare-original-title">original</div>
+        <div style="padding:4px 12px 8px;display:flex;gap:8px;border-bottom:1px solid var(--border)">
+          <button class="btn danger" style="font-size:11px;padding:3px 10px" onclick="deleteCompareVersion('original')">Delete this version</button>
+        </div>
         <pre class="compare-pane-content" id="compare-original-content"></pre>
       </div>
       <div class="compare-pane">
         <div class="compare-pane-title conflict" id="compare-conflict-title">conflicted</div>
+        <div style="padding:4px 12px 8px;display:flex;gap:8px;border-bottom:1px solid var(--border)">
+          <button class="btn danger" style="font-size:11px;padding:3px 10px" onclick="deleteCompareVersion('conflict')">Delete this version</button>
+        </div>
         <pre class="compare-pane-content" id="compare-conflict-content"></pre>
       </div>
     </div>
@@ -1816,6 +1836,61 @@ async function compareConflict(conflictPath) {
     leftResult.status === 'fulfilled' ? leftResult.value : `⚠ ${leftResult.reason?.message ?? 'Not found'}`;
   document.getElementById('compare-conflict-content').textContent =
     rightResult.status === 'fulfilled' ? rightResult.value : `⚠ ${rightResult.reason?.message ?? 'Not found'}`;
+}
+
+async function deleteCompareVersion(side) {
+  // side = 'original' | 'conflict'
+  const titleId = side === 'original' ? 'compare-original-title' : 'compare-conflict-title';
+  const filePath = document.getElementById(titleId).textContent;
+  if (!filePath || filePath.startsWith('(')) {
+    toast('Cannot determine file path', 'error');
+    return;
+  }
+  if (!confirm(`Delete this version from the server?\n\n${filePath}\n\nThis cannot be undone.`)) return;
+  try {
+    await api(`/api/delete-file/${encodeURIComponent(filePath)}`, { method: 'DELETE' });
+    toast('Version deleted', 'success');
+    document.getElementById('compare-overlay').classList.remove('open');
+    await loadFiles();
+  } catch (e) {
+    toast(`Delete failed: ${e.message}`, 'error');
+  }
+}
+
+async function clearAllConflicts(btn) {
+  // Find all files whose path contains "conflicted" (case-insensitive)
+  const conflicts = allFiles.filter(f => f.path.toLowerCase().includes('conflicted'));
+  if (!conflicts.length) { toast('No conflict files found', 'success'); return; }
+
+  // Two-click arm pattern
+  if (!btn.dataset.armed) {
+    btn.dataset.armed = '1';
+    btn.textContent = `Confirm — delete ${conflicts.length} conflict file${conflicts.length !== 1 ? 's' : ''}?`;
+    setTimeout(() => {
+      if (btn.dataset.armed) {
+        delete btn.dataset.armed;
+        btn.textContent = 'Remove All Conflicts';
+      }
+    }, 5000);
+    return;
+  }
+  delete btn.dataset.armed;
+  btn.disabled = true;
+  btn.textContent = 'Removing…';
+
+  let ok = 0, failed = 0;
+  for (const f of conflicts) {
+    try {
+      await api(`/api/delete-file/${encodeURIComponent(f.path)}`, { method: 'DELETE' });
+      ok++;
+    } catch { failed++; }
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Remove All Conflicts';
+  if (failed) toast(`Removed ${ok} conflict${ok !== 1 ? 's' : ''}, ${failed} failed`, 'error');
+  else toast(`Removed ${ok} conflict file${ok !== 1 ? 's' : ''}`, 'success');
+  await loadFiles();
 }
 
 async function _loadFileText(filePath) {
