@@ -136,6 +136,47 @@ export class SyncDB {
       .run(filePath, filePath, keepCount);
   }
 
+  /**
+   * Returns a map of path → received_at for every file currently flagged as
+   * "deleted".  Used by the sync handler to correctly resolve the re-add case:
+   * if a client sends a file as "active" with mtime > received_at, the client
+   * re-added the file after the deletion was recorded and should win.
+   */
+  getDeletedReceivedAt(): Map<string, number> {
+    const rows = this.db
+      .prepare<[], { path: string; received_at: number }>(
+        "SELECT path, received_at FROM files WHERE action = 'deleted'"
+      )
+      .all();
+    return new Map(rows.map((r) => [r.path, r.received_at]));
+  }
+
+  /**
+   * Physically removes deleted file record(s) from the database.
+   * Unlike upsertFile({action:"deleted"}), this erases the row entirely so the
+   * server treats the path as never seen — allowing the client to re-upload it
+   * as a brand-new file.
+   *
+   * @param filePath  If provided, purges only that path. Otherwise purges all
+   *                  rows with action = "deleted".
+   * @returns Number of rows removed.
+   */
+  purgeDeletedFiles(filePath?: string): number {
+    if (filePath) {
+      const r = this.db
+        .prepare<[string]>("DELETE FROM files WHERE path = ? AND action = 'deleted'")
+        .run(filePath);
+      this.db
+        .prepare<[string]>("DELETE FROM file_versions WHERE path = ?")
+        .run(filePath);
+      return r.changes;
+    }
+    const r = this.db
+      .prepare("DELETE FROM files WHERE action = 'deleted'")
+      .run();
+    return r.changes;
+  }
+
   // --- Devices --------------------------------------------------------------
 
   touchDevice(id: string): void {

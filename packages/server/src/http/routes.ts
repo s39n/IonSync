@@ -374,6 +374,28 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     res.json({ ok: true, restored: count });
   });
 
+  // ── Purge deleted file records ────────────────────────────────────────────
+  // Physically removes rows with action="deleted" from the DB so the server
+  // forgets the file entirely and treats a re-upload as brand new.
+  //
+  // DELETE /api/db/purge-deleted          → purge ALL deleted records
+  // DELETE /api/db/purge-deleted?path=... → purge a single path
+  router.delete("/api/db/purge-deleted", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const rawPath = String(req.query.path ?? "").trim();
+    if (rawPath) {
+      const normalized = path.normalize(rawPath);
+      if (normalized.startsWith("..") || path.isAbsolute(normalized)) {
+        res.status(400).json({ error: "Invalid path" }); return;
+      }
+      const count = ctx.db.purgeDeletedFiles(rawPath);
+      res.json({ ok: true, purged: count });
+    } else {
+      const count = ctx.db.purgeDeletedFiles();
+      res.json({ ok: true, purged: count });
+    }
+  });
+
   // ── Factory reset ─────────────────────────────────────────────────────────
 
   router.post("/api/reset", (req, res) => {

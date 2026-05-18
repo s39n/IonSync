@@ -260,6 +260,10 @@ export class XSync {
     if (file.path.includes("node_modules/") || file.path.includes(".git/")) return;
     if (this.exclusionFilter?.isExcluded(file.path)) return;
 
+    // When true, re-upload the file encrypted after writing so the server's
+    // stored copy is upgraded from plaintext to ciphertext.
+    let shouldReencrypt = false;
+
     // ── E2EE decrypt ──────────────────────────────────────────────────────
     // If the incoming content carries our encryption magic, decrypt it before
     // passing it to the write path (which expects a plain base64 payload).
@@ -280,15 +284,17 @@ export class XSync {
         return;
       }
     } else if (file.action !== "deleted" && content) {
-      // Reverse guard: this device has E2EE enabled but the incoming content
-      // is plaintext (no magic header). A peer sent this file without encryption,
-      // which means writing it would silently corrupt the vault by mixing
-      // unencrypted content alongside encrypted content.
+      // Reverse guard: this device has E2EE enabled but the incoming content is
+      // plaintext (no magic header). This typically means the server is pushing
+      // an old pre-E2EE version (e.g. a deleted file stored before encryption was
+      // enabled). Rather than skipping, we accept the plaintext, write it to the
+      // vault, then immediately re-upload it encrypted so the server's stored copy
+      // is upgraded and future pushes will always be ciphertext.
       const key = await this._getEncryptionKey();
       if (key) {
-        console.warn(`[IonSync] E2EE: received unencrypted file from a peer without E2EE — skipping ${file.path}`);
-        this.xNotify.showNotification(STATUS_WARN, "Unencrypted file received — another device has E2EE disabled");
-        return;
+        console.warn(`[IonSync] E2EE: received unencrypted file — writing and scheduling re-encrypt: ${file.path}`);
+        shouldReencrypt = true;
+        // Fall through: content is already plain base64, the write path handles it normally.
       }
     }
 
@@ -374,6 +380,14 @@ export class XSync {
 
         this.addActivity("down", file.path);
         this.syncDownCount++;
+
+        // If we accepted an unencrypted server push, re-upload it encrypted
+        // after a short delay so any in-progress sync messages have settled.
+        // This upgrades the server's stored copy to ciphertext and prevents
+        // future "unencrypted file received" alerts for this file.
+        if (shouldReencrypt) {
+          setTimeout(() => this.pushFile(file.path), 1500);
+        }
       }
     } catch (e) {
       console.error(`[IonSync] Error applying server file (${file.path}):`, e);

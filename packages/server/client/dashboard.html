@@ -697,6 +697,7 @@
               style="padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg3);color:var(--text);font-size:12px;width:200px"
               oninput="dbRenderFiles()">
             <button class="btn" onclick="dbLoadFiles()" title="Refresh">↻</button>
+            <button class="btn danger" id="purge-all-btn" style="display:none;font-size:11px" onclick="dbPurgeAllDeleted(this)" title="Remove all deleted records from the database so the server forgets them entirely">Purge All</button>
           </div>
           <!-- Bulk-select bar -->
           <div id="bulk-bar">
@@ -1061,6 +1062,9 @@ function dbSetTab(btn, tab) {
   dbCurrentTab = tab;
   document.querySelectorAll('.dbmgr-tab').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
+  // Show "Purge All" only on the deleted tab
+  const purgeBtn = document.getElementById('purge-all-btn');
+  if (purgeBtn) purgeBtn.style.display = tab === 'deleted' ? '' : 'none';
   dbRenderFiles();
 }
 
@@ -1090,7 +1094,7 @@ function dbRenderFiles() {
 
     const actions = isDeleted
       ? `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbRestoreFile('${escHtml(f.path)}',this)">Restore</button>
-         <button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbPermDelete('${escHtml(f.path)}',this)">Delete</button>`
+         <button class="btn danger" style="font-size:11px;padding:3px 8px" onclick="dbPurgeFile('${escHtml(f.path)}',this)" title="Erase this deleted record entirely so the server forgets it">Purge</button>`
       : isConflict
         ? `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="compareConflict('${escHtml(f.path)}')">Compare</button>
            <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openHistory('${escHtml(f.path)}')">Versions</button>
@@ -1148,6 +1152,47 @@ async function dbPermDelete(filePath, btn) {
   } catch(e) {
     toast('Delete failed: ' + e.message, 'error');
     btn.disabled = false; btn.textContent = 'Delete';
+  }
+}
+
+// Purge a single deleted file record from the DB entirely (so the server forgets it)
+async function dbPurgeFile(filePath, btn) {
+  if (!btn.dataset.armed) {
+    btn.dataset.armed = '1'; btn.textContent = 'Confirm?';
+    setTimeout(() => { if (btn.dataset.armed) { delete btn.dataset.armed; btn.textContent = 'Purge'; } }, 4000);
+    return;
+  }
+  btn.disabled = true; btn.textContent = '…';
+  try {
+    await api('/api/db/purge-deleted?path=' + encodeURIComponent(filePath), { method: 'DELETE' });
+    dbAllFiles = dbAllFiles.filter(x => x.path !== filePath);
+    dbRenderFiles(); dbLoadStats();
+    toast('Record purged — server will treat re-uploads as new', 'success');
+  } catch(e) {
+    toast('Purge failed: ' + e.message, 'error');
+    btn.disabled = false; btn.textContent = 'Purge';
+  }
+}
+
+// Purge ALL deleted file records from the DB in one shot
+async function dbPurgeAllDeleted(btn) {
+  if (!btn.dataset.armed) {
+    btn.dataset.armed = '1'; btn.textContent = '⚠️ Confirm purge all?';
+    setTimeout(() => { if (btn.dataset.armed) { delete btn.dataset.armed; btn.textContent = 'Purge All'; } }, 5000);
+    return;
+  }
+  btn.disabled = true; btn.textContent = '…';
+  try {
+    const r = await api('/api/db/purge-deleted', { method: 'DELETE' });
+    const data = await r.json();
+    dbAllFiles = dbAllFiles.filter(x => x.action !== 'deleted');
+    dbRenderFiles(); dbLoadStats();
+    toast(`Purged ${data.purged} deleted record${data.purged === 1 ? '' : 's'} — re-upload files to restore them`, 'success');
+  } catch(e) {
+    toast('Purge failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Purge All';
+    delete btn.dataset.armed;
   }
 }
 

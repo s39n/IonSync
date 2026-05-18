@@ -35,6 +35,10 @@ export function handleSync(ctx: SyncContext, peer: SyncPeer, msg: SyncMsg): void
   const serverFiles = ctx.db.getAllFiles();
   const serverMap = new Map<string, FileEntry>(serverFiles.map((f: FileEntry) => [f.path, f]));
 
+  // Pre-fetch received_at for all deleted files so we can correctly resolve
+  // the re-add case without an extra DB round-trip per file.
+  const deletedReceivedAt = ctx.db.getDeletedReceivedAt();
+
   const toRequest: string[] = [];
 
   for (const serverFile of serverFiles) {
@@ -43,6 +47,26 @@ export function handleSync(ctx: SyncContext, peer: SyncPeer, msg: SyncMsg): void
       if (serverFile.action === "active") peer.pushQueue.push(serverFile);
       continue;
     }
+
+    // Special case: server has this file marked as "deleted" but the client is
+    // sending it as "active".  This happens when the user deletes a file via
+    // the dashboard and then re-adds it to their vault.
+    //
+    // Standard mtime comparison fails here because the dashboard delete stamps
+    // mtime = Date.now(), which always beats the original file mtime.  Instead
+    // we compare against received_at (when the deletion was recorded):
+    //   client.mtime > received_at  -> file was re-added AFTER the deletion -> client wins
+    //   client.mtime <= received_at -> client just hasn't received the deletion yet -> propagate it
+    if (serverFile.action === "deleted" && clientFile.action === "active") {
+      const receivedAt = deletedReceivedAt.get(serverFile.path) ?? serverFile.mtime;
+      if (clientFile.mtime > receivedAt) {
+        toRequest.push(serverFile.path);
+      } else {
+        peer.pushQueue.push(serverFile); // propagate deletion to stale client
+      }
+      continue;
+    }
+
     const result = compareFiles(clientFile, serverFile);
     if (result === null) continue;
     if (result === "server_newer") {
