@@ -102,6 +102,20 @@ export class SyncDB {
       .run(mtime, filePath);
   }
 
+
+  /**
+   * Updates sha1 AND mtime on the files row without creating a new version
+   * entry.  Used after pruning a corrupt version to repoint the current
+   * record to the latest good version.
+   */
+  repointFileRecord(filePath: string, sha1: string, mtime: number): void {
+    this.db
+      .prepare<[string, number, string]>(
+        "UPDATE files SET sha1 = ?, mtime = ? WHERE path = ?"
+      )
+      .run(sha1, mtime, filePath);
+  }
+
   // --- Version history ------------------------------------------------------
 
   getVersions(filePath: string): VersionEntry[] {

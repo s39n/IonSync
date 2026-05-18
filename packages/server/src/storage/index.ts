@@ -118,6 +118,38 @@ export class Storage {
   }
 
   /**
+   * Scans every stored version file and removes any that are 0 bytes (corrupt /
+   * interrupted uploads).  Returns the list of removed entries so the caller
+   * can also delete the corresponding file_versions rows from the DB.
+   */
+  pruneCorruptVersions(): Array<{ filePath: string; mtime: number }> {
+    const removed: Array<{ filePath: string; mtime: number }> = [];
+    const walk = (dir: string): void => {
+      if (!fs.existsSync(dir)) return;
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(full);
+        } else if (entry.isFile() && entry.name.startsWith("v_")) {
+          const size = fs.statSync(full).size;
+          if (size === 0) {
+            const mtime = parseInt(entry.name.slice(2), 10);
+            if (!isNaN(mtime)) {
+              fs.unlinkSync(full);
+              // Convert the on-disk directory path back to a vault path
+              const dir2 = path.dirname(full);
+              const vaultPath = path.relative(this.base, dir2).split(path.sep).join("/");
+              removed.push({ filePath: vaultPath, mtime });
+            }
+          }
+        }
+      }
+    };
+    walk(this.base);
+    return removed;
+  }
+
+  /**
    * Wipes all stored file content (factory reset).
    * Removes the entire base directory and recreates it empty so the server
    * can continue operating immediately after a reset.

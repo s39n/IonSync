@@ -396,6 +396,36 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     }
   });
 
+  // ── Prune corrupt (0-byte) version files ─────────────────────────────────
+  // Walks the entire storage tree, removes any v_* file whose size is 0, and
+  // deletes the matching file_versions row from the DB.
+  // Returns { removed: number, entries: [{filePath, mtime}] }
+  router.post("/api/db/prune-corrupt-versions", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    try {
+      const entries = ctx.storage.pruneCorruptVersions();
+      for (const { filePath, mtime } of entries) {
+        // Remove the corrupt version record from the DB.
+        ctx.db.deleteVersionRecord(filePath, mtime);
+
+        // If the files table is pointing at the corrupt version, repoint it
+        // to the latest good version so clients receive correct content on
+        // the next sync.  If no good versions remain, leave the record as-is
+        // (the file will serve empty content until the client re-uploads).
+        const currentFile = ctx.db.getFile(filePath);
+        if (currentFile && currentFile.mtime === mtime) {
+          const remaining = ctx.db.getVersions(filePath); // newest first
+          if (remaining.length > 0) {
+            ctx.db.repointFileRecord(filePath, remaining[0]!.sha1, remaining[0]!.mtime);
+          }
+        }
+      }
+      res.json({ ok: true, removed: entries.length, entries });
+    } catch (e: unknown) {
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
   // ── Factory reset ─────────────────────────────────────────────────────────
 
   router.post("/api/reset", (req, res) => {

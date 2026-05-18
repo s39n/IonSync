@@ -672,6 +672,12 @@
           </div>
         </div>
 
+        <!-- Maintenance actions -->
+        <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
+          <button class="btn" style="font-size:12px" onclick="dbLoadStats()">↻ Refresh stats</button>
+          <button class="btn" style="font-size:12px" onclick="pruneCorruptVersions(this)" title="Scan all stored versions and remove any that are 0 bytes (failed or interrupted uploads). Also removes their DB records.">Prune Corrupt Versions</button>
+        </div>
+
         <!-- Storage breakdown chart -->
         <div class="card" style="margin-bottom:16px">
           <div class="card-header" style="display:flex;align-items:center;gap:10px">
@@ -1043,6 +1049,25 @@ async function dbLoadStats() {
     document.getElementById('dbs-storage').textContent  = fmtSize(s.totalBytes ?? 0);
     document.getElementById('dbs-devices').textContent  = s.deviceCount.toLocaleString();
   } catch(e) { /* non-fatal */ }
+}
+
+async function pruneCorruptVersions(btn) {
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Scanning…';
+  try {
+    const r = await api('/api/db/prune-corrupt-versions', { method: 'POST' });
+    const data = await r.json();
+    if (data.removed === 0) {
+      toast('No corrupt versions found — storage is clean', 'success');
+    } else {
+      toast(`Removed ${data.removed} corrupt (0-byte) version${data.removed === 1 ? '' : 's'}`, 'success');
+      dbLoadStats();
+    }
+  } catch(e) {
+    toast('Prune failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
 }
 
 async function dbLoadFiles() {
