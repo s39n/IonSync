@@ -209,6 +209,29 @@ export class SyncDB {
       .map((r) => ({ id: r.id, lastOnline: r.last_online }));
   }
 
+  getDeviceName(id: string): string | null {
+    return this.getSetting(`device_name_${id}`);
+  }
+
+  setDeviceName(id: string, name: string): void {
+    this.setSetting(`device_name_${id}`, name.trim());
+  }
+
+  deleteDeviceName(id: string): void {
+    this.deleteSetting(`device_name_${id}`);
+  }
+
+  getAllDeviceNames(): Record<string, string> {
+    const rows = this.db
+      .prepare<[], { key: string; value: string }>("SELECT key, value FROM settings WHERE key LIKE 'device_name_%'")
+      .all();
+    const names: Record<string, string> = {};
+    for (const r of rows) {
+      names[r.key.slice("device_name_".length)] = r.value;
+    }
+    return names;
+  }
+
   getOldestDeviceOnline(): number {
     const row = this.db
       .prepare<[], { min_lo: number | null }>("SELECT MIN(last_online) AS min_lo FROM devices")
@@ -363,11 +386,11 @@ export class SyncDB {
    * Returns the number of rows updated.
    */
   renameFolderPaths(fromPrefix: string, toPrefix: string): number {
-    const like = fromPrefix.replace(/[%_]/g, "\$&") + "/%";
+    const like = fromPrefix.replace(/[%_]/g, "\\$&") + "/%";
     const prefixLen = fromPrefix.length;
     const result = this.db.transaction(() => {
       const files = this.db
-        .prepare<[string]>("SELECT path FROM files WHERE path LIKE ? ESCAPE '\\'")
+        .prepare<[string]>("SELECT path FROM files WHERE path LIKE ? ESCAPE '\\\\'")
         .all(like) as Array<{ path: string }>;
       for (const { path: oldPath } of files) {
         const newPath = toPrefix + oldPath.slice(prefixLen);

@@ -143,11 +143,26 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
         .filter((p) => p.authed && p.deviceId)
         .map((p) => p.deviceId!)
     );
+    const names = ctx.db.getAllDeviceNames();
     const devices = ctx.db.getDevices().map((d) => ({
       ...d,
       connected: connectedIds.has(d.id),
+      name: names[d.id] ?? null,
     }));
     res.json(devices);
+  });
+
+  // Set or clear a friendly name for a device
+  router.patch("/api/device-name", express.json(), (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const { id, name } = req.body as { id?: string; name?: string };
+    if (!id || typeof id !== "string") { res.status(400).json({ error: "Missing id" }); return; }
+    if (name && name.trim()) {
+      ctx.db.setDeviceName(id, name.trim());
+    } else {
+      ctx.db.deleteDeviceName(id);
+    }
+    res.json({ ok: true });
   });
 
   // ── Active peers ──────────────────────────────────────────────────────────
@@ -159,6 +174,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
       .map((p) => ({
         id: p.id,
         deviceId: p.deviceId,
+        deviceName: p.deviceId ? ctx.db.getDeviceName(p.deviceId) : null,
         autoSync: p.autoSync,
         pendingUploads: p.pendingUploads.size,
       }));

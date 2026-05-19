@@ -1242,7 +1242,7 @@ async function dbLoadDevices() {
         ? `<span class="badge-pill" style="background:var(--green,#22c55e);color:#000;font-size:10px">online</span>`
         : `<span class="badge-pill" style="font-size:10px">offline</span>`;
       return `<div style="display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--border);font-size:12px">
-        <span style="flex:1;font-family:var(--mono);font-size:11px;word-break:break-all">${escHtml(d.id)}</span>
+        <span style="flex:1;cursor:pointer" onclick="renameDevice('${escHtml(d.id)}','${escHtml(d.name||'')}',this)" title="Click to rename">${deviceLabel(d.id, d.name)}</span>
         ${pill}
         <span style="color:var(--muted);white-space:nowrap">last: ${fmtDate(d.lastOnline)}</span>
         <button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbRemoveDevice('${escHtml(d.id)}',this)">Remove</button>
@@ -1415,6 +1415,16 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+function deviceLabel(deviceId, deviceName) {
+  if (!deviceId) return '—';
+  const name = deviceName || '';
+  const short = shortId(deviceId);
+  if (name) {
+    return `<span style="font-weight:500">${escHtml(name)}</span> <span class="mono" style="font-size:11px;color:var(--muted)" title="${escHtml(deviceId)}">${escHtml(short)}</span>`;
+  }
+  return `<span class="mono" title="${escHtml(deviceId)}">${escHtml(short)}</span>`;
+}
+
 function renderPeers() {
   const badge = document.getElementById('peers-badge');
   badge.textContent = S.peers.length;
@@ -1422,12 +1432,12 @@ function renderPeers() {
 
   const tbody = document.getElementById('peers-body');
   if (!S.peers.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">No active peers</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">No active peers</td></tr>';
     return;
   }
   tbody.innerHTML = S.peers.map(p => `
     <tr>
-      <td><span class="mono" title="${escHtml(p.deviceId)}">${escHtml(shortId(p.deviceId))}</span></td>
+      <td style="cursor:pointer" onclick="renameDevice('${escHtml(p.deviceId)}','${escHtml(p.deviceName||'')}',this)" title="Click to rename">${deviceLabel(p.deviceId, p.deviceName)}</td>
       <td>${p.autoSync ? '<span class="badge-pill green">On</span>' : '<span class="badge-pill muted">Off</span>'}</td>
       <td>${p.pendingUploads > 0 ? `<span class="badge-pill red">${p.pendingUploads}</span>` : '<span class="text-muted">0</span>'}</td>
       <td style="display:flex;gap:6px">
@@ -1446,7 +1456,7 @@ function renderDevices() {
   }
   tbody.innerHTML = S.devices.map(d => `
     <tr>
-      <td><span class="mono" title="${escHtml(d.id)}">${escHtml(d.id)}</span></td>
+      <td style="cursor:pointer" onclick="renameDevice('${escHtml(d.id)}','${escHtml(d.name||'')}',this)" title="Click to rename">${deviceLabel(d.id, d.name)}</td>
       <td>${escHtml(fmtDate(d.lastOnline))}</td>
       <td>${d.connected ? '<span class="badge-pill green">Connected</span>' : '<span class="badge-pill muted">Offline</span>'}</td>
     </tr>
@@ -1612,7 +1622,7 @@ function updateOverview() {
   }
   tbody.innerHTML = S.peers.map(p => `
     <tr>
-      <td><span class="mono" title="${escHtml(p.deviceId)}">${escHtml(shortId(p.deviceId))}</span></td>
+      <td style="cursor:pointer" onclick="renameDevice('${escHtml(p.deviceId)}','${escHtml(p.deviceName||'')}',this)" title="Click to rename">${deviceLabel(p.deviceId, p.deviceName)}</td>
       <td>${p.autoSync ? '<span class="badge-pill green">On</span>' : '<span class="badge-pill muted">Off</span>'}</td>
       <td>${p.pendingUploads > 0 ? `<span class="badge-pill red">${p.pendingUploads}</span>` : '0'}</td>
       <td style="display:flex;gap:6px">
@@ -1877,6 +1887,49 @@ async function dbSaveMeta(filePath, btn) {
     toast('Update failed: ' + e.message, 'error');
     btn.disabled = false; btn.textContent = 'Save';
   }
+}
+
+// ── Device naming ─────────────────────────────────────────────────────────
+
+async function renameDevice(deviceId, currentName, cellEl) {
+  // Replace the cell content with an inline input
+  const prev = cellEl.innerHTML;
+  cellEl.innerHTML = `<input id="device-name-input" type="text"
+    value="${escHtml(currentName)}"
+    placeholder="e.g. MacBook, iPhone…"
+    style="width:100%;padding:3px 7px;border:1px solid var(--accent);border-radius:4px;
+           background:var(--bg3);color:var(--text);font-size:12px;font-family:inherit"
+    onclick="event.stopPropagation()">`;
+  const input = document.getElementById('device-name-input');
+  input.focus();
+  input.select();
+
+  const save = async () => {
+    const name = input.value.trim();
+    try {
+      await api('/api/device-name', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: deviceId, name }),
+      });
+      // Update all in-memory peers/devices with the new name
+      S.peers.forEach(p => { if (p.deviceId === deviceId) p.deviceName = name || null; });
+      S.devices.forEach(d => { if (d.id === deviceId) d.name = name || null; });
+      renderPeers();
+      renderDevices();
+      updateOverview();
+      toast(name ? `Renamed to "${name}"` : 'Name cleared', 'success');
+    } catch(e) {
+      cellEl.innerHTML = prev;
+      toast('Rename failed: ' + e.message, 'error');
+    }
+  };
+
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); save(); }
+    if (e.key === 'Escape') { cellEl.innerHTML = prev; }
+  });
+  input.addEventListener('blur', save);
 }
 
 // ── Conflict comparison ────────────────────────────────────────────────────
