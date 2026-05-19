@@ -196,7 +196,7 @@ export class WsManager {
 
   private async _handleChallenge(nonce: string): Promise<void> {
     const token = await this._computeToken(nonce, this.settings.password);
-    this.send({ type: "auth", deviceId: this.settings.deviceId, token });
+    this.send({ type: "auth", deviceId: this.settings.deviceId, deviceName: this.settings.deviceName || undefined, token });
   }
 
   private async _computeToken(nonce: string, password: string): Promise<string> {

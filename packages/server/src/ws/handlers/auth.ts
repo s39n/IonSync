@@ -18,6 +18,11 @@ export function handleAuth(ctx: SyncContext, peer: SyncPeer, msg: AuthMsg): void
   // Record device last_online
   ctx.db.touchDevice(msg.deviceId);
 
+  // Persist the device name if the plugin sent one
+  if (msg.deviceName) {
+    ctx.db.setDeviceName(msg.deviceId, msg.deviceName);
+  }
+
   peer.send({ type: "auth_ok" });
 
   log(ctx, `[auth] device "${msg.deviceId}" authenticated (peer ${peer.id})`);

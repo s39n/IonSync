@@ -31,6 +31,8 @@ export interface BackgroundSyncReq {
 export interface AuthMsg {
   type: "auth";
   deviceId: string;
+  /** Optional human-readable name from the plugin's settings. */
+  deviceName?: string;
   /** SHA-256( nonce[0..16] + password + nonce[16..] ) — same formula as v1 */
   token: string;
 }
