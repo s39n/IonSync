@@ -347,6 +347,17 @@ export class SyncDB {
   }
 
   /**
+   * Renames a single file record from `fromPath` to `toPath`.
+   * Updates both `files` and `file_versions`.
+   */
+  renameFilePath(fromPath: string, toPath: string): void {
+    this.db.transaction(() => {
+      this.db.prepare<[string, string]>("UPDATE files SET path = ? WHERE path = ?").run(toPath, fromPath);
+      this.db.prepare<[string, string]>("UPDATE file_versions SET path = ? WHERE path = ?").run(toPath, fromPath);
+    })();
+  }
+
+  /**
    * Renames all file records whose path starts with `fromPrefix/` so they
    * start with `toPrefix/` instead.  Updates both `files` and `file_versions`.
    * Returns the number of rows updated.

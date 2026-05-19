@@ -162,6 +162,23 @@ export class Storage {
   }
 
   /**
+   * Renames a single file's storage directory from `fromPath` to `toPath`.
+   * If a directory already exists at `toPath`, it is removed first so the
+   * rename is effectively an overwrite.  Used by the conflict-promotion action.
+   */
+  renameFile(fromPath: string, toPath: string): void {
+    const fromDir = this.resolve(fromPath);
+    if (!fs.existsSync(fromDir)) return;
+    const toDir = this.resolve(toPath);
+    // Remove any existing destination so renameSync doesn't fail on non-empty dirs
+    if (fs.existsSync(toDir)) {
+      fs.rmSync(toDir, { recursive: true, force: true });
+    }
+    fs.mkdirSync(path.dirname(toDir), { recursive: true });
+    fs.renameSync(fromDir, toDir);
+  }
+
+  /**
    * Renames a folder prefix by moving all version directories under
    * `fromPrefix/` to `toPrefix/`.  Used by the folder-rename admin action.
    * Returns the list of old→new path pairs that were moved.

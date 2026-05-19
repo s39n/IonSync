@@ -544,7 +544,7 @@
         <div class="card">
           <div class="card-header"><h3>Connected Peers</h3></div>
           <table>
-            <thead><tr><th>Device ID</th><th>Auto-sync</th><th>Pending</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Device</th><th>Auto-sync</th><th>Pending</th><th>Actions</th></tr></thead>
             <tbody id="overview-peers-body"></tbody>
           </table>
         </div>
@@ -565,11 +565,11 @@
         <div class="toolbar">
           <h2 style="margin:0">Active Peers</h2>
           <div class="spacer"></div>
-          <button class="btn" onclick="refreshAll()">Refresh</button>
+          <button class="btn" onclick="refreshAll()">↻ Refresh</button>
         </div>
         <div class="card">
           <table>
-            <thead><tr><th>Peer ID</th><th>Device ID</th><th>Auto-sync</th><th>Pending Uploads</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Device</th><th>Auto-sync</th><th>Pending Uploads</th><th>Actions</th></tr></thead>
             <tbody id="peers-body"></tbody>
           </table>
         </div>
@@ -580,11 +580,11 @@
         <div class="toolbar">
           <h2 style="margin:0">Known Devices</h2>
           <div class="spacer"></div>
-          <button class="btn" onclick="refreshAll()">Refresh</button>
+          <button class="btn" onclick="refreshAll()">↻ Refresh</button>
         </div>
         <div class="card">
           <table>
-            <thead><tr><th>Device ID</th><th>Last Seen</th><th>Status</th></tr></thead>
+            <thead><tr><th>Device</th><th>Last Seen</th><th>Status</th></tr></thead>
             <tbody id="devices-body"></tbody>
           </table>
         </div>
@@ -596,7 +596,7 @@
           <h2 style="margin:0">Files</h2>
           <div class="spacer"></div>
           <input class="search-bar" id="file-search" type="text" placeholder="Search paths…" oninput="renderFileTree()">
-          <button class="btn" onclick="loadFiles()">Refresh</button>
+          <button class="btn" onclick="loadFiles()">↻ Refresh</button>
         </div>
 
         <!-- E2EE global key + snapshot export -->
@@ -628,7 +628,7 @@
           <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
             <input type="checkbox" id="log-scroll" checked> Auto-scroll
           </label>
-          <button class="btn" onclick="loadLogs()">Refresh</button>
+          <button class="btn" onclick="loadLogs()">↻ Refresh</button>
         </div>
         <div id="log-output"></div>
       </div>
@@ -674,7 +674,7 @@
 
         <!-- Maintenance actions -->
         <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
-          <button class="btn" style="font-size:12px" onclick="dbLoadStats()">↻ Refresh stats</button>
+          <button class="btn" style="font-size:12px" onclick="dbLoadStats()">↻ Refresh</button>
           <button class="btn" style="font-size:12px" onclick="pruneCorruptVersions(this)" title="Scan all stored versions and remove any that are 0 bytes (failed or interrupted uploads). Also removes their DB records.">Prune Corrupt Versions</button>
         </div>
 
@@ -702,7 +702,7 @@
             <input id="db-search" type="search" placeholder="Search paths…"
               style="padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg3);color:var(--text);font-size:12px;width:200px"
               oninput="dbRenderFiles()">
-            <button class="btn" onclick="dbLoadFiles()" title="Refresh">↻</button>
+            <button class="btn" onclick="dbLoadFiles()">↻ Refresh</button>
             <button class="btn danger" id="purge-all-btn" style="display:none;font-size:11px" onclick="dbPurgeAllDeleted(this)" title="Remove all deleted records from the database so the server forgets them entirely">Purge All</button>
           </div>
           <!-- Bulk-select bar -->
@@ -822,6 +822,7 @@
       <div class="compare-pane">
         <div class="compare-pane-title conflict" id="compare-conflict-title">conflicted</div>
         <div style="padding:4px 12px 8px;display:flex;gap:8px;border-bottom:1px solid var(--border)">
+          <button class="btn primary" style="font-size:11px;padding:3px 10px" onclick="promoteConflict()" title="Replace the original with this conflict copy — makes this version canonical">Use as canonical</button>
           <button class="btn danger" style="font-size:11px;padding:3px 10px" onclick="deleteCompareVersion('conflict')">Delete this version</button>
         </div>
         <pre class="compare-pane-content" id="compare-conflict-content"></pre>
@@ -1426,7 +1427,6 @@ function renderPeers() {
   }
   tbody.innerHTML = S.peers.map(p => `
     <tr>
-      <td><span class="mono" title="${escHtml(p.id)}">${escHtml(shortId(p.id))}</span></td>
       <td><span class="mono" title="${escHtml(p.deviceId)}">${escHtml(shortId(p.deviceId))}</span></td>
       <td>${p.autoSync ? '<span class="badge-pill green">On</span>' : '<span class="badge-pill muted">Off</span>'}</td>
       <td>${p.pendingUploads > 0 ? `<span class="badge-pill red">${p.pendingUploads}</span>` : '<span class="text-muted">0</span>'}</td>
@@ -1990,6 +1990,30 @@ async function _loadFileText(filePath) {
 
 function closeCompare() {
   document.getElementById('compare-overlay').classList.remove('open');
+}
+
+// Promote the conflict copy to be the canonical version:
+// renames the conflicted file to the original path, replacing it.
+async function promoteConflict() {
+  const conflictPath = document.getElementById('compare-conflict-title').textContent.trim();
+  const originalPath = document.getElementById('compare-original-title').textContent.trim();
+  if (!conflictPath || conflictPath.startsWith('(') || !originalPath || originalPath.startsWith('(')) {
+    toast('Cannot determine file paths', 'error'); return;
+  }
+  if (!confirm(`Replace:\n  ${originalPath}\n\nWith the conflict copy:\n  ${conflictPath}\n\nThe conflict version will become the canonical file. This cannot be undone.`)) return;
+  try {
+    await api('/api/rename-file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: conflictPath, to: originalPath }),
+    });
+    toast('Conflict resolved — conflict version is now canonical', 'success');
+    document.getElementById('compare-overlay').classList.remove('open');
+    await loadFiles();
+    if (document.getElementById('panel-dbmgr').classList.contains('active')) dbLoadFiles();
+  } catch(e) {
+    toast('Failed: ' + e.message, 'error');
+  }
 }
 
 // ── Event wiring ───────────────────────────────────────────────────────────
