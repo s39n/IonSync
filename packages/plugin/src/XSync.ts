@@ -335,6 +335,16 @@ export class XSync {
         this.addActivity("delete", file.path);
       } else if (file.fileType === "folder") {
         if (localStat && localStat.type === "file") return;
+        // Pre-register every path component so that:
+        //  (a) vault "create" events from new folder creation are suppressed, and
+        //  (b) vault "delete" events from ENOTDIR collision handling (trashFile)
+        //      in FSAdapter.makeFolder are suppressed — otherwise the trashFile
+        //      call would fire a vault "delete" event that gets queued and sent to
+        //      the server as action:"deleted", incorrectly marking the file deleted.
+        const parts = file.path.split("/");
+        for (let i = 1; i <= parts.length; i++) {
+          this._applyingPaths.add(parts.slice(0, i).join("/"));
+        }
         await this.storage.makeFolder(file.path, file);
       } else {
         if (localStat && localStat.type === "folder") return;
@@ -466,6 +476,10 @@ export class XSync {
   private async _onSyncDone(): Promise<void> {
     this.isSyncing = false;
     this._isFirstSync = false;  // device is now fully synced
+    // Clear any stale _applyingPaths entries.  Normally each entry is consumed
+    // as its vault event fires, but folder paths added during makeFolder calls
+    // may never receive a matching event (e.g. folder already existed).
+    this._applyingPaths.clear();
     this.releaseWakeLock();
     this.xNotify.setSyncSummary(this.syncUpCount, this.syncDownCount);
     this.syncUpCount = 0;
@@ -577,7 +591,12 @@ export class XSync {
     // slightly-different entry back to other connected vaults.  On those vaults
     // the incoming mtime can trigger the offline-edit conflict detector, which
     // then creates spurious "(Conflicted Copy)" files.
-    if ((action === "create" || action === "modify") && this._applyingPaths.delete(file.path)) {
+    // Suppress vault events that fire as a side-effect of _applyServerFile:
+    //  - create/modify: consumed immediately (one-shot) so the guard auto-clears.
+    //  - delete: NOT consumed — keep the entry so a subsequent create event on
+    //    the same path (folder recreation after ENOTDIR collision) is also suppressed.
+    if (this._applyingPaths.has(file.path)) {
+      if (action === "create" || action === "modify") this._applyingPaths.delete(file.path);
       return;
     }
 

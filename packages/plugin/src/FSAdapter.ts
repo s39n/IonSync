@@ -146,8 +146,21 @@ export class FSAdapter {
   }
 
   async delete(path: string): Promise<void> {
-    const file = this.app.vault.getAbstractFileByPath(this.norm(path));
-    if (file) await this.app.fileManager.trashFile(file);
+    const p = this.norm(path);
+    const file = this.app.vault.getAbstractFileByPath(p);
+    if (file) {
+      await this.app.fileManager.trashFile(file);
+    } else {
+      // File is not in Obsidian's vault index — this happens with files written
+      // via vault.adapter.write() (e.g. conflicted copies of non-.md files like
+      // .base, .canvas, etc.) which bypass the vault layer and may not be cached.
+      // Fall back to a direct adapter remove so the file is still cleaned up.
+      try {
+        await this.app.vault.adapter.remove(p);
+      } catch {
+        // File may not exist on disk — silently ignore.
+      }
+    }
   }
 
   async forceDelete(path: string): Promise<void> {
