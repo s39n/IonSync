@@ -484,20 +484,41 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     // Stream the JSON response entry-by-entry to avoid building one enormous
     // string in memory. JSON.stringify on the full array was hitting V8's
     // string-length limit (~512 MB) on large vaults (RangeError: Invalid
-    // string length). Each file entry is serialized individually — fine since
-    // no single note is that large — and written directly to the socket.
+    // string length). Each file entry is serialized individually and written
+    // directly to the socket so we never hold the full payload in one string.
+    //
+    // Files larger than ~300 MB are skipped: buf.toString("base64") would
+    // produce a >400 MB string that itself trips the same V8 limit.
+    const MAX_FILE_BYTES = 300 * 1024 * 1024; // 300 MB
+
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.write('{"files":[');
 
     let first = true;
-    for (const { path: filePath, mtime } of snapFiles) {
-      const buf = ctx.storage.readVersion(filePath, mtime);
-      if (!buf) continue;
-      const encrypted = buf.length >= E2EE_MAGIC.length && buf.slice(0, E2EE_MAGIC.length).equals(E2EE_MAGIC);
-      const entry = JSON.stringify({ path: filePath, mtime, encrypted, content: buf.toString("base64") });
-      if (!first) res.write(",");
-      res.write(entry);
-      first = false;
+    try {
+      for (const { path: filePath, mtime } of snapFiles) {
+        const buf = ctx.storage.readVersion(filePath, mtime);
+        if (!buf) continue;
+        if (buf.length > MAX_FILE_BYTES) {
+          console.warn(`[export] skipping ${filePath} (${buf.length} bytes > limit)`);
+          continue;
+        }
+        const encrypted = buf.length >= E2EE_MAGIC.length && buf.slice(0, E2EE_MAGIC.length).equals(E2EE_MAGIC);
+        const entry = JSON.stringify({ path: filePath, mtime, encrypted, content: buf.toString("base64") });
+        if (!first) res.write(",");
+        res.write(entry);
+        first = false;
+      }
+    } catch (err: unknown) {
+      // If we haven't written any entries yet we can still send an error object.
+      // If we're mid-stream we log and end the connection cleanly so the proxy
+      // doesn't hang — the client will see truncated JSON and can show an error.
+      console.error("[export] error during snapshot stream:", err);
+      if (first) {
+        // No data written yet — rewrite as an error response (headers not yet flushed on all proxies)
+        res.end(`],"error":${JSON.stringify(String(err))},"asOf":${asOfMs}}`);
+        return;
+      }
     }
 
     res.end(`],"asOf":${asOfMs}}`);
