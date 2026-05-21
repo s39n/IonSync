@@ -1,6 +1,7 @@
 import express, { type Request, type Response } from "express";
 import fs from "node:fs";
 import path from "node:path";
+import archiver from "archiver";
 import type { SyncContext } from "../context.js";
 import { sha256 } from "../crypto.js";
 import { diff_match_patch } from "diff-match-patch";
@@ -469,7 +470,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   // Returns JSON: { files: Array<{ path, mtime, encrypted, content: base64 }> }
   // The browser builds the final ZIP (via JSZip) and decrypts E2EE entries
   // client-side — the server never sees the passphrase.
-  router.get("/api/export-snapshot", async (req, res) => {
+  router.get("/api/export-snapshot", (req, res) => {
     if (!checkAuth(req, res)) return;
 
     const dateParam = String(req.query.date ?? "").trim();
@@ -478,55 +479,41 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     const asOfMs = new Date(dateParam).getTime();
     if (isNaN(asOfMs)) { res.status(400).json({ error: "Invalid date" }); return; }
 
-    const E2EE_MAGIC = Buffer.from([0x49, 0x4f, 0x4e, 0x45, 0x4e, 0x43, 0x76, 0x31]);
     const snapFiles = ctx.db.getSnapshotFiles(asOfMs);
+    const dateLabel = new Date(asOfMs).toISOString().slice(0, 10);
 
-    // Helper that respects TCP backpressure — if the client can't consume fast
-    // enough, we wait for the socket to drain before writing the next chunk.
-    // Without this the internal Node.js write buffer grows without bound and
-    // the container runs out of memory (OOM kill) on large vaults.
-    const writeChunk = (data: string): Promise<void> => new Promise((resolve, reject) => {
-      const ok = res.write(data, (err) => { if (err) reject(err); else resolve(); });
-      if (!ok) res.once("drain", resolve);
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="ionsync-snapshot-${dateLabel}.zip"`);
+
+    const archive = archiver("zip", { zlib: { level: 6 } });
+
+    archive.on("error", (err) => {
+      console.error("[export] archiver error:", err);
     });
 
-    const MAX_FILE_BYTES = 300 * 1024 * 1024; // 300 MB
+    archive.on("entry", (entry) => {
+      console.log(`[export] zipped "${entry.name}"`);
+    });
 
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.write('{"files":[');
+    archive.on("finish", () => {
+      console.log(`[export] ZIP complete — ${archive.pointer()} bytes`);
+    });
 
-    let first = true;
-    let currentFile = "";
-    try {
-      for (const { path: filePath, mtime } of snapFiles) {
-        currentFile = filePath;
-        // Log BEFORE reading so the filename appears even if readFileSync OOMs
-        console.log(`[export] reading "${filePath}"`);
-        const buf = ctx.storage.readVersion(filePath, mtime);
-        if (!buf) {
-          console.warn(`[export] skipping "${filePath}" — no stored version found`);
-          continue;
-        }
-        if (buf.length > MAX_FILE_BYTES) {
-          console.warn(`[export] skipping "${filePath}" (${buf.length} bytes > limit)`);
-          continue;
-        }
-        console.log(`[export] writing "${filePath}" (${buf.length} bytes)`);
-        const encrypted = buf.length >= E2EE_MAGIC.length && buf.slice(0, E2EE_MAGIC.length).equals(E2EE_MAGIC);
-        const entry = JSON.stringify({ path: filePath, mtime, encrypted, content: buf.toString("base64") });
-        if (!first) await writeChunk(",");
-        await writeChunk(entry);
-        first = false;
+    // Pipe the ZIP stream directly to the HTTP response
+    archive.pipe(res);
+
+    for (const { path: filePath, mtime } of snapFiles) {
+      console.log(`[export] reading "${filePath}"`);
+      const buf = ctx.storage.readVersion(filePath, mtime);
+      if (!buf) {
+        console.warn(`[export] skipping "${filePath}" — no stored version found`);
+        continue;
       }
-    } catch (err: unknown) {
-      console.error(`[export] ERROR on file "${currentFile}":`, err);
-      if (first) {
-        res.end(`],"error":${JSON.stringify(String(err))},"asOf":${asOfMs}}`);
-        return;
-      }
+      console.log(`[export] appending "${filePath}" (${buf.length} bytes)`);
+      archive.append(buf, { name: filePath, date: new Date(mtime) });
     }
 
-    res.end(`],"asOf":${asOfMs}}`);
+    archive.finalize();
   });
 
 

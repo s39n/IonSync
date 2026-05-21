@@ -2305,87 +2305,24 @@ function loadScript(src) {
 async function exportSnapshot(event) {
   const dateInput = document.getElementById('snapshot-date').value;
   if (!dateInput) { toast('Pick a snapshot date first', 'error'); return; }
-  if (!crypto?.subtle) {
-    toast('Web Crypto unavailable — open the dashboard via http://localhost:PORT or HTTPS to use encryption features.', 'error');
-    return;
-  }
 
   const btn = event.currentTarget;
   const origText = btn.textContent;
   btn.disabled = true;
-  btn.textContent = 'Fetching…';
+  btn.textContent = 'Downloading…';
 
   try {
-    // Use end-of-day so we include files modified on that date
+    // Use end-of-day so we include files modified on that date.
+    // The server now streams a ZIP directly — just point the browser at the URL.
     const asOf = dateInput + 'T23:59:59.999';
-    const r = await api('/api/export-snapshot?date=' + encodeURIComponent(asOf));
-    const data = await r.json();
-
-    if (!data.files.length) {
-      toast('No files found for that date', 'error');
-      btn.disabled = false; btn.textContent = origText;
-      return;
-    }
-
-    // Derive E2EE key if any files are encrypted
-    const e2eePw = getE2eePassword();
-    let e2eeKey = null;
-    const hasEncrypted = data.files.some(f => f.encrypted);
-
-    if (hasEncrypted && e2eePw) {
-      const km = await crypto.subtle.importKey(
-        'raw', new TextEncoder().encode(e2eePw), 'PBKDF2', false, ['deriveKey']
-      );
-      e2eeKey = await crypto.subtle.deriveKey(
-        { name: 'PBKDF2', salt: E2EE_PBKDF2_SALT, iterations: 100_000, hash: 'SHA-256' },
-        km, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
-      );
-    } else if (hasEncrypted && !e2eePw) {
-      toast('Some files are encrypted — enter the vault key above to decrypt them in the export', 'error');
-    }
-
-    // Load JSZip from CDN (cached after first load)
-    await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
-    const zip = new JSZip();
-    btn.textContent = 'Building ZIP…';
-
-    let decryptFailed = 0;
-    for (const f of data.files) {
-      const raw = Uint8Array.from(atob(f.content), c => c.charCodeAt(0));
-
-      if (f.encrypted && e2eeKey) {
-        try {
-          const iv = raw.slice(8, 20);
-          const ct = raw.slice(20);
-          const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, e2eeKey, ct);
-          zip.file(f.path, plain);
-        } catch {
-          decryptFailed++;
-          zip.file(f.path + '.encrypted', raw);
-        }
-      } else if (f.encrypted) {
-        // No key — store ciphertext with marker extension
-        zip.file(f.path + '.encrypted', raw);
-        decryptFailed++;
-      } else {
-        zip.file(f.path, raw);
-      }
-    }
-
-    const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
-    const url = URL.createObjectURL(blob);
+    const url = '/api/export-snapshot?date=' + encodeURIComponent(asOf);
     const a = document.createElement('a');
     a.href = url;
     a.download = 'ionsync-snapshot-' + dateInput + '.zip';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
-
-    const msg = decryptFailed > 0
-      ? `Exported ${data.files.length} files (${decryptFailed} encrypted, stored as .encrypted)`
-      : `Exported ${data.files.length} files`;
-    toast(msg, decryptFailed > 0 ? 'error' : 'success');
+    toast('Download started', 'success');
   } catch (e) {
     toast('Export failed: ' + e.message, 'error');
   }
