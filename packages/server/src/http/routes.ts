@@ -481,14 +481,26 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     const E2EE_MAGIC = Buffer.from([0x49, 0x4f, 0x4e, 0x45, 0x4e, 0x43, 0x76, 0x31]);
     const snapFiles = ctx.db.getSnapshotFiles(asOfMs);
 
-    const files = snapFiles.map(({ path: filePath, mtime }) => {
-      const buf = ctx.storage.readVersion(filePath, mtime);
-      if (!buf) return null;
-      const encrypted = buf.length >= E2EE_MAGIC.length && buf.slice(0, E2EE_MAGIC.length).equals(E2EE_MAGIC);
-      return { path: filePath, mtime, encrypted, content: buf.toString("base64") };
-    }).filter((f): f is NonNullable<typeof f> => f !== null);
+    // Stream the JSON response entry-by-entry to avoid building one enormous
+    // string in memory. JSON.stringify on the full array was hitting V8's
+    // string-length limit (~512 MB) on large vaults (RangeError: Invalid
+    // string length). Each file entry is serialized individually — fine since
+    // no single note is that large — and written directly to the socket.
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.write('{"files":[');
 
-    res.json({ files, asOf: asOfMs });
+    let first = true;
+    for (const { path: filePath, mtime } of snapFiles) {
+      const buf = ctx.storage.readVersion(filePath, mtime);
+      if (!buf) continue;
+      const encrypted = buf.length >= E2EE_MAGIC.length && buf.slice(0, E2EE_MAGIC.length).equals(E2EE_MAGIC);
+      const entry = JSON.stringify({ path: filePath, mtime, encrypted, content: buf.toString("base64") });
+      if (!first) res.write(",");
+      res.write(entry);
+      first = false;
+    }
+
+    res.end(`],"asOf":${asOfMs}}`);
   });
 
 
