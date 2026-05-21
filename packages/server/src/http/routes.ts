@@ -469,7 +469,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   // Returns JSON: { files: Array<{ path, mtime, encrypted, content: base64 }> }
   // The browser builds the final ZIP (via JSZip) and decrypts E2EE entries
   // client-side — the server never sees the passphrase.
-  router.get("/api/export-snapshot", (req, res) => {
+  router.get("/api/export-snapshot", async (req, res) => {
     if (!checkAuth(req, res)) return;
 
     const dateParam = String(req.query.date ?? "").trim();
@@ -481,14 +481,15 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     const E2EE_MAGIC = Buffer.from([0x49, 0x4f, 0x4e, 0x45, 0x4e, 0x43, 0x76, 0x31]);
     const snapFiles = ctx.db.getSnapshotFiles(asOfMs);
 
-    // Stream the JSON response entry-by-entry to avoid building one enormous
-    // string in memory. JSON.stringify on the full array was hitting V8's
-    // string-length limit (~512 MB) on large vaults (RangeError: Invalid
-    // string length). Each file entry is serialized individually and written
-    // directly to the socket so we never hold the full payload in one string.
-    //
-    // Files larger than ~300 MB are skipped: buf.toString("base64") would
-    // produce a >400 MB string that itself trips the same V8 limit.
+    // Helper that respects TCP backpressure — if the client can't consume fast
+    // enough, we wait for the socket to drain before writing the next chunk.
+    // Without this the internal Node.js write buffer grows without bound and
+    // the container runs out of memory (OOM kill) on large vaults.
+    const writeChunk = (data: string): Promise<void> => new Promise((resolve, reject) => {
+      const ok = res.write(data, (err) => { if (err) reject(err); else resolve(); });
+      if (!ok) res.once("drain", resolve);
+    });
+
     const MAX_FILE_BYTES = 300 * 1024 * 1024; // 300 MB
 
     res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -499,20 +500,22 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     try {
       for (const { path: filePath, mtime } of snapFiles) {
         currentFile = filePath;
+        // Log BEFORE reading so the filename appears even if readFileSync OOMs
+        console.log(`[export] reading "${filePath}"`);
         const buf = ctx.storage.readVersion(filePath, mtime);
         if (!buf) {
-          console.warn(`[export] skipping ${filePath} — no stored version found`);
+          console.warn(`[export] skipping "${filePath}" — no stored version found`);
           continue;
         }
         if (buf.length > MAX_FILE_BYTES) {
-          console.warn(`[export] skipping ${filePath} (${buf.length} bytes > ${MAX_FILE_BYTES} byte limit)`);
+          console.warn(`[export] skipping "${filePath}" (${buf.length} bytes > limit)`);
           continue;
         }
-        console.log(`[export] processing ${filePath} (${buf.length} bytes)`);
+        console.log(`[export] writing "${filePath}" (${buf.length} bytes)`);
         const encrypted = buf.length >= E2EE_MAGIC.length && buf.slice(0, E2EE_MAGIC.length).equals(E2EE_MAGIC);
         const entry = JSON.stringify({ path: filePath, mtime, encrypted, content: buf.toString("base64") });
-        if (!first) res.write(",");
-        res.write(entry);
+        if (!first) await writeChunk(",");
+        await writeChunk(entry);
         first = false;
       }
     } catch (err: unknown) {
