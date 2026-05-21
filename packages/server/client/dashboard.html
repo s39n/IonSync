@@ -2312,17 +2312,29 @@ async function exportSnapshot(event) {
   btn.textContent = 'Downloading…';
 
   try {
-    // Use end-of-day so we include files modified on that date.
-    // The server now streams a ZIP directly — just point the browser at the URL.
     const asOf = dateInput + 'T23:59:59.999';
     const url = '/api/export-snapshot?date=' + encodeURIComponent(asOf);
+
+    // Include the E2EE password as a header so the server can decrypt on the
+    // fly. If no password is set the ZIP will contain the raw encrypted blobs.
+    const headers = {};
+    const e2eePw = getE2eePassword();
+    if (e2eePw) headers['X-E2EE-Password'] = e2eePw;
+
+    const r = await fetch(url, { headers });
+    if (!r.ok) throw new Error(`Server error ${r.status}`);
+
+    const blob = await r.blob();
+    const blobUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
+    a.href = blobUrl;
     a.download = 'ionsync-snapshot-' + dateInput + '.zip';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    toast('Download started', 'success');
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10_000);
+
+    toast(e2eePw ? 'Export downloaded (decrypted)' : 'Export downloaded', 'success');
   } catch (e) {
     toast('Export failed: ' + e.message, 'error');
   }
