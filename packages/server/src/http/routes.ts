@@ -495,14 +495,20 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     res.write('{"files":[');
 
     let first = true;
+    let currentFile = "";
     try {
       for (const { path: filePath, mtime } of snapFiles) {
+        currentFile = filePath;
         const buf = ctx.storage.readVersion(filePath, mtime);
-        if (!buf) continue;
-        if (buf.length > MAX_FILE_BYTES) {
-          console.warn(`[export] skipping ${filePath} (${buf.length} bytes > limit)`);
+        if (!buf) {
+          console.warn(`[export] skipping ${filePath} — no stored version found`);
           continue;
         }
+        if (buf.length > MAX_FILE_BYTES) {
+          console.warn(`[export] skipping ${filePath} (${buf.length} bytes > ${MAX_FILE_BYTES} byte limit)`);
+          continue;
+        }
+        console.log(`[export] processing ${filePath} (${buf.length} bytes)`);
         const encrypted = buf.length >= E2EE_MAGIC.length && buf.slice(0, E2EE_MAGIC.length).equals(E2EE_MAGIC);
         const entry = JSON.stringify({ path: filePath, mtime, encrypted, content: buf.toString("base64") });
         if (!first) res.write(",");
@@ -510,12 +516,8 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
         first = false;
       }
     } catch (err: unknown) {
-      // If we haven't written any entries yet we can still send an error object.
-      // If we're mid-stream we log and end the connection cleanly so the proxy
-      // doesn't hang — the client will see truncated JSON and can show an error.
-      console.error("[export] error during snapshot stream:", err);
+      console.error(`[export] ERROR on file "${currentFile}":`, err);
       if (first) {
-        // No data written yet — rewrite as an error response (headers not yet flushed on all proxies)
         res.end(`],"error":${JSON.stringify(String(err))},"asOf":${asOfMs}}`);
         return;
       }

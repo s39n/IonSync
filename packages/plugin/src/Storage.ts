@@ -37,6 +37,17 @@ export class Storage {
     } catch {
       // Already exists — that's fine
     }
+    // Create the shadow subdirectory here so it is guaranteed to exist before
+    // any sync begins.  Creating it lazily inside writeShadow causes a race:
+    // during a large initial sync many concurrent writeShadow calls all pass
+    // the exists() check at the same time, then the first mkdir wins and
+    // subsequent write() calls get ENOENT because the directory isn't there yet.
+    const shadowDir = dataDir + "/shadow";
+    try {
+      await this.app.vault.adapter.mkdir(shadowDir);
+    } catch {
+      // Already exists — that's fine
+    }
   }
 
   // ── Delta Sync: Shadow Storage ─────────────────────────────────────────────
@@ -61,10 +72,6 @@ export class Storage {
 
   async writeShadow(vaultPath: string, content: string): Promise<void> {
     try {
-      const shadowDir = this.pluginDir + "/data/shadow";
-      if (!(await this.app.vault.adapter.exists(shadowDir))) {
-        await this.app.vault.adapter.mkdir(shadowDir);
-      }
       await this.fsInternal.write(this._getShadowPath(vaultPath), content);
     } catch (e) {
       console.error("[IonSync] Failed to write shadow copy:", e);
@@ -76,7 +83,16 @@ export class Storage {
   private async loadMetadata(): Promise<void> {
     try {
       const raw = await this.fsInternal.read("data/metadata.json");
-      if (raw) this.metadata = JSON.parse(raw) as Record<string, FileEntry>;
+      if (raw) {
+        try {
+          this.metadata = JSON.parse(raw) as Record<string, FileEntry>;
+        } catch (parseErr) {
+          // Corrupted metadata file — start fresh.  Without this warning the
+          // user would see a silent full re-sync with no obvious explanation.
+          console.warn("[IonSync] metadata.json is corrupt, starting fresh:", parseErr);
+          this.metadata = {};
+        }
+      }
     } catch {
       this.metadata = {};
     }
@@ -91,11 +107,30 @@ export class Storage {
   }
 
   private requestSave(): void {
-    if (this.saveTimeout) clearTimeout(this.saveTimeout);
-    this.saveTimeout = setTimeout(() => { void this.saveMetadata(); }, 10_000); 
+    // Throttle (NOT debounce): schedule a save 2 seconds after the FIRST write
+    // since the last flush.  Do NOT reset the timer on subsequent writes.
+    //
+    // Why this matters: during a large initial sync (e.g. 1,000+ files being
+    // pushed from the server), every file download calls writeMetadata().  A
+    // debounce would reset the 2-second timer on every call, meaning the save
+    // only fires 2 seconds after the very last file — which may never happen if
+    // the connection drops or Obsidian closes mid-sync.  A throttle fires 2
+    // seconds after the download *starts*, so metadata is checkpointed every ~2s
+    // regardless of how many more files are still coming.
+    if (!this.saveTimeout) {
+      this.saveTimeout = setTimeout(() => {
+        this.saveTimeout = null;
+        void this.saveMetadata();
+      }, 2_000);
+    }
   }
 
   readMetadata(path: string): FileEntry | null { return this.metadata[path] ?? null; }
+
+  /** Returns the full in-memory metadata map. Used by sync() to include
+   *  entries for files that were acknowledged but not written to disk
+   *  (e.g. encrypted files on a non-E2EE device). */
+  getAllMetadata(): Record<string, FileEntry> { return this.metadata; }
 
   /** True when this device has at least one file recorded in its sync metadata,
    *  i.e. it has completed at least one successful sync session before. */
@@ -211,7 +246,11 @@ export class Storage {
 
         // If metadata was bumped for re-encryption (stored.mtime > filesystem mtime),
         // honour the bumped mtime so the server sees this file as client_newer.
-        const effectiveMtime = stored && stored.mtime > mtime ? stored.mtime : mtime;
+        // Only apply this when stored.action === "active" — if the stored entry is
+        // "deleted" (e.g. because the delete queue drained before computeTree ran),
+        // using that high delete-timestamp as the mtime would make the server think
+        // the client's version is newly modified and trigger incorrect comparisons.
+        const effectiveMtime = stored && stored.action === "active" && stored.mtime > mtime ? stored.mtime : mtime;
         this.tree[file.path] = { path: file.path, sha1: sha1 ?? "", mtime: effectiveMtime, action: "active", fileType: "file" };
       }
     }
@@ -271,7 +310,7 @@ export class Storage {
 
         const txt = await this.fsVault.read(path);
         const sha1 = txt != null ? await Utils.getSHA(txt) : "";
-        const effectiveMtime = stored && stored.mtime > mtime ? stored.mtime : mtime;
+        const effectiveMtime = stored && stored.action === "active" && stored.mtime > mtime ? stored.mtime : mtime;
         this.tree[path] = { path, sha1: sha1 ?? "", mtime: effectiveMtime, action: "active", fileType: "file" };
       } catch {
         // File doesn't exist or can't be read — skip silently

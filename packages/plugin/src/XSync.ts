@@ -136,6 +136,11 @@ export class XSync {
   }
 
   unload(): void {
+    // Persist any metadata accumulated during this session.  Without this,
+    // metadata written via the 10-second requestSave() debounce is lost if
+    // Obsidian closes before sync_done fires (large initial syncs, disconnects,
+    // etc.), causing a full re-sync on the next open.
+    void this.storage.flushMetadata();
     this.storage.abortTree();
     this.storage.tree = {};
     this.xTimeouts.clear();
@@ -272,6 +277,11 @@ export class XSync {
       if (!key) {
         console.warn(`[IonSync] E2EE: received encrypted file but no decryption key is configured — skipping ${file.path}`);
         this.xNotify.showNotification(STATUS_WARN, "Encrypted file received — enable E2EE in settings to decrypt");
+        // Acknowledge the file in metadata WITHOUT writing content.  This stores
+        // the server's encrypted SHA so the next sync message includes this path
+        // with the correct SHA, causing compareFiles to return null and stopping
+        // the server from re-pushing the file on every connect.
+        await this.storage.writeMetadata(file);
         return;
       }
       try {
@@ -308,17 +318,25 @@ export class XSync {
           const isBinary = Utils.isBinary(file.path);
           let isSame = false;
 
+          // Capture the content here so _createConflictedCopy can reuse it.
+          // If we let _createConflictedCopy re-read the file independently, Obsidian
+          // may rewrite the file in the background between this read and that read,
+          // producing a "conflict copy" that contains the server's content rather than
+          // the local content we were trying to preserve (a phantom conflict).
+          let capturedContent: string | ArrayBuffer | null = null;
           if (isBinary) {
             const buf = await this.storage.readBinary(file.path);
+            capturedContent = buf;
             if (buf && (await Utils.getSHABinary(buf)) === file.sha1) isSame = true;
           } else {
             const txt = await this.storage.read(file.path);
+            capturedContent = txt;
             if (txt !== null && (await Utils.getSHA(txt)) === file.sha1) isSame = true;
           }
 
           if (!isSame) {
             this.plugin.log(`[Conflict] ${file.path} modified offline. Backing up.`);
-            await this._createConflictedCopy(file.path);
+            await this._createConflictedCopy(file.path, capturedContent ?? undefined);
           }
         }
       }
@@ -331,6 +349,11 @@ export class XSync {
         // simply ignored and the folder will disappear naturally once all files
         // inside it are deleted.
         if (file.fileType === "folder") return;
+        // Register the path before deleting so the vault "delete" event that
+        // fires from storage.delete() is suppressed in _processLocalEvent.
+        // Without this, the deletion would be re-queued in the delete queue,
+        // then re-sent to the server, then re-pushed back — an infinite loop.
+        this._applyingPaths.add(file.path);
         await this.storage.delete(file.path, file);
         this.addActivity("delete", file.path);
       } else if (file.fileType === "folder") {
@@ -404,7 +427,16 @@ export class XSync {
     }
   }
 
-  private async _createConflictedCopy(originalPath: string): Promise<void> {
+  /**
+   * Saves a copy of the local file before the server version overwrites it.
+   *
+   * `capturedContent` is the content already read by the caller for the sha1
+   * comparison.  Reusing it avoids a second disk read and — more importantly —
+   * eliminates the race where Obsidian rewrites the file between the sha1 check
+   * and this function, which would cause the conflict copy to contain the
+   * server's content rather than the local edits we're trying to preserve.
+   */
+  private async _createConflictedCopy(originalPath: string, capturedContent?: string | ArrayBuffer): Promise<void> {
     const date = new Date();
     const ts = date.toISOString().replace(/[:.]/g, "-").slice(0, 16);
     const lastDot = originalPath.lastIndexOf(".");
@@ -413,10 +445,14 @@ export class XSync {
     const newPath = `${pathNoExt} (Conflicted Copy ${ts})${ext}`;
 
     if (Utils.isBinary(originalPath)) {
-      const buf = await this.storage.readBinary(originalPath);
+      const buf = capturedContent instanceof ArrayBuffer
+        ? capturedContent
+        : await this.storage.readBinary(originalPath);
       if (buf) await this.plugin.app.vault.adapter.writeBinary(newPath, buf);
     } else {
-      const txt = await this.storage.read(originalPath);
+      const txt = typeof capturedContent === "string"
+        ? capturedContent
+        : await this.storage.read(originalPath);
       if (txt !== null) await this.plugin.app.vault.adapter.write(newPath, txt);
     }
     this.xNotify.showNotification("#ff9800", `Conflict saved: ${newPath}`);
@@ -453,6 +489,20 @@ export class XSync {
       const files: FileEntry[] = [];
       for (const [path, entry] of Object.entries(this.storage.tree)) {
         if (!this.exclusionFilter?.isExcluded(path)) files.push(entry);
+      }
+
+      // Include metadata entries for files that were acknowledged but not
+      // written to disk — primarily encrypted files received on a device
+      // without an E2EE key.  Sending the server's own SHA back causes
+      // compareFiles to return null, stopping the perpetual re-push loop.
+      for (const [path, entry] of Object.entries(this.storage.getAllMetadata())) {
+        if (
+          !this.storage.tree[path] &&               // not already covered by tree
+          entry.action === "active" &&               // not a deletion record
+          !this.exclusionFilter?.isExcluded(path)
+        ) {
+          files.push(entry);
+        }
       }
 
       if (files.length === 0) {
@@ -614,6 +664,20 @@ export class XSync {
     }
 
     if (action === "delete") {
+      // Verify the file is actually gone before treating this as a real deletion.
+      // Mobile platforms (iOS/Android) can fire spurious "delete" events for paths
+      // that still exist — for example:
+      //   • iCloud evicts a file to cloud-only storage right after writing it
+      //   • ENOTDIR cleanup via trashFile fires an extra event on the parent path
+      //   • An in-progress write triggers a transient remove+recreate at the OS level
+      // Without this check, those phantom events reach the server as real deletes,
+      // causing the file to be deleted on every other connected device.
+      const existsStat = await this.plugin.app.vault.adapter.stat(file.path);
+      if (existsStat) {
+        this.plugin.log(`[IonSync] Dropping spurious delete event for ${file.path} (file still exists on disk)`);
+        return;
+      }
+
       const meta = this.storage.readMetadata(file.path);
       this.deleteQueue[file.path] = {
         metadata: { action: "deleted", sha1: meta?.sha1 ?? "", mtime: Date.now(), fileType: "file" },
@@ -732,11 +796,32 @@ export class XSync {
 
   private async _processDeleteQueue(): Promise<void> {
     if (!this.ws.isConnected || this.isProcessingDeleteQueue) return;
+    // Never drain the delete queue during the very first sync session.
+    // A brand-new device is only *receiving* the world — any delete events it
+    // fires during the initial write burst are noise (platform timing, iCloud
+    // placeholders, ENOTDIR cleanup, etc.).  Letting them through would cause
+    // the server to mark live files as deleted and broadcast that to every peer.
+    if (this._isFirstSync) return;
     const paths = Object.keys(this.deleteQueue);
     if (paths.length === 0) return;
     this.isProcessingDeleteQueue = true;
     try {
       for (const path of paths) {
+        // Safety check: only send the delete if the file is actually gone from
+        // disk.  Spurious vault "delete" events (e.g. from ENOTDIR collision
+        // during folder creation, a.k.a. Bug 5) can land in the delete queue for
+        // files that still exist.  Sending a delete for a live file corrupts the
+        // server state — the server marks it deleted, then pushes the deletion
+        // back to this device, which then actually deletes the file, causing
+        // real data loss and a re-download loop on every connect.
+        const stat = await this.plugin.app.vault.adapter.stat(path);
+        if (stat) {
+          // File still exists — spurious delete event.  Drop it silently.
+          console.log(`[IonSync] Dropping spurious delete queue entry for ${path} (file still exists)`);
+          delete this.deleteQueue[path];
+          continue;
+        }
+
         const entry = this.deleteQueue[path]!;
         const file: FileEntry = { path, sha1: entry.metadata.sha1 ?? "", mtime: entry.metadata.mtime ?? Date.now(), action: "deleted", fileType: "file" };
         this.ws.send({ type: "file_data", mode: "apply", file, content: "" });
