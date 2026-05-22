@@ -801,7 +801,13 @@ export class XSync {
     // fires during the initial write burst are noise (platform timing, iCloud
     // placeholders, ENOTDIR cleanup, etc.).  Letting them through would cause
     // the server to mark live files as deleted and broadcast that to every peer.
-    if (this._isFirstSync) return;
+    if (this._isFirstSync) {
+      const blocked = Object.keys(this.deleteQueue);
+      if (blocked.length > 0) {
+        this.plugin.log(`[IonSync] _isFirstSync: blocking delete queue drain (${blocked.length} entries): ${blocked.slice(0, 5).join(", ")}${blocked.length > 5 ? " ..." : ""}`);
+      }
+      return;
+    }
     const paths = Object.keys(this.deleteQueue);
     if (paths.length === 0) return;
     this.isProcessingDeleteQueue = true;

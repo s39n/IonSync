@@ -244,13 +244,34 @@ export class Storage {
           sha1 = txt != null ? await Utils.getSHA(txt) : null;
         }
 
-        // If metadata was bumped for re-encryption (stored.mtime > filesystem mtime),
-        // honour the bumped mtime so the server sees this file as client_newer.
-        // Only apply this when stored.action === "active" — if the stored entry is
-        // "deleted" (e.g. because the delete queue drained before computeTree ran),
-        // using that high delete-timestamp as the mtime would make the server think
-        // the client's version is newly modified and trigger incorrect comparisons.
-        const effectiveMtime = stored && stored.action === "active" && stored.mtime > mtime ? stored.mtime : mtime;
+        // Determine the mtime to report to the server:
+        //
+        // Case 1 — metadata says "deleted" but file is present on disk:
+        //   The stored deletion is stale.  This happens when a spurious delete
+        //   was sent to the server (phone bug, crash mid-recovery) and the
+        //   metadata was written with action=deleted, but the file was never
+        //   actually removed from the vault.  Use Date.now() so this client's
+        //   mtime beats the server's received_at in the deleted-vs-active
+        //   comparison, causing the server to request an upload and restore
+        //   the file rather than pushing the deletion again.
+        //
+        // Case 2 — metadata bumped for re-encryption (stored.mtime > filesystem mtime):
+        //   Honour the bumped mtime so the server sees this file as client_newer.
+        //   Only applies when action === "active" to avoid the stale-delete trap.
+        //
+        // Default — use the real filesystem mtime.
+        let effectiveMtime: number;
+        if (stored && stored.action === "deleted") {
+          // File is on disk but metadata says deleted — stale deletion (crash / spurious
+          // phone event).  Use Date.now() so this device wins the server's
+          // deleted-vs-active comparison and the file gets restored.
+          console.log(`[IonSync] Storage: stale-delete recovery for ${file.path} — asserting existence with Date.now()`);
+          effectiveMtime = Date.now();
+        } else if (stored && stored.action === "active" && stored.mtime > mtime) {
+          effectiveMtime = stored.mtime; // re-encryption bump
+        } else {
+          effectiveMtime = mtime;
+        }
         this.tree[file.path] = { path: file.path, sha1: sha1 ?? "", mtime: effectiveMtime, action: "active", fileType: "file" };
       }
     }
@@ -310,7 +331,12 @@ export class Storage {
 
         const txt = await this.fsVault.read(path);
         const sha1 = txt != null ? await Utils.getSHA(txt) : "";
-        const effectiveMtime = stored && stored.action === "active" && stored.mtime > mtime ? stored.mtime : mtime;
+        // Same three-case logic as in computeTree() above — see that comment.
+        const effectiveMtime = stored && stored.action === "deleted"
+          ? Date.now()
+          : stored && stored.action === "active" && stored.mtime > mtime
+            ? stored.mtime
+            : mtime;
         this.tree[path] = { path, sha1: sha1 ?? "", mtime: effectiveMtime, action: "active", fileType: "file" };
       } catch {
         // File doesn't exist or can't be read — skip silently

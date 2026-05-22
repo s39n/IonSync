@@ -6,6 +6,19 @@ import type { SyncPeer } from "../peer.js";
 /** Max files requested from client simultaneously — bounds server-side buffer memory. */
 const UPLOAD_BATCH = 1;
 
+function logInfo(ctx: SyncContext, msg: string): void {
+  if (ctx.config.logs.level >= 3) pushLog(ctx, msg);
+}
+function logWarn(ctx: SyncContext, msg: string): void {
+  if (ctx.config.logs.level >= 2) pushLog(ctx, `[WARN] ${msg}`);
+}
+function pushLog(ctx: SyncContext, msg: string): void {
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  console.log(line);
+  ctx.logBuffer.push(line);
+  if (ctx.logBuffer.length > 200) ctx.logBuffer.shift();
+}
+
 export function handleSync(ctx: SyncContext, peer: SyncPeer, msg: SyncMsg): void {
   // On the first chunk of a sync session, initialise state and start accumulating.
   // Use a local variable so TypeScript can track narrowing across the function.
@@ -61,8 +74,10 @@ export function handleSync(ctx: SyncContext, peer: SyncPeer, msg: SyncMsg): void
       const receivedAt = deletedReceivedAt.get(serverFile.path) ?? serverFile.mtime;
       if (clientFile.mtime > receivedAt) {
         toRequest.push(serverFile.path);
+        logInfo(ctx, `[Sync] ${peer.deviceId} client_newer (re-add after delete): ${serverFile.path} (clientMtime=${clientFile.mtime} > receivedAt=${receivedAt})`);
       } else {
         peer.pushQueue.push(serverFile); // propagate deletion to stale client
+        logWarn(ctx, `[Sync] PUSHING DELETE to ${peer.deviceId}: ${serverFile.path} (clientMtime=${clientFile.mtime} <= receivedAt=${receivedAt})`);
       }
       continue;
     }
@@ -79,6 +94,16 @@ export function handleSync(ctx: SyncContext, peer: SyncPeer, msg: SyncMsg): void
   for (const [filePath, clientFile] of clientMap) {
     if (!serverMap.has(filePath) && clientFile.action === "active") {
       toRequest.push(filePath);
+    }
+  }
+
+  // Sync decision summary — helps diagnose spurious-delete situations.
+  const deletesPushed = peer.pushQueue.filter(f => f.action === "deleted").length;
+  logInfo(ctx, `[Sync] ${peer.deviceId} summary: push=${peer.pushQueue.length} (${deletesPushed} deletes), request=${toRequest.length}, clientFiles=${clientMap.size}, serverFiles=${serverFiles.length}`);
+  if (deletesPushed > 0) {
+    logWarn(ctx, `[Sync] WARNING: pushing ${deletesPushed} deletion(s) to ${peer.deviceId}:`);
+    for (const f of peer.pushQueue.filter(f => f.action === "deleted")) {
+      logWarn(ctx, `  DELETE → ${peer.deviceId}: ${f.path}`);
     }
   }
 
@@ -184,6 +209,10 @@ export function broadcastToPeers(ctx: SyncContext, sourcePeer: SyncPeer, file: F
 
   const payload = JSON.stringify({ type: "file_push" as const, file, content });
 
+  // 4. Broadcast raw string directly
+  if (file.action === "deleted") {
+    logWarn(ctx, `[Broadcast] DELETE for ${file.path} → ${targets.length} peer(s): ${targets.map(p => p.deviceId).join(", ")}`);
+  }
   // 4. Broadcast raw string directly
   for (const peer of targets) {
     peer.ws.send(payload);
