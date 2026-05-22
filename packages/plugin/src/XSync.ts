@@ -56,6 +56,14 @@ export class XSync {
   // on other vaults and produce spurious "Conflicted Copy" files there.
   private _applyingPaths = new Set<string>();
 
+  // Tracks the timestamp when we last wrote a file via _applyServerFile.
+  // Used to suppress platform-generated delete events (iOS iCloud eviction,
+  // Android post-write cleanup) for files we *just* wrote — those look like
+  // real deletes to stat() because the OS actually removes the local copy,
+  // but they are spurious: the file still exists on the server.  A 60-second
+  // grace window is long enough to catch any platform cleanup burst.
+  private _recentlyApplied = new Map<string, number>();
+
   // ── E2EE key cache ────────────────────────────────────────────────────────
   // PBKDF2 derivation is expensive (~100–200 ms).  Cache the derived key and
   // only re-derive when the password changes.
@@ -144,6 +152,7 @@ export class XSync {
     this.storage.abortTree();
     this.storage.tree = {};
     this.xTimeouts.clear();
+    this._recentlyApplied.clear();
     if (this.configCheckInterval !== null) {
       window.clearInterval(this.configCheckInterval);
       this.configCheckInterval = null;
@@ -249,7 +258,10 @@ export class XSync {
 
     switch (msg.type) {
       case "file_event_result":
-        if (msg.result === "client_newer") await this._uploadFile(msg.path);
+        // Fire the upload without awaiting — lets the message queue keep processing
+        // while multiple uploads run concurrently.  The server bounds concurrency
+        // via UPLOAD_BATCH (pendingUploads set) so we never flood the connection.
+        if (msg.result === "client_newer") void this._uploadFile(msg.path);
         break;
       case "file_push":
         await this._applyServerFile(msg.file, msg.content);
@@ -411,6 +423,12 @@ export class XSync {
           throw writeErr;
         }
 
+        // Mark this path as recently applied so any platform-generated delete
+        // event within the next 60 seconds is treated as spurious (e.g. iCloud
+        // eviction on iOS).  The entry is checked — and cleaned up — inside
+        // _processLocalEvent before the stat check.
+        this._recentlyApplied.set(file.path, Date.now());
+
         this.addActivity("down", file.path);
         this.syncDownCount++;
 
@@ -524,12 +542,49 @@ export class XSync {
   }
 
   private async _onSyncDone(): Promise<void> {
+    const wasFirstSync = this._isFirstSync;
     this.isSyncing = false;
     this._isFirstSync = false;  // device is now fully synced
     // Clear any stale _applyingPaths entries.  Normally each entry is consumed
     // as its vault event fires, but folder paths added during makeFolder calls
     // may never receive a matching event (e.g. folder already existed).
     this._applyingPaths.clear();
+
+    // After a first-ever sync, discard every delete-queue entry that accumulated
+    // during the initial write burst.  The platform (iOS iCloud eviction, Android
+    // post-write cleanup) fires delayed "delete" events for files it just wrote,
+    // which pile up in the delete queue while _isFirstSync was blocking the drain.
+    // Now that _isFirstSync is false those would be drained immediately and sent
+    // to the server as real deletes — causing mass deletion on every other device.
+    // A brand-new device has zero legitimate deletes: it just received the world
+    // from the server.  Wipe the queue; the server is authoritative for anything
+    // that turns out to be truly missing.
+    if (wasFirstSync) {
+      const blocked = Object.keys(this.deleteQueue);
+      if (blocked.length > 0) {
+        this.plugin.log(`[IonSync] First sync complete — discarding ${blocked.length} queued delete(s) from initial write burst: ${blocked.slice(0, 3).join(", ")}${blocked.length > 3 ? " ..." : ""}`);
+        this.deleteQueue = {};
+        await this.storage.saveDeleteQueue(this.deleteQueue);
+      }
+    }
+
+    // After the first sync, schedule a cleanup of the recently-applied map
+    // once the 60-second grace window has expired, so we don't hold 20k+
+    // path strings in memory indefinitely on devices with large vaults.
+    if (wasFirstSync) {
+      setTimeout(() => { this._recentlyApplied.clear(); }, 65_000);
+    }
+
+    // Drain any offline delete-queue entries that accumulated while disconnected.
+    // We do this here (after reconciliation) rather than in _onConnected so that:
+    //   1. _isFirstSync is already cleared (or the queue was wiped by wasFirstSync)
+    //   2. The server has pushed any files it still considers active, so the
+    //      stat-check inside _processDeleteQueue can drop stale iCloud evictions
+    //      for files that just got re-downloaded.
+    if (!wasFirstSync && Object.keys(this.deleteQueue).length > 0) {
+      await this._processDeleteQueue();
+    }
+
     this.releaseWakeLock();
     this.xNotify.setSyncSummary(this.syncUpCount, this.syncDownCount);
     this.syncUpCount = 0;
@@ -672,7 +727,32 @@ export class XSync {
       //   • An in-progress write triggers a transient remove+recreate at the OS level
       // Without this check, those phantom events reach the server as real deletes,
       // causing the file to be deleted on every other connected device.
-      const existsStat = await this.plugin.app.vault.adapter.stat(file.path);
+      // Grace-window guard: drop delete events for files we wrote very recently.
+      // On iOS, iCloud evicts newly-written files from local storage after sync_done
+      // fires, triggering vault delete events whose stat() call returns null (the
+      // file is genuinely gone from disk, but still safe on the server).  Without
+      // this check those events become real deletes and get broadcast to every
+      // other connected device.  60 seconds is wide enough to cover any eviction
+      // burst but short enough that a deliberate user-delete is not delayed more
+      // than one sync cycle.
+      const appliedAt = this._recentlyApplied.get(file.path);
+      if (appliedAt !== undefined) {
+        this._recentlyApplied.delete(file.path); // one-shot: consume the entry
+        if (Date.now() - appliedAt < 60_000) {
+          this.plugin.log(`[IonSync] Grace-window: dropping delete for recently-applied file ${file.path} (${Date.now() - appliedAt}ms after write)`);
+          return;
+        }
+      }
+
+      let existsStat = null;
+      try {
+        existsStat = await this.plugin.app.vault.adapter.stat(file.path);
+      } catch {
+        // stat() failure means we can't confirm the file is gone — treat as
+        // spurious and drop the delete rather than risk sending a bad delete.
+        this.plugin.log(`[IonSync] stat() failed for delete event on ${file.path} — dropping to be safe`);
+        return;
+      }
       if (existsStat) {
         this.plugin.log(`[IonSync] Dropping spurious delete event for ${file.path} (file still exists on disk)`);
         return;
@@ -766,7 +846,16 @@ export class XSync {
 
   private async _onConnected(): Promise<void> {
     this.xNotify.notifyStatus(NotifyType.CONNECTED);
-    if (Object.keys(this.deleteQueue).length > 0) await this._processDeleteQueue();
+    // NOTE: the delete queue is intentionally NOT drained here.
+    // Draining on connect is dangerous because _isFirstSync has not yet been set
+    // (that happens inside sync()), and the queue may contain stale entries from
+    // iCloud evictions in a previous session.  If we drain before reconciliation
+    // the server records those files as deleted and broadcasts mass deletions to
+    // every other connected device.  Instead we drain in _onSyncDone, after the
+    // server has had a chance to push back any files it still considers active
+    // (which makes the stat-check drop the stale delete entries naturally).
+    // Real-time deletes (user deletes a file while connected) still go through
+    // _processDeleteQueue immediately via _processLocalEvent — unaffected.
 
     if (this.plugin.settings.autoSync) {
       // onLayoutReady fires immediately when the layout is already ready (which it

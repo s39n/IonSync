@@ -4,7 +4,13 @@ import type { SyncContext } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 
 /** Max files requested from client simultaneously — bounds server-side buffer memory. */
-const UPLOAD_BATCH = 1;
+const UPLOAD_BATCH = 8;
+
+/** Files pushed to client per event-loop tick during a bulk sync.
+ *  Sending in batches (rather than one-per-callback) keeps the network pipe
+ *  full without blocking the event loop.  setImmediate between batches gives
+ *  other peers / HTTP handlers CPU time. */
+const PUSH_BATCH = 20;
 
 function logInfo(ctx: SyncContext, msg: string): void {
   if (ctx.config.logs.level >= 3) pushLog(ctx, msg);
@@ -122,9 +128,17 @@ export function handleSync(ctx: SyncContext, peer: SyncPeer, msg: SyncMsg): void
 }
 
 /**
- * Send one server-newer file, then recurse inside the ws.send() callback.
- * The callback fires only after the payload has been flushed to the TCP socket,
- * so the send buffer never accumulates more than one large file at a time.
+ * Push server-newer files to the client in batches.
+ *
+ * Previously this sent one file per ws.send() callback, waiting for each TCP
+ * flush before reading the next file.  For 20,000 small files that serialised
+ * every disk-read behind a network round-trip.
+ *
+ * Now we send PUSH_BATCH files per event-loop tick without waiting for
+ * individual callbacks — the ws library buffers and streams as fast as TCP
+ * allows.  We only pause when bufferedAmount shows the client's pipe is
+ * genuinely choked, then resume via setInterval once it drains.
+ * setImmediate between batches keeps other peers and HTTP handlers responsive.
  */
 export function drainPushQueue(ctx: SyncContext, peer: SyncPeer): void {
   if (peer.pushQueue.length === 0) {
@@ -133,32 +147,41 @@ export function drainPushQueue(ctx: SyncContext, peer: SyncPeer): void {
   }
   if (peer.ws.readyState !== peer.ws.OPEN) return;
 
-  const file = peer.pushQueue.shift()!;
-  let content = "";
-  if (file.action === "active" && file.fileType === "file") {
-    const buf = ctx.storage.readLatest(file.path);
-    content = buf ? buf.toString("base64") : "";
+  // If the client's receive buffer is already choked, wait before sending more.
+  if (peer.ws.bufferedAmount > 10 * 1024 * 1024) {
+    const waitInterval = setInterval(() => {
+      if (peer.ws.bufferedAmount < 2 * 1024 * 1024) {
+        clearInterval(waitInterval);
+        setImmediate(() => drainPushQueue(ctx, peer));
+      }
+    }, 50);
+    return;
   }
 
-  const payload = JSON.stringify({ type: "file_push" as const, file, content });
-  
-  peer.ws.send(payload, (err?: Error) => {
-    if (err) return; // connection closed — abandon the queue
-    
-    // Check if the WebSocket buffer is choked (e.g., > 10MB)
-    if (peer.ws.bufferedAmount > 10 * 1024 * 1024) {
-      const waitInterval = setInterval(() => {
-        // Wait for buffer to drain below 2MB
-        if (peer.ws.bufferedAmount < 2 * 1024 * 1024) {
-          clearInterval(waitInterval);
-          setImmediate(() => drainPushQueue(ctx, peer)); // Yield to GC
-        }
-      }, 50);
-    } else {
-      // Yield to GC immediately before reading the next file
-      setImmediate(() => drainPushQueue(ctx, peer));
+  // Send up to PUSH_BATCH files this tick.
+  let sent = 0;
+  while (peer.pushQueue.length > 0 && sent < PUSH_BATCH) {
+    if (peer.ws.readyState !== peer.ws.OPEN) return;
+    // Re-check mid-batch in case the buffer fills during a large-file burst.
+    if (peer.ws.bufferedAmount > 10 * 1024 * 1024) break;
+
+    const file = peer.pushQueue.shift()!;
+    let content = "";
+    if (file.action === "active" && file.fileType === "file") {
+      const buf = ctx.storage.readLatest(file.path);
+      content = buf ? buf.toString("base64") : "";
     }
-  });
+    peer.ws.send(JSON.stringify({ type: "file_push" as const, file, content }));
+    sent++;
+  }
+
+  // Yield between batches so uploads from other peers and HTTP requests
+  // get CPU time, then continue draining.
+  if (peer.pushQueue.length > 0) {
+    setImmediate(() => drainPushQueue(ctx, peer));
+  } else {
+    checkSyncDone(peer);
+  }
 }
 
 /** Send sync_done once all uploads and server-side pushes are finished. */
