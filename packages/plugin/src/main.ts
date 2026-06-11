@@ -7,7 +7,6 @@ import { IonSyncSettingsTab } from "./SettingsTab.js";
 export interface PluginSettings {
   host: string;
   port: number;
-  password: string;
   tls: boolean;
   deviceId: string;
   deviceName: string;
@@ -24,7 +23,6 @@ export interface PluginSettings {
   syncPDFs: boolean;
   syncOtherTypes: boolean;
   syncThemesAndSnippets: boolean;
-  syncSnippets: boolean;
   syncMainSettings: boolean;
   syncAppearanceSettings: boolean;
   syncHotkeys: boolean;
@@ -53,14 +51,11 @@ export interface PluginSettings {
    * in plaintext until they are next modified and re-uploaded.
    */
   encryptionEnabled: boolean;
-  /** Passphrase used to derive the AES-256-GCM key via PBKDF2-SHA256. */
-  encryptionPassword: string;
-} 
+}
 
 const DEFAULT_SETTINGS: PluginSettings = {
   host: "",
   port: 3000,
-  password: "",
   tls: false,
   deviceId: "",
   deviceName: "",
@@ -77,7 +72,6 @@ const DEFAULT_SETTINGS: PluginSettings = {
   syncPDFs: true,
   syncOtherTypes: false,
   syncThemesAndSnippets: false,
-  syncSnippets: false,
   syncMainSettings: false,
   syncAppearanceSettings: false,
   syncHotkeys: false,
@@ -88,7 +82,6 @@ const DEFAULT_SETTINGS: PluginSettings = {
   exclusionList: "",
   maxFileSizeMB: 25,
   encryptionEnabled: false,
-  encryptionPassword: "",
 };
 
 // ---------- Plugin ----------
@@ -137,8 +130,20 @@ export class IonSyncPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    const saved = (await this.loadData()) as Partial<PluginSettings> | null;
+    const saved = (await this.loadData()) as Partial<PluginSettings & { password?: string; encryptionPassword?: string }> | null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, saved ?? {});
+
+    // One-time migration: move plaintext secrets from data.json into the keychain.
+    if (saved?.password) {
+      this.app.secretStorage.setSecret("ionsync-password", saved.password);
+      delete (this.settings as any).password;
+      await this.saveData(this.settings);
+    }
+    if (saved?.encryptionPassword) {
+      this.app.secretStorage.setSecret("ionsync-encryption-password", saved.encryptionPassword);
+      delete (this.settings as any).encryptionPassword;
+      await this.saveData(this.settings);
+    }
   }
 
   async saveSettings(): Promise<void> {
@@ -146,6 +151,24 @@ export class IonSyncPlugin extends Plugin {
     if (this.xSync) {
       this.xSync.ws.isEnabled = this.settings.syncEnabled;
     }
+  }
+
+  // ── Keychain helpers ──────────────────────────────────────────────────────
+
+  getPassword(): string {
+    return this.app.secretStorage.getSecret("ionsync-password") ?? "";
+  }
+
+  setPassword(value: string): void {
+    this.app.secretStorage.setSecret("ionsync-password", value);
+  }
+
+  getEncryptionPassword(): string {
+    return this.app.secretStorage.getSecret("ionsync-encryption-password") ?? "";
+  }
+
+  setEncryptionPassword(value: string): void {
+    this.app.secretStorage.setSecret("ionsync-encryption-password", value);
   }
 
   log(...args: unknown[]): void {

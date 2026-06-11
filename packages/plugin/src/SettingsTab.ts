@@ -41,13 +41,14 @@ export class IonSyncSettingsTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Password")
-      .setDesc("Shared secret configured on the server")
-      .addText((t) =>
+      .setDesc("Shared secret configured on the server (stored in the system keychain)")
+      .addText((t) => {
         t.setPlaceholder("your-password")
-          .setValue(this.plugin.settings.password)
-          .onChange(async (v) => { this.plugin.settings.password = v; await this.plugin.saveSettings(); })
-          .inputEl.setAttribute("type", "password")
-      );
+          .setValue(this.plugin.getPassword())
+          .onChange((v) => { this.plugin.setPassword(v); });
+        t.inputEl.setAttribute("type", "password");
+        return t;
+      });
 
     new Setting(containerEl)
       .setName("Use TLS (wss://)")
@@ -192,11 +193,8 @@ export class IonSyncSettingsTab extends PluginSettingTab {
         )
         .addText((t) => {
           t.setPlaceholder("strong-passphrase")
-            .setValue(this.plugin.settings.encryptionPassword)
-            .onChange(async (v) => {
-              this.plugin.settings.encryptionPassword = v;
-              await this.plugin.saveSettings();
-            });
+            .setValue(this.plugin.getEncryptionPassword())
+            .onChange((v) => { this.plugin.setEncryptionPassword(v); });
           t.inputEl.setAttribute("type", "password");
           t.inputEl.setAttribute("autocomplete", "new-password");
           t.inputEl.setAttribute("autocorrect", "off");

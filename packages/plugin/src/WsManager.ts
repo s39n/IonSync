@@ -4,7 +4,7 @@ import type {
   VersionCheckResponseMsg,
 } from "@ionsync/protocol";
 import { Platform } from "obsidian";
-import type { PluginSettings } from "./main.js";
+import type { IonSyncPlugin, PluginSettings } from "./main.js";
 
 // ---------- Types ----------
 
@@ -53,7 +53,9 @@ export class WsManager {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private mobileVisibilityListener?: () => void;
 
-  constructor(private settings: PluginSettings) {
+  private get settings(): PluginSettings { return this.plugin.settings; }
+
+  constructor(private plugin: IonSyncPlugin) {
     // On mobile, disconnect when the app goes to the background and reconnect
     // when it comes back to the foreground. This avoids drained battery from a
     // stale socket and prevents the OS from killing the socket underneath us.
@@ -88,7 +90,7 @@ export class WsManager {
 
   connect(): void {
     if (!this.isEnabled) return;
-    if (!this.settings.password) {
+    if (!this.plugin.getPassword()) {
       console.warn("[WsManager] No password configured");
       return;
     }
@@ -195,7 +197,7 @@ export class WsManager {
   }
 
   private async _handleChallenge(nonce: string): Promise<void> {
-    const token = await this._computeToken(nonce, this.settings.password);
+    const token = await this._computeToken(nonce, this.plugin.getPassword());
     this.send({
       type: "auth",
       deviceId: this.settings.deviceId,

@@ -37,8 +37,7 @@ export class ExclusionFilter {
     if (this.isTrashPath(path) && !this.settings.syncTrash) return true;
 
     // config settings files — checked before hidden-file rule
-    if (this.isThemesOrSnippets(path)) return !this.settings.syncThemesAndSnippets;
-    if (this.isSnippets(path)) return !this.settings.syncSnippets || !this.settings.syncThemesAndSnippets;
+    if (this.isThemesOrSnippets(path) || this.isSnippets(path)) return !this.settings.syncThemesAndSnippets;
     if (this.isMainSettings(path)) return !this.settings.syncMainSettings;
     if (this.isAppearanceSettings(path)) return !this.settings.syncAppearanceSettings;
     if (this.isHotkeys(path)) return !this.settings.syncHotkeys;

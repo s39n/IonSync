@@ -71,7 +71,8 @@ export class XSync {
   private _e2eeKeyPassword = "";
 
   private async _getEncryptionKey(): Promise<CryptoKey | null> {
-    const { encryptionEnabled, encryptionPassword } = this.plugin.settings;
+    const { encryptionEnabled } = this.plugin.settings;
+    const encryptionPassword = this.plugin.getEncryptionPassword();
     if (!encryptionEnabled || !encryptionPassword) {
       this._e2eeKey = null;
       this._e2eeKeyPassword = "";
@@ -87,7 +88,7 @@ export class XSync {
 
 
   constructor(public plugin: IonSyncPlugin) {
-    this.ws = new WsManager(plugin.settings);
+    this.ws = new WsManager(plugin);
     this.storage = new Storage(plugin.app, plugin.settings, plugin.manifest.dir ?? '');
     this.xNotify = new XNotify(this);
   }
@@ -429,6 +430,7 @@ export class XSync {
         // _processLocalEvent before the stat check.
         this._recentlyApplied.set(file.path, Date.now());
 
+        this._reloadObsidianConfig(file.path);
         this.addActivity("down", file.path);
         this.syncDownCount++;
 
@@ -935,10 +937,68 @@ export class XSync {
     await this._checkConfigFiles();
   }
 
+  /**
+   * After writing a config file received from the server, ask Obsidian to
+   * reload the relevant subsystem so the change takes effect without a restart.
+   *
+   * - appearance.json  → requestLoadTheme() re-reads the file and applies the
+   *                      accent colour, base theme, and font settings live.
+   * - themes/** / snippets/** → readCssSources() reloads all CSS sources.
+   *
+   * Both APIs are internal (not in the public typings) — the optional-chaining
+   * calls are intentional so a future Obsidian rename doesn't throw at runtime.
+   */
+
+  private _reloadObsidianConfig(path: string): void {
+    const configDir = this.plugin.app.vault.configDir;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const css = (this.plugin.app as any).customCss;
+    if (!css) return;
+
+    if (path === `${configDir}/appearance.json`) {
+      css.requestLoadTheme?.();
+    } else if (
+      path.startsWith(`${configDir}/themes/`) ||
+      path.startsWith(`${configDir}/snippets/`)
+    ) {
+      css.readCssSources?.();
+    }
+  }
+
   private async _checkConfigFiles(): Promise<void> {
     if (!this.ws.isConnected || !this.plugin.settings.autoSync || this.isSyncing) return;
     const configDir = this.plugin.app.vault.configDir;
-    const targets = [`${configDir}/app.json`, `${configDir}/appearance.json`, `${configDir}/hotkeys.json`, `${configDir}/community-plugins.json`].filter(p => !this.exclusionFilter?.isExcluded(p));
+    // Seed with the well-known singleton config files.
+    const targets: string[] = [
+      `${configDir}/app.json`,
+      `${configDir}/appearance.json`,
+      `${configDir}/hotkeys.json`,
+      `${configDir}/community-plugins.json`,
+      `${configDir}/core-plugins.json`,
+      `${configDir}/core-plugins-migration.json`,
+    ].filter(p => !this.exclusionFilter?.isExcluded(p));
+
+    // Vault events don't fire for .obsidian/ changes, so we must poll.
+    // Add every .json sitting directly in .obsidian/ (core plugin settings
+    // like daily-notes.json, templates.json, etc.) then each plugin's data.json.
+    try {
+      const listing = await this.plugin.app.vault.adapter.list(configDir);
+      for (const f of listing.files) {
+        if (f.endsWith(".json") && !targets.includes(f) && !this.exclusionFilter?.isExcluded(f))
+          targets.push(f);
+      }
+    } catch { /* configDir unreadable — skip */ }
+
+    if (this.plugin.settings.syncInstalledCommunityPlugins) {
+      try {
+        const pluginsDir = `${configDir}/plugins`;
+        const listing = await this.plugin.app.vault.adapter.list(pluginsDir);
+        for (const folder of listing.folders) {
+          const dataPath = `${folder}/data.json`;
+          if (!this.exclusionFilter?.isExcluded(dataPath)) targets.push(dataPath);
+        }
+      } catch { /* plugins dir unreadable — skip */ }
+    }
 
     for (const path of targets) {
       const stat = await this.plugin.app.vault.adapter.stat(path);
