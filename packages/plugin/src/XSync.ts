@@ -263,6 +263,14 @@ export class XSync {
         // while multiple uploads run concurrently.  The server bounds concurrency
         // via UPLOAD_BATCH (pendingUploads set) so we never flood the connection.
         if (msg.result === "client_newer") void this._uploadFile(msg.path);
+        else if (msg.result === "conflict") {
+          // Server detected a concurrent edit and kept its version. Our local
+          // content was preserved server-side as a "(Conflicted Copy …)" file,
+          // which arrives via file_push along with the server's head version.
+          this.plugin.log(`[Conflict] ${msg.path} was edited elsewhere — local edits saved as a conflicted copy`);
+          this.addActivity("down", msg.path);
+          this.xNotify.showNotification(STATUS_WARN, `Sync conflict: ${msg.path} — your edits were saved as a conflicted copy`);
+        }
         break;
       case "file_push":
         await this._applyServerFile(msg.file, msg.content);
@@ -667,7 +675,8 @@ export class XSync {
     }
 
     entry.sha1 = liveSha1;
-    this.ws.send({ type: "file_data", mode: mode as any, file: entry, content });
+    // baseSha1 = the sha we last synced for this path (see _sendFileEvent).
+    this.ws.send({ type: "file_data", mode: mode as any, file: entry, content, ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}) });
     this.addActivity("up", path);
     this.syncUpCount++;
     await this.storage.writeMetadata(entry);
@@ -839,7 +848,9 @@ export class XSync {
     }
 
     const entry: FileEntry = { path: file.path, sha1: sha1 ?? "", mtime: stat.mtime, action: "active", fileType: "file" };
-    this.ws.send({ type: "file_data", mode: mode as any, file: entry, content });
+    // baseSha1 = the sha we last synced for this path. The server uses it to
+    // detect concurrent edits (stale base) without trusting device clocks.
+    this.ws.send({ type: "file_data", mode: mode as any, file: entry, content, ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}) });
     await this.storage.writeMetadata(entry);
     this.addActivity("up", file.path);
   }

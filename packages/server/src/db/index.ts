@@ -127,6 +127,20 @@ export class SyncDB {
       .map((r) => ({ sha1: r.sha1, mtime: r.mtime, receivedAt: r.received_at }));
   }
 
+  /**
+   * True if the given sha1 appears anywhere in the version history of a path.
+   * Used by the upload conflict gate: a client whose baseSha1 is a *known but
+   * non-head* version edited a stale base — a genuine concurrent edit.
+   */
+  hasVersionSha(filePath: string, sha1: string): boolean {
+    const row = this.db
+      .prepare<[string, string], { n: number }>(
+        "SELECT 1 AS n FROM file_versions WHERE path = ? AND sha1 = ? LIMIT 1"
+      )
+      .get(filePath, sha1);
+    return row !== undefined;
+  }
+
   getVersionsToTrim(filePath: string, keepCount: number): VersionEntry[] {
     return this.db
       .prepare<[string, number], DbVersionRow>(

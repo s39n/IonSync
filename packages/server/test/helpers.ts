@@ -49,7 +49,7 @@ export async function startTestServer(
   const app = express();
   app.use(buildRouter(ctx));
   const server = http.createServer(app);
-  attachWebSocketServer(ctx, server);
+  const wss = attachWebSocketServer(ctx, server);
 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as { port: number }).port;
@@ -61,6 +61,11 @@ export async function startTestServer(
       new Promise<void>((resolve, reject) => {
         db.close();
         fs.rmSync(tmpDir, { recursive: true, force: true });
+        // Terminate lingering sockets and close the wss — its 'close' event
+        // clears the 30s ping interval that would otherwise keep the event
+        // loop alive until the file-level test timeout kills the process.
+        for (const c of wss.clients) c.terminate();
+        wss.close();
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };
@@ -88,15 +93,20 @@ export function connectClient(port: number): TestClient {
 
   ws.on("message", (raw: Buffer) => {
     const msg = JSON.parse(raw.toString());
-    inbox.push(msg);
-    for (let i = waiters.length - 1; i >= 0; i--) {
+    // Deliver to the first matching waiter, OR park in the inbox — never both.
+    // (Previously a message consumed by a waiter was also pushed to the inbox,
+    // so a later nextMsg() with the same predicate would match the stale copy
+    // and resolve before the server had processed subsequent messages.)
+    for (let i = 0; i < waiters.length; i++) {
       const w = waiters[i]!;
       if (w.predicate(msg)) {
         clearTimeout(w.timer);
         waiters.splice(i, 1);
         w.resolve(msg);
+        return;
       }
     }
+    inbox.push(msg);
   });
 
   const client: TestClient = {

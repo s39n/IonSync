@@ -69,6 +69,16 @@ export interface FileDataUploadMsg {
   file: FileEntry;
   /** base64-encoded file content; empty string for folders or deleted files */
   content: string;
+  /**
+   * sha1 of the version this edit was based on — i.e. the sha1 the client last
+   * synced for this path (from its stored metadata). Lets the server detect
+   * concurrent edits without relying on client clocks:
+   *   baseSha1 === server head  → fast-forward, accept.
+   *   baseSha1 is an older known version → concurrent edit → conflict.
+   * Omitted by legacy clients and on first sync → server falls back to
+   * last-write-wins by mtime.
+   */
+  baseSha1?: string;
 }
 
 /** Client requesting a file from the server (server_newer case, or version restore). */
@@ -114,8 +124,16 @@ export interface AuthErrorMsg {
 export interface FileEventResultMsg {
   type: "file_event_result";
   path: string;
-  /** client_newer → client should upload. server_newer → client should request download. null → no-op. */
-  result: "client_newer" | "server_newer" | null;
+  /**
+   * client_newer → client should upload.
+   * server_newer → client should request download.
+   * conflict → upload was rejected as a concurrent edit; the server kept its
+   *   version and stored the client's content as a "(Conflicted Copy …)" file,
+   *   which is pushed to all peers (including the uploader). The server also
+   *   pushes its current version of the original path back to the uploader.
+   * null → no-op.
+   */
+  result: "client_newer" | "server_newer" | "conflict" | null;
 }
 
 /**

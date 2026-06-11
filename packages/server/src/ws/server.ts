@@ -92,6 +92,24 @@ export function attachWebSocketServer(
           const rawMsg = msg as any; 
           
           if (rawMsg.mode === "patch") {
+            // Conflict pre-check: a delta patch is only meaningful against the
+            // base it was diffed from. If the server head has moved past the
+            // client's baseSha1, stitching would corrupt the file — ask for the
+            // full file instead. The client's shadow already matches its current
+            // text, so the retry arrives as mode:"apply" and goes through the
+            // regular conflict gate in handleFileUpload.
+            const headFile = ctx.db.getFile(rawMsg.file.path);
+            if (
+              rawMsg.baseSha1 !== undefined &&
+              headFile &&
+              headFile.action === "active" &&
+              rawMsg.baseSha1 !== headFile.sha1
+            ) {
+              pushLog(ctx, `[Delta] Stale base for ${rawMsg.file.path} — requesting full upload`);
+              peer.pendingUploads.add(rawMsg.file.path);
+              peer.send({ type: "file_event_result", path: rawMsg.file.path, result: "client_newer" });
+              break;
+            }
             try {
               console.log(`[Delta Patch] Stitching update for: ${rawMsg.file.path}`);
               

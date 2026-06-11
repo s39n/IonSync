@@ -389,9 +389,13 @@ Server → Client: { type: "version_check_response", needsUpdate: false }
 Client → Server: { type: "sync", files: FileEntry[] }   (chunked, 2000 per message)
 Server → Client: { type: "file_event_result", path, result: "client_newer" }   (per file that needs upload)
 Server → Client: { type: "file_push", file: FileEntry, content: "<base64>" }   (per file server is newer)
-Client → Server: { type: "file_data", mode: "apply", file: FileEntry, content: "<base64>" }
+Client → Server: { type: "file_data", mode: "apply", file: FileEntry, content: "<base64>", baseSha1?: "<sha1>" }
 Server → Client: { type: "sync_done" }   (when all pendingUploads resolved)
 ```
+
+`baseSha1` is the sha1 the client last synced for the path. A stale base triggers
+`{ type: "file_event_result", path, result: "conflict" }` instead of an accept —
+see "Conflict resolution" below.
 
 ### Real-time file event
 
@@ -419,10 +423,27 @@ Server → Client: { type: "file_history_response", path, versions: VersionEntry
 
 ### Conflict resolution
 
-Last-write-wins by **client mtime** (millisecond epoch). `compareFiles(client, server)` returns:
+Two layers:
+
+**1. Sync-direction decision (mtime).** During a sync session `compareFiles(client, server)` decides which way a file flows:
 - `null` — same SHA1 and action; no action needed.
 - `"client_newer"` — client mtime is strictly greater; server requests upload.
 - `"server_newer"` — server mtime is greater or equal (tie goes to server); server pushes.
+
+**2. Upload conflict gate (baseSha1).** Every `file_data mode:"apply"` upload may carry `baseSha1` — the sha1 the client last synced for that path (from its stored metadata). `decideUpload` in `handlers/fileData.ts` resolves it clock-independently:
+
+```
+no server record / record deleted      → accept (new file or re-add)
+upload sha1 == server head sha1        → accept (idempotent resend)
+no baseSha1 (legacy client/first sync) → accept (LWW fallback)
+baseSha1 == server head sha1           → accept (fast-forward)
+baseSha1 is an older known version     → CONFLICT (head moved — concurrent edit)
+baseSha1 unknown to version history    → LWW by mtime: newer accepts, older CONFLICTS
+```
+
+On conflict the server **never overwrites its head**. Instead it stores the client's content as a `"<name> (Conflicted Copy <ts> <deviceId[0:8]>).<ext>"` file, pushes that copy to all peers (including the uploader), sends `file_event_result: "conflict"` to the uploader, and re-pushes its current head of the original path so the uploader converges. No edit is ever silently relegated to version history.
+
+Delta (`mode:"patch"`) uploads are pre-checked in `ws/server.ts`: a patch whose `baseSha1` no longer matches the head would corrupt the file if stitched, so the server requests a full upload (`file_event_result: "client_newer"`) instead — the retry arrives as `mode:"apply"` and goes through the regular gate.
 
 ---
 
@@ -466,7 +487,14 @@ Run the full suite:
 ```bash
 cd packages/server
 npm test
-# Expected: 13 pass, 0 fail
+# Expected: 17 pass, 0 fail
+```
+
+**On Windows without a working native better-sqlite3 build** (current Node here is v26 — no prebuilt binary for better-sqlite3 9.6.0 and no VS toolchain), run the suite in Docker instead:
+```powershell
+cd <repo root>
+Compress-Archive -Force -Path packages,package.json,package-lock.json,tsconfig.base.json -DestinationPath ionsync-src.zip
+docker run --rm -v ${PWD}:/repo:ro node:20-alpine sh /repo/run-tests-docker.sh
 ```
 
 ---

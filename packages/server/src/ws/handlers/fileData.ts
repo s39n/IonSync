@@ -1,4 +1,4 @@
-import type { FileDataUploadMsg, FileDataRequestMsg } from "@ionsync/protocol";
+import type { FileDataUploadMsg, FileDataRequestMsg, FileEntry } from "@ionsync/protocol";
 import type { SyncContext } from "../../context.js";
 import { pushActivity } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
@@ -8,6 +8,43 @@ import crypto from "node:crypto";
 // Magic header written by the plugin's Crypto.ts when E2EE is enabled.
 // Matches the first 8 bytes of the binary payload (MAGIC = "IONENCv1").
 const E2EE_MAGIC = Buffer.from([0x49, 0x4f, 0x4e, 0x45, 0x4e, 0x43, 0x76, 0x31]);
+
+/**
+ * Decide whether an upload fast-forwards the server head or is a concurrent
+ * edit (conflict). Clock-independent where possible:
+ *
+ *   - no server record / server record deleted   → accept (new file or re-add)
+ *   - upload sha == server head sha              → accept (idempotent resend)
+ *   - no baseSha1 (legacy client / first sync)   → accept (LWW fallback)
+ *   - baseSha1 == server head sha                → accept (fast-forward)
+ *   - baseSha1 is an older *known* version       → conflict (head moved on)
+ *   - baseSha1 unknown (lost-upload retry, copied vault)
+ *                                                → LWW by mtime: newer accepts,
+ *                                                  older/equal conflicts
+ */
+function decideUpload(ctx: SyncContext, msg: FileDataUploadMsg): "accept" | "conflict" {
+  const { file, baseSha1 } = msg;
+  if (file.action !== "active" || file.fileType !== "file") return "accept";
+
+  const serverFile = ctx.db.getFile(file.path);
+  if (!serverFile || serverFile.action === "deleted") return "accept";
+  if (file.sha1 && file.sha1 === serverFile.sha1) return "accept";
+  if (baseSha1 === undefined || baseSha1 === "") return "accept";
+  if (baseSha1 === serverFile.sha1) return "accept";
+  if (ctx.db.hasVersionSha(file.path, baseSha1)) return "conflict";
+  return file.mtime > serverFile.mtime ? "accept" : "conflict";
+}
+
+/** Builds "notes/foo (Conflicted Copy 2026-06-11T19-30 abc12345).md" — same
+ *  shape the plugin uses locally, plus a short device id so the origin is clear. */
+function conflictCopyPath(originalPath: string, deviceId: string | undefined): string {
+  const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 16);
+  const lastDot = originalPath.lastIndexOf(".");
+  const pathNoExt = lastDot > 0 ? originalPath.slice(0, lastDot) : originalPath;
+  const ext = lastDot > 0 ? originalPath.slice(lastDot) : "";
+  const dev = deviceId ? ` ${deviceId.slice(0, 8)}` : "";
+  return `${pathNoExt} (Conflicted Copy ${ts}${dev})${ext}`;
+}
 
 /**
  * Client is uploading a file to the server (mode: "apply").
@@ -20,6 +57,7 @@ export function handleFileUpload(
   const { file, content } = msg;
   let isRejected = false;
   let isE2EE = false;
+  const decision = decideUpload(ctx, msg);
 
   // Persist content for active files (not folders, not deleted)
   if (file.action === "active" && file.fileType === "file" && content) {
@@ -46,13 +84,28 @@ export function handleFileUpload(
       }
     }
 
-    // 3. Save healthy files
+    // 3. Save healthy files — a conflicting upload is diverted to a
+    //    "(Conflicted Copy …)" file instead of overwriting the server head.
+    if (!isRejected && decision === "conflict") {
+      applyConflict(ctx, peer, file, buf, content);
+      msg.content = "";
+      advanceUploadQueue(peer, file.path);
+      return;
+    }
     if (!isRejected) {
       ctx.storage.write(file.path, file.mtime, buf);
     }
 
     // Help the GC clear the buffer promptly
     msg.content = "";
+  }
+
+  // Conflict on an upload that carried no content (rare: unreadable file).
+  // Keep the server head and just tell the client — nothing to copy.
+  if (!isRejected && decision === "conflict") {
+    applyConflict(ctx, peer, file, null, "");
+    advanceUploadQueue(peer, file.path);
+    return;
   }
 
   // Only update the database and broadcast if the file was ACTUALLY saved
@@ -72,7 +125,12 @@ export function handleFileUpload(
   }
 
   // CRITICAL: Always advance the queue, even if the file was rejected!
-  peer.pendingUploads.delete(file.path);
+  advanceUploadQueue(peer, file.path);
+}
+
+/** Pop the next queued upload request and re-check sync completion. */
+function advanceUploadQueue(peer: SyncPeer, path: string): void {
+  peer.pendingUploads.delete(path);
 
   if (peer.uploadQueue.length > 0) {
     const next = peer.uploadQueue.shift()!;
@@ -82,6 +140,48 @@ export function handleFileUpload(
 
   // Check whether sync is fully complete
   checkSyncDone(peer);
+}
+
+/**
+ * A concurrent edit was detected: store the client's content as a
+ * "(Conflicted Copy …)" file, notify the uploader, distribute the copy to all
+ * peers, and re-push the server's current head of the original path so the
+ * uploader converges. The server head is never overwritten.
+ */
+function applyConflict(
+  ctx: SyncContext,
+  peer: SyncPeer,
+  file: FileEntry,
+  buf: Buffer | null,
+  rawContent: string
+): void {
+  if (buf) {
+    const copyEntry: FileEntry = {
+      path: conflictCopyPath(file.path, peer.deviceId),
+      sha1: file.sha1,
+      mtime: file.mtime,
+      action: "active",
+      fileType: "file",
+    };
+    ctx.storage.write(copyEntry.path, copyEntry.mtime, buf);
+    ctx.db.upsertFile(copyEntry);
+    // Uploader receives the copy directly; broadcastToPeers covers everyone else.
+    peer.send({ type: "file_push", file: copyEntry, content: rawContent });
+    broadcastToPeers(ctx, peer, copyEntry);
+    logWarn(ctx, `[Conflict] ${peer.deviceId} uploaded ${file.path} from a stale base — stored as ${copyEntry.path}`);
+    pushActivity(ctx, { kind: "upload", deviceId: peer.deviceId ?? undefined, path: copyEntry.path });
+  } else {
+    logWarn(ctx, `[Conflict] ${peer.deviceId} uploaded ${file.path} from a stale base with no content — server head kept`);
+  }
+
+  peer.send({ type: "file_event_result", path: file.path, result: "conflict" });
+
+  // Re-push the current head so the uploader's vault converges on it.
+  const serverFile = ctx.db.getFile(file.path);
+  if (serverFile && serverFile.action === "active" && serverFile.fileType === "file") {
+    const headBuf = ctx.storage.readLatest(serverFile.path);
+    peer.send({ type: "file_push", file: serverFile, content: headBuf ? headBuf.toString("base64") : "" });
+  }
 }
 
 /**

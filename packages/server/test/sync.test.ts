@@ -276,3 +276,130 @@ describe("file_history", () => {
     await srv.stop();
   });
 });
+
+describe("conflict resolution (baseSha1)", () => {
+  // Real SHA1s — handleFileUpload verifies content hashes.
+  const PATH = "notes/conflict.md";
+  const V1 = { sha1: "7bd81a159ea42d0f32dc1bcac2b3756123a985c7", b64: Buffer.from("v one").toString("base64") };
+  const V2 = { sha1: "c4fe9a596a0f41e1a3afde544869302fc0e5a947", b64: Buffer.from("v two").toString("base64") };
+  const V3 = { sha1: "850f94f51670998edcd47f2ced22e23e8ac4a4ae", b64: Buffer.from("v three").toString("base64") };
+
+  function entry(sha1: string, mtime: number): FileEntry {
+    return { path: PATH, sha1, mtime, action: "active", fileType: "file" };
+  }
+
+  /** file_history round-trip — guarantees the previous upload was processed. */
+  async function settle(client: { send(m: unknown): void; nextMsg<T>(p?: (m: unknown) => boolean): Promise<T> }) {
+    client.send({ type: "file_history", path: PATH });
+    await client.nextMsg((m) => (m as { type: string }).type === "file_history_response");
+  }
+
+  it("accepts a fast-forward upload (baseSha1 matches server head)", async () => {
+    const srv = await startTestServer();
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    client.send({ type: "file_data", mode: "apply", file: entry(V1.sha1, 1000), content: V1.b64 });
+    await settle(client);
+    client.send({ type: "file_data", mode: "apply", file: entry(V2.sha1, 2000), content: V2.b64, baseSha1: V1.sha1 });
+    await settle(client);
+
+    assert.equal(srv.ctx.db.getFile(PATH)?.sha1, V2.sha1);
+    assert.ok(!srv.ctx.db.getAllFiles().some((f) => f.path.includes("(Conflicted Copy")));
+
+    client.close();
+    await srv.stop();
+  });
+
+  it("diverts a stale-base upload to a conflicted copy and keeps the server head", async () => {
+    const srv = await startTestServer();
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    client.send({ type: "file_data", mode: "apply", file: entry(V1.sha1, 1000), content: V1.b64 });
+    await settle(client);
+    client.send({ type: "file_data", mode: "apply", file: entry(V2.sha1, 2000), content: V2.b64, baseSha1: V1.sha1 });
+    await settle(client);
+
+    // Concurrent edit: based on V1 even though head is V2.
+    client.send({ type: "file_data", mode: "apply", file: entry(V3.sha1, 3000), content: V3.b64, baseSha1: V1.sha1 });
+
+    const result = await client.nextMsg<{ type: string; path: string; result: string }>(
+      (m) => (m as { type: string }).type === "file_event_result" && (m as { path: string }).path === PATH
+    );
+    assert.equal(result.result, "conflict");
+
+    // The conflicted copy is pushed back to the uploader with the rejected content…
+    const copyPush = await client.nextMsg<{ type: string; file: FileEntry; content: string }>(
+      (m) => (m as { type: string }).type === "file_push" &&
+             (m as { file: FileEntry }).file.path.includes("(Conflicted Copy")
+    );
+    assert.equal(copyPush.content, V3.b64);
+    assert.equal(copyPush.file.sha1, V3.sha1);
+
+    // …and the server re-pushes its head so the uploader converges.
+    const headPush = await client.nextMsg<{ type: string; file: FileEntry; content: string }>(
+      (m) => (m as { type: string }).type === "file_push" &&
+             (m as { file: FileEntry }).file.path === PATH
+    );
+    assert.equal(headPush.content, V2.b64);
+
+    // Server head untouched; copy registered in the DB.
+    assert.equal(srv.ctx.db.getFile(PATH)?.sha1, V2.sha1);
+    const copy = srv.ctx.db.getAllFiles().find((f) => f.path.includes("(Conflicted Copy"));
+    assert.ok(copy);
+    assert.equal(copy?.sha1, V3.sha1);
+    assert.equal(copy?.action, "active");
+
+    client.close();
+    await srv.stop();
+  });
+
+  it("accepts uploads without baseSha1 (legacy clients, LWW)", async () => {
+    const srv = await startTestServer();
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    client.send({ type: "file_data", mode: "apply", file: entry(V1.sha1, 1000), content: V1.b64 });
+    await settle(client);
+    client.send({ type: "file_data", mode: "apply", file: entry(V2.sha1, 2000), content: V2.b64 });
+    await settle(client);
+
+    assert.equal(srv.ctx.db.getFile(PATH)?.sha1, V2.sha1);
+    assert.ok(!srv.ctx.db.getAllFiles().some((f) => f.path.includes("(Conflicted Copy")));
+
+    client.close();
+    await srv.stop();
+  });
+
+  it("unknown base falls back to LWW: newer mtime accepted, older conflicts", async () => {
+    const srv = await startTestServer();
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    const unknownBase = "0123456789abcdef0123456789abcdef01234567";
+
+    client.send({ type: "file_data", mode: "apply", file: entry(V1.sha1, 5000), content: V1.b64 });
+    await settle(client);
+
+    // Newer mtime + unknown base (e.g. lost-upload retry) → accepted.
+    client.send({ type: "file_data", mode: "apply", file: entry(V2.sha1, 6000), content: V2.b64, baseSha1: unknownBase });
+    await settle(client);
+    assert.equal(srv.ctx.db.getFile(PATH)?.sha1, V2.sha1);
+
+    // Older mtime + unknown base (e.g. restored stale backup) → conflict.
+    client.send({ type: "file_data", mode: "apply", file: entry(V3.sha1, 1000), content: V3.b64, baseSha1: unknownBase });
+    const result = await client.nextMsg<{ type: string; path: string; result: string }>(
+      (m) => (m as { type: string }).type === "file_event_result" && (m as { path: string }).path === PATH
+    );
+    assert.equal(result.result, "conflict");
+    assert.equal(srv.ctx.db.getFile(PATH)?.sha1, V2.sha1);
+
+    client.close();
+    await srv.stop();
+  });
+});
