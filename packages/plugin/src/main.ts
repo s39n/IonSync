@@ -87,7 +87,8 @@ const DEFAULT_SETTINGS: PluginSettings = {
 // ---------- Plugin ----------
 
 export class IonSyncPlugin extends Plugin {
-  settings!: PluginSettings;
+  // Obsidian 1.13+ typings declare `Plugin.settings?: unknown` — narrow it here.
+  override settings!: PluginSettings;
   xSync!: XSync;
 
   override async onload(): Promise<void> {

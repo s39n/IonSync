@@ -6,7 +6,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
     super(app, plugin);
   }
 
-  display(): void {
+  override display(): void {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "IonSync" });

@@ -490,7 +490,9 @@ npm test
 # Expected: 17 pass, 0 fail
 ```
 
-**On Windows without a working native better-sqlite3 build** (current Node here is v26 — no prebuilt binary for better-sqlite3 9.6.0 and no VS toolchain), run the suite in Docker instead:
+Tests run natively on Windows (better-sqlite3 ^12 ships prebuilds for Node 26). Two environment quirks to know:
+- This machine sets `NODE_ENV=production` globally, which makes npm skip devDependencies. The repo-root `.npmrc` (`include=dev`) overrides that — don't delete it.
+- A Docker-based runner is also available if the native module ever breaks again:
 ```powershell
 cd <repo root>
 Compress-Archive -Force -Path packages,package.json,package-lock.json,tsconfig.base.json -DestinationPath ionsync-src.zip
