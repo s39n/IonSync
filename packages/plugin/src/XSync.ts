@@ -467,9 +467,12 @@ export class XSync {
   private async _createConflictedCopy(originalPath: string, capturedContent?: string | ArrayBuffer): Promise<void> {
     const date = new Date();
     const ts = date.toISOString().replace(/[:.]/g, "-").slice(0, 16);
+    // Extension = dot inside the basename only (not folder dots, not a leading dot).
+    const lastSlash = originalPath.lastIndexOf("/");
     const lastDot = originalPath.lastIndexOf(".");
-    const pathNoExt = lastDot > 0 ? originalPath.slice(0, lastDot) : originalPath;
-    const ext = lastDot > 0 ? originalPath.slice(lastDot) : "";
+    const hasExt = lastDot > lastSlash + 1;
+    const pathNoExt = hasExt ? originalPath.slice(0, lastDot) : originalPath;
+    const ext = hasExt ? originalPath.slice(lastDot) : "";
     const newPath = `${pathNoExt} (Conflicted Copy ${ts})${ext}`;
 
     if (Utils.isBinary(originalPath)) {

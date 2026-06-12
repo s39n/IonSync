@@ -403,3 +403,38 @@ describe("conflict resolution (baseSha1)", () => {
     await srv.stop();
   });
 });
+
+describe("conflict copies for binary paths", () => {
+  it("keeps the extension so peers route the copy through binary handling", async () => {
+    const srv = await startTestServer();
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    const PATH = "assets.v2/photo.png";
+    const V1 = { sha1: "7bd81a159ea42d0f32dc1bcac2b3756123a985c7", b64: Buffer.from("v one").toString("base64") };
+    const V2 = { sha1: "c4fe9a596a0f41e1a3afde544869302fc0e5a947", b64: Buffer.from("v two").toString("base64") };
+    const V3 = { sha1: "850f94f51670998edcd47f2ced22e23e8ac4a4ae", b64: Buffer.from("v three").toString("base64") };
+    const entry = (sha1: string, mtime: number): FileEntry =>
+      ({ path: PATH, sha1, mtime, action: "active", fileType: "file" });
+
+    client.send({ type: "file_data", mode: "apply", file: entry(V1.sha1, 1000), content: V1.b64 });
+    client.send({ type: "file_history", path: PATH });
+    await client.nextMsg((m) => (m as { type: string }).type === "file_history_response");
+    client.send({ type: "file_data", mode: "apply", file: entry(V2.sha1, 2000), content: V2.b64, baseSha1: V1.sha1 });
+    client.send({ type: "file_history", path: PATH });
+    await client.nextMsg((m) => (m as { type: string }).type === "file_history_response");
+
+    // Stale base → conflict; copy must stay inside assets.v2/ and end in .png.
+    client.send({ type: "file_data", mode: "apply", file: entry(V3.sha1, 3000), content: V3.b64, baseSha1: V1.sha1 });
+    const copyPush = await client.nextMsg<{ type: string; file: FileEntry; content: string }>(
+      (m) => (m as { type: string }).type === "file_push" &&
+             (m as { file: FileEntry }).file.path.includes("(Conflicted Copy")
+    );
+    assert.match(copyPush.file.path, /^assets\.v2\/photo \(Conflicted Copy [^/]+\)\.png$/);
+    assert.equal(copyPush.content, V3.b64);
+
+    client.close();
+    await srv.stop();
+  });
+});

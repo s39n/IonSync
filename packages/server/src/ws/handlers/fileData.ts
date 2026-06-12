@@ -39,9 +39,14 @@ function decideUpload(ctx: SyncContext, msg: FileDataUploadMsg): "accept" | "con
  *  shape the plugin uses locally, plus a short device id so the origin is clear. */
 function conflictCopyPath(originalPath: string, deviceId: string | undefined): string {
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 16);
+  // Only treat a dot inside the basename as an extension separator — a dot in
+  // a folder name ("assets.v2/photo") must not be split, and a leading dot
+  // (".gitignore") is part of the name, not an extension.
+  const lastSlash = originalPath.lastIndexOf("/");
   const lastDot = originalPath.lastIndexOf(".");
-  const pathNoExt = lastDot > 0 ? originalPath.slice(0, lastDot) : originalPath;
-  const ext = lastDot > 0 ? originalPath.slice(lastDot) : "";
+  const hasExt = lastDot > lastSlash + 1;
+  const pathNoExt = hasExt ? originalPath.slice(0, lastDot) : originalPath;
+  const ext = hasExt ? originalPath.slice(lastDot) : "";
   const dev = deviceId ? ` ${deviceId.slice(0, 8)}` : "";
   return `${pathNoExt} (Conflicted Copy ${ts}${dev})${ext}`;
 }
