@@ -345,6 +345,17 @@
     .tree-actions { display: flex; gap: 5px; margin-left: 10px; flex-shrink: 0; }
     .tree-children { display: none; }
     .tree-children.open { display: block; }
+    .tree-cb { flex-shrink: 0; margin-right: 8px; width: 14px; height: 14px; cursor: pointer; accent-color: var(--accent); }
+    .tree-row.selected { background: rgba(108,142,255,.07); }
+
+    /* ── Files panel bulk-select bar ───────────────────────────────────────── */
+    #files-bulk-bar {
+      display: none; align-items: center; gap: 10px;
+      padding: 8px 12px; margin-bottom: 10px;
+      background: rgba(108,142,255,.08);
+      border: 1px solid var(--accent); border-radius: var(--radius);
+    }
+    #files-bulk-bar.visible { display: flex; }
 
     /* ── Snapshot + E2EE bar ────────────────────────────────────────────────── */
     .snapshot-bar {
@@ -614,6 +625,15 @@
           </div>
         </div>
 
+        <!-- Files bulk-select bar -->
+        <div id="files-bulk-bar">
+          <input type="checkbox" id="files-select-all" onchange="filesToggleSelectAll(this.checked)" title="Select all visible">
+          <span id="files-bulk-count" style="font-size:12px;color:var(--text)">0 selected</span>
+          <div style="flex:1"></div>
+          <button class="btn" style="font-size:11px" onclick="filesDownloadZip()">⬇ Download ZIP</button>
+          <button class="btn danger" style="font-size:11px" onclick="filesDeleteSelected()">Delete selected</button>
+        </div>
+
         <div class="card" style="overflow:visible">
           <div id="file-tree-root"></div>
         </div>
@@ -710,6 +730,7 @@
             <input type="checkbox" id="bulk-select-all" onchange="dbToggleSelectAll(this.checked)" title="Select all">
             <span id="bulk-count" style="font-size:12px;color:var(--text)">0 selected</span>
             <div style="flex:1"></div>
+            <button class="btn" style="font-size:11px" onclick="dbDownloadZip()">⬇ Download ZIP</button>
             <button class="btn danger" style="font-size:11px" onclick="dbDeleteSelected()">Delete selected</button>
           </div>
           <div id="db-files-body" style="max-height:480px;overflow-y:auto">
@@ -1026,6 +1047,8 @@ async function loadDevices() {
 async function loadFiles() {
   const r = await api('/api/files');
   allFiles = await r.json();
+  filesSelected.clear();
+  filesUpdateBulkBar();
   renderFiles();
 }
 
@@ -1516,7 +1539,10 @@ function renderTreeNode(node, depth) {
     const fpath = child._path;
     const isOpen = openFolders.has(fpath);
     const count = countTreeFiles(child);
-    html += `<div class="tree-row folder" style="padding-left:${pad}px">` +
+    const folderFiles = getAllFilesInFolder(child);
+    const allChecked = folderFiles.length > 0 && folderFiles.every(p => filesSelected.has(p));
+    html += `<div class="tree-row folder${allChecked ? ' selected' : ''}" style="padding-left:${pad}px">` +
+      `<input type="checkbox" class="tree-cb files-tree-cb" data-type="folder" data-path="${escHtml(fpath)}" ${allChecked ? 'checked' : ''} onclick="event.stopPropagation();filesToggleFolder('${escHtml(fpath)}',this.checked)">` +
       `<span class="tree-toggle" onclick="toggleFolder('${escHtml(fpath)}')">` +
       `<span class="tree-chevron ${isOpen ? 'open' : ''}">▶</span>` +
       `<span class="tree-icon">📁</span>` +
@@ -1535,7 +1561,9 @@ function renderTreeNode(node, depth) {
 
   for (const f of files) {
     const icon = getFileIcon(f._name);
-    html += `<div class="tree-row file" style="padding-left:${pad + 16}px">` +
+    const checked = filesSelected.has(f.path);
+    html += `<div class="tree-row file${checked ? ' selected' : ''}" style="padding-left:${pad + 16}px">` +
+      `<input type="checkbox" class="tree-cb files-tree-cb" data-type="file" data-path="${escHtml(f.path)}" ${checked ? 'checked' : ''} onclick="event.stopPropagation();filesToggleFile('${escHtml(f.path)}',this.checked)">` +
       `<span class="tree-chevron"></span>` +
       `<span class="tree-icon">${icon}</span>` +
       `<span class="tree-name">${escHtml(f._name)}</span>` +
@@ -2617,6 +2645,33 @@ function dbToggleFile(path, checked) {
   dbUpdateBulkBar();
 }
 
+async function dbDownloadZip() {
+  if (!dbSelected.size) return;
+  const paths = [...dbSelected];
+  const e2eePw = document.getElementById('global-e2ee-pw')?.value || '';
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (e2eePw) headers['X-E2EE-Password'] = e2eePw;
+    const r = await fetch('/api/export-selected', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ paths }),
+      credentials: 'include',
+    });
+    if (!r.ok) { toast('Export failed', 'error'); return; }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const ts = new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', '-');
+    a.href = url; a.download = `ionsync-export-${ts}.zip`;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+    toast(`Downloading ${paths.length} file${paths.length !== 1 ? 's' : ''} as ZIP`, 'success');
+  } catch (e) {
+    toast('Export failed: ' + e.message, 'error');
+  }
+}
+
 async function dbDeleteSelected() {
   if (!dbSelected.size) return;
   const count = dbSelected.size;
@@ -2632,6 +2687,105 @@ async function dbDeleteSelected() {
   toast(failed > 0 ? `Deleted ${count - failed}, ${failed} failed` : `Deleted ${count} file${count !== 1 ? 's' : ''}`,
         failed > 0 ? 'error' : 'success');
   await loadDbFiles();
+}
+
+// ── Files panel bulk-select ────────────────────────────────────────────────
+
+const filesSelected = new Set();
+
+function getAllFilesInFolder(node) {
+  const paths = [];
+  for (const f of node.files) paths.push(f.path);
+  for (const c of Object.values(node.children)) paths.push(...getAllFilesInFolder(c));
+  return paths;
+}
+
+function filesUpdateBulkBar() {
+  const bar = document.getElementById('files-bulk-bar');
+  const countEl = document.getElementById('files-bulk-count');
+  if (!bar || !countEl) return;
+  if (filesSelected.size > 0) {
+    bar.classList.add('visible');
+    countEl.textContent = filesSelected.size + ' file' + (filesSelected.size !== 1 ? 's' : '') + ' selected';
+  } else {
+    bar.classList.remove('visible');
+  }
+}
+
+function filesToggleFile(path, checked) {
+  if (checked) filesSelected.add(path);
+  else filesSelected.delete(path);
+  filesUpdateBulkBar();
+  // Update the row highlight without full re-render
+  document.querySelectorAll(`.files-tree-cb[data-path="${CSS.escape(path)}"]`).forEach(cb => {
+    cb.closest('.tree-row')?.classList.toggle('selected', checked);
+  });
+}
+
+function filesToggleFolder(folderPath, checked) {
+  // Select / deselect all files under this folder
+  for (const f of allFiles) {
+    if (f.path.startsWith(folderPath + '/')) {
+      if (checked) filesSelected.add(f.path);
+      else filesSelected.delete(f.path);
+    }
+  }
+  filesUpdateBulkBar();
+  renderFileTree(); // re-render so child checkboxes update
+}
+
+function filesToggleSelectAll(checked) {
+  const visiblePaths = document.querySelectorAll('.files-tree-cb[data-type="file"]');
+  visiblePaths.forEach(cb => {
+    if (checked) filesSelected.add(cb.dataset.path);
+    else filesSelected.delete(cb.dataset.path);
+  });
+  filesUpdateBulkBar();
+  renderFileTree();
+}
+
+async function filesDeleteSelected() {
+  if (!filesSelected.size) return;
+  const count = filesSelected.size;
+  if (!confirm(`Delete ${count} file${count !== 1 ? 's' : ''}? This removes them from the server permanently.`)) return;
+  let failed = 0;
+  for (const path of [...filesSelected]) {
+    try {
+      await api(`/api/delete-file/${encodeURIComponent(path)}`, { method: 'DELETE' });
+      filesSelected.delete(path);
+    } catch { failed++; }
+  }
+  filesUpdateBulkBar();
+  toast(failed > 0 ? `Deleted ${count - failed}, ${failed} failed` : `Deleted ${count} file${count !== 1 ? 's' : ''}`,
+        failed > 0 ? 'error' : 'success');
+  await loadFiles();
+}
+
+async function filesDownloadZip() {
+  if (!filesSelected.size) return;
+  const paths = [...filesSelected];
+  const e2eePw = document.getElementById('global-e2ee-pw')?.value || '';
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (e2eePw) headers['X-E2EE-Password'] = e2eePw;
+    const r = await fetch('/api/export-selected', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ paths }),
+      credentials: 'include',
+    });
+    if (!r.ok) { toast('Export failed', 'error'); return; }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const ts = new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', '-');
+    a.href = url; a.download = `ionsync-export-${ts}.zip`;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+    toast(`Downloading ${paths.length} file${paths.length !== 1 ? 's' : ''} as ZIP`, 'success');
+  } catch (e) {
+    toast('Export failed: ' + e.message, 'error');
+  }
 }
 
 // ── Folder rename ──────────────────────────────────────────────────────────────────────────────

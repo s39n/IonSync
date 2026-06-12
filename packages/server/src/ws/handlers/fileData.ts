@@ -22,7 +22,7 @@ const E2EE_MAGIC = Buffer.from([0x49, 0x4f, 0x4e, 0x45, 0x4e, 0x43, 0x76, 0x31])
  *                                                → LWW by mtime: newer accepts,
  *                                                  older/equal conflicts
  */
-function decideUpload(ctx: SyncContext, msg: FileDataUploadMsg): "accept" | "conflict" {
+function decideUpload(ctx: SyncContext, msg: FileDataUploadMsg): "accept" | "conflict" | "reject_stale" {
   const { file, baseSha1 } = msg;
   if (file.action !== "active" || file.fileType !== "file") return "accept";
 
@@ -31,8 +31,24 @@ function decideUpload(ctx: SyncContext, msg: FileDataUploadMsg): "accept" | "con
   if (file.sha1 && file.sha1 === serverFile.sha1) return "accept";
   if (baseSha1 === undefined || baseSha1 === "") return "accept";
   if (baseSha1 === serverFile.sha1) return "accept";
+
+  // Hidden/config paths (.obsidian/**, any dot-segment) flap constantly across
+  // devices and have no merge value — conflict copies of them are junk that
+  // multiplies on every flap. Resolve strictly by LWW: newer-or-equal wins,
+  // older is rejected and re-converged via a head push. Never mint a copy.
+  if (isHiddenOrConfigPath(file.path)) {
+    return file.mtime >= serverFile.mtime ? "accept" : "reject_stale";
+  }
+
   if (ctx.db.hasVersionSha(file.path, baseSha1)) return "conflict";
-  return file.mtime > serverFile.mtime ? "accept" : "conflict";
+  // Unknown base: equal mtime is the E2EE re-encrypt / lost-ack resend pattern,
+  // not a concurrent edit — accept. Only a strictly older unknown base conflicts.
+  return file.mtime >= serverFile.mtime ? "accept" : "conflict";
+}
+
+/** True for paths with a dot-segment: ".obsidian/app.json", "foo/.hidden/x". */
+function isHiddenOrConfigPath(p: string): boolean {
+  return p.startsWith(".") || p.includes("/.");
 }
 
 /** Builds "notes/foo (Conflicted Copy 2026-06-11T19-30 abc12345).md" — same
@@ -97,6 +113,12 @@ export function handleFileUpload(
       advanceUploadQueue(peer, file.path);
       return;
     }
+    if (!isRejected && decision === "reject_stale") {
+      rejectStaleUpload(ctx, peer, file);
+      msg.content = "";
+      advanceUploadQueue(peer, file.path);
+      return;
+    }
     if (!isRejected) {
       ctx.storage.write(file.path, file.mtime, buf);
     }
@@ -109,6 +131,11 @@ export function handleFileUpload(
   // Keep the server head and just tell the client — nothing to copy.
   if (!isRejected && decision === "conflict") {
     applyConflict(ctx, peer, file, null, "");
+    advanceUploadQueue(peer, file.path);
+    return;
+  }
+  if (!isRejected && decision === "reject_stale") {
+    rejectStaleUpload(ctx, peer, file);
     advanceUploadQueue(peer, file.path);
     return;
   }
@@ -180,9 +207,22 @@ function applyConflict(
   }
 
   peer.send({ type: "file_event_result", path: file.path, result: "conflict" });
+  pushHeadToUploader(ctx, peer, file.path);
+}
 
-  // Re-push the current head so the uploader's vault converges on it.
-  const serverFile = ctx.db.getFile(file.path);
+/**
+ * Stale hidden/config upload: drop it silently (no copy, no conflict
+ * notification — these files flap constantly) and re-push the head so the
+ * uploader converges on the winning version.
+ */
+function rejectStaleUpload(ctx: SyncContext, peer: SyncPeer, file: FileEntry): void {
+  logInfo(ctx, `[Conflict] stale config upload dropped (LWW): ${file.path} from ${peer.deviceId}`);
+  pushHeadToUploader(ctx, peer, file.path);
+}
+
+/** Re-push the server's current head of a path so the uploader's vault converges. */
+function pushHeadToUploader(ctx: SyncContext, peer: SyncPeer, path: string): void {
+  const serverFile = ctx.db.getFile(path);
   if (serverFile && serverFile.action === "active" && serverFile.fileType === "file") {
     const headBuf = ctx.storage.readLatest(serverFile.path);
     peer.send({ type: "file_push", file: serverFile, content: headBuf ? headBuf.toString("base64") : "" });

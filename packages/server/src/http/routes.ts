@@ -556,6 +556,50 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     }
 
     archive.finalize();
+
+  // Export a ZIP of specific files (latest version of each).
+  // POST /api/export-selected   body: { paths: string[] }
+  // Optional header X-E2EE-Password for on-the-fly decryption.
+  router.post("/api/export-selected", express.json(), (req, res) => {
+    if (!checkAuth(req, res)) return;
+
+    const paths: unknown = req.body?.paths;
+    if (!Array.isArray(paths) || paths.length === 0) {
+      res.status(400).json({ error: "No paths provided" });
+      return;
+    }
+
+    const e2eePw = String(req.headers["x-e2ee-password"] ?? "").trim();
+    let e2eeKey: Buffer | null = null;
+    if (e2eePw) {
+      try { e2eeKey = _deriveE2eeKey(e2eePw); } catch {}
+    }
+
+    const timestamp = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "-");
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="ionsync-export-${timestamp}.zip"`);
+
+    const archive = archiver("zip", { zlib: { level: 6 } });
+    archive.on("error", (err) => console.error("[export-selected] archiver error:", err));
+    archive.pipe(res);
+
+    for (const filePath of paths as string[]) {
+      const buf = ctx.storage.readLatest(filePath);
+      if (!buf) {
+        console.warn(`[export-selected] skipping "${filePath}" — no stored version`);
+        continue;
+      }
+      const isEncrypted = buf.length > 20 && buf.slice(0, 8).equals(_E2EE_MAGIC_SERVER);
+      let finalBuf = buf;
+      if (isEncrypted && e2eeKey) {
+        try { finalBuf = _decryptE2ee(e2eeKey, buf); } catch {}
+      }
+      archive.append(finalBuf, { name: filePath });
+    }
+
+    archive.finalize();
+  });
+
   });
 
 

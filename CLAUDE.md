@@ -437,9 +437,18 @@ no server record / record deleted      → accept (new file or re-add)
 upload sha1 == server head sha1        → accept (idempotent resend)
 no baseSha1 (legacy client/first sync) → accept (LWW fallback)
 baseSha1 == server head sha1           → accept (fast-forward)
+hidden/config path (.obsidian/**)      → LWW, never a copy: newer-or-equal mtime
+                                         accepts, older is DROPPED + head re-pushed
 baseSha1 is an older known version     → CONFLICT (head moved — concurrent edit)
-baseSha1 unknown to version history    → LWW by mtime: newer accepts, older CONFLICTS
+baseSha1 unknown to version history    → LWW by mtime: newer-or-equal accepts
+                                         (equal = E2EE re-encrypt/resend pattern),
+                                         strictly older CONFLICTS
 ```
+
+Hidden/config paths never produce conflict copies on either side — the plugin's
+`_applyServerFile` also skips its local conflicted-copy backup for dot-paths.
+These files flap constantly between devices; minting a copy per flap multiplies
+files without bound (this happened in production — June 2026).
 
 On conflict the server **never overwrites its head**. Instead it stores the client's content as a `"<name> (Conflicted Copy <ts> <deviceId[0:8]>).<ext>"` file, pushes that copy to all peers (including the uploader), sends `file_event_result: "conflict"` to the uploader, and re-pushes its current head of the original path so the uploader converges. No edit is ever silently relegated to version history.
 

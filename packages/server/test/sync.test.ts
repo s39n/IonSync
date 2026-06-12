@@ -438,3 +438,85 @@ describe("conflict copies for binary paths", () => {
     await srv.stop();
   });
 });
+
+describe("config/hidden path conflicts (no copies, LWW)", () => {
+  const V1 = { sha1: "7bd81a159ea42d0f32dc1bcac2b3756123a985c7", b64: Buffer.from("v one").toString("base64") };
+  const V2 = { sha1: "c4fe9a596a0f41e1a3afde544869302fc0e5a947", b64: Buffer.from("v two").toString("base64") };
+  const V3 = { sha1: "850f94f51670998edcd47f2ced22e23e8ac4a4ae", b64: Buffer.from("v three").toString("base64") };
+
+  function mk(path: string, sha1: string, mtime: number): FileEntry {
+    return { path, sha1, mtime, action: "active", fileType: "file" };
+  }
+  async function settle(client: { send(m: unknown): void; nextMsg<T>(p?: (m: unknown) => boolean): Promise<T> }, path: string) {
+    client.send({ type: "file_history", path });
+    await client.nextMsg((m) => (m as { type: string }).type === "file_history_response");
+  }
+
+  it("stale .obsidian upload is dropped without minting a copy; head re-pushed", async () => {
+    const srv = await startTestServer();
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    const PATH = ".obsidian/appearance.json";
+    client.send({ type: "file_data", mode: "apply", file: mk(PATH, V1.sha1, 1000), content: V1.b64 });
+    await settle(client, PATH);
+    client.send({ type: "file_data", mode: "apply", file: mk(PATH, V2.sha1, 5000), content: V2.b64, baseSha1: V1.sha1 });
+    await settle(client, PATH);
+
+    // Stale base AND older mtime → silently dropped, head pushed back.
+    client.send({ type: "file_data", mode: "apply", file: mk(PATH, V3.sha1, 2000), content: V3.b64, baseSha1: V1.sha1 });
+    const headPush = await client.nextMsg<{ type: string; file: FileEntry; content: string }>(
+      (m) => (m as { type: string }).type === "file_push" && (m as { file: FileEntry }).file.path === PATH
+    );
+    assert.equal(headPush.content, V2.b64);
+    assert.equal(srv.ctx.db.getFile(PATH)?.sha1, V2.sha1);
+    assert.ok(!srv.ctx.db.getAllFiles().some((f) => f.path.includes("(Conflicted Copy")));
+
+    client.close();
+    await srv.stop();
+  });
+
+  it("newer .obsidian upload wins by LWW even from a stale base (no copy)", async () => {
+    const srv = await startTestServer();
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    const PATH = ".obsidian/community-plugins.json";
+    client.send({ type: "file_data", mode: "apply", file: mk(PATH, V1.sha1, 1000), content: V1.b64 });
+    await settle(client, PATH);
+    client.send({ type: "file_data", mode: "apply", file: mk(PATH, V2.sha1, 2000), content: V2.b64, baseSha1: V1.sha1 });
+    await settle(client, PATH);
+
+    client.send({ type: "file_data", mode: "apply", file: mk(PATH, V3.sha1, 3000), content: V3.b64, baseSha1: V1.sha1 });
+    await settle(client, PATH);
+
+    assert.equal(srv.ctx.db.getFile(PATH)?.sha1, V3.sha1);
+    assert.ok(!srv.ctx.db.getAllFiles().some((f) => f.path.includes("(Conflicted Copy")));
+
+    client.close();
+    await srv.stop();
+  });
+
+  it("unknown base with EQUAL mtime is accepted (E2EE re-encrypt pattern)", async () => {
+    const srv = await startTestServer();
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    const PATH = "notes/equal-mtime.md";
+    client.send({ type: "file_data", mode: "apply", file: mk(PATH, V1.sha1, 4000), content: V1.b64 });
+    await settle(client, PATH);
+
+    const unknownBase = "0123456789abcdef0123456789abcdef01234567";
+    client.send({ type: "file_data", mode: "apply", file: mk(PATH, V2.sha1, 4000), content: V2.b64, baseSha1: unknownBase });
+    await settle(client, PATH);
+
+    assert.equal(srv.ctx.db.getFile(PATH)?.sha1, V2.sha1);
+    assert.ok(!srv.ctx.db.getAllFiles().some((f) => f.path.includes("(Conflicted Copy")));
+
+    client.close();
+    await srv.stop();
+  });
+});

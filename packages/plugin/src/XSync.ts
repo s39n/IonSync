@@ -355,7 +355,11 @@ export class XSync {
             if (txt !== null && (await Utils.getSHA(txt)) === file.sha1) isSame = true;
           }
 
-          if (!isSame) {
+          // Hidden/config files (.obsidian/**) flap constantly between devices;
+          // conflicted copies of them are junk that multiplies on every flap.
+          // Let the incoming version win silently for those paths.
+          const isConfigLike = file.path.startsWith(".") || file.path.includes("/.");
+          if (!isSame && !isConfigLike) {
             this.plugin.log(`[Conflict] ${file.path} modified offline. Backing up.`);
             await this._createConflictedCopy(file.path, capturedContent ?? undefined);
           }
