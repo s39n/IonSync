@@ -113,8 +113,8 @@ export function attachWebSocketServer(
             try {
               console.log(`[Delta Patch] Stitching update for: ${rawMsg.file.path}`);
               
-              // 1. Read current server file
-              const currentBuffer = await (ctx.storage as any).read(rawMsg.file.path);
+              // 1. Read current server file (latest stored version)
+              const currentBuffer = ctx.storage.readLatest(rawMsg.file.path);
               const currentText = currentBuffer ? currentBuffer.toString("utf-8") : "";
 
               // 2. Apply the incoming patch
