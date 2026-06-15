@@ -214,7 +214,7 @@ export function checkSyncDone(peer: SyncPeer): void {
     // sends sync_done with no cursor. Clear it so a later legacy session can't
     // inherit a stale cursor.
     const cursor = peer.cursorTarget;
-    peer.cursorTarget = undefined;
+    delete peer.cursorTarget;
     peer.send(cursor !== undefined ? { type: "sync_done", cursor } : { type: "sync_done" });
   }
 }
