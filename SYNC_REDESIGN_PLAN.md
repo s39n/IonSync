@@ -30,15 +30,26 @@ which keeps the existing `baseSha1` conflict gate valid.
 
 ---
 
-## Phase 0 — Server: sequence counter (DB migration v2)
+## Phase 0 — Server: sequence counter (DB migration v3)
 
-- Add `seq INTEGER` to the `files` table; add index `idx_files_seq (seq)`.
-- A single global counter (e.g. a `meta(key, value)` row `next_seq`, or
-  `MAX(seq)+1` read inside the same transaction). `upsertFile()` and the delete
-  path both assign the next seq — deletes already keep the row with
-  `action="deleted"`, so a deleted path simply gets a new seq.
-- New query: `getChangesSince(seq, limit)` → rows ordered by `seq ASC`.
-- **Never edit past migrations** — add `version: 2` to the `MIGRATIONS` array.
+> Note: migration `version: 2` already exists (the `settings` table), so the
+> seq migration is **version 3**.
+
+- Add `seq INTEGER NOT NULL DEFAULT 0` to the `files` table; add index
+  `idx_files_seq (seq)`; backfill existing rows in rowid order.
+- A single **persistent** counter in `settings` (key `sync_seq`), allocated via
+  an atomic `UPDATE ... RETURNING` inside each write transaction. Not `MAX(seq)`
+  over `files` — `purgeDeletedFiles` hard-deletes rows, which would let a seq be
+  reused and a client miss a change. `upsertFile()` (active writes *and* deleted
+  tombstones), `repointFileRecord`, `restoreFile`, `restoreDeletedFiles`, and
+  the two rename methods all stamp the next seq.
+- New queries: `getChangesSince(seq, limit)` → `FileChange[]` ordered by
+  `seq ASC`; `getCurrentSeq()` → current counter value.
+- **Never edit past migrations** — add `version: 3` to the `MIGRATIONS` array.
+
+> Known downstream gap (Phase 1/3): `renameFilePath` / hard deletes leave no
+> tombstone at the old path, so the feed can't tell clients the old path is
+> gone. The sync handler must derive that when it consumes the feed.
 
 ## Phase 1 — Protocol: cursor sync (new message types)
 
@@ -97,7 +108,7 @@ Server → Client: { type: "sync_done", cursor: <newMaxSeq>, configCursor: <…>
 
 ## Migration / rollout
 
-1. Server ships migration v2 (additive) and supports **both** the legacy `sync`
+1. Server ships migration v3 (additive) and supports **both** the legacy `sync`
    message and the new `sync_cursor`.
 2. Capability negotiation in `version_check`: client advertises `cursorSync: true`;
    server replies with whether it supports it. Old clients fall back to the

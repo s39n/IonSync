@@ -56,6 +56,33 @@ export const MIGRATIONS: Array<{ version: number; up: (db: Database.Database) =>
       `);
     },
   },
+  {
+    version: 3,
+    up(db) {
+      // Monotonic sync sequence cursor (sync redesign — phase 0).
+      //
+      // Every change to a file's head is stamped with an ever-increasing `seq`
+      // so a reconnecting client can request only `changes WHERE seq > cursor`
+      // instead of re-diffing the whole tree. The authoritative counter lives
+      // in `settings` (key `sync_seq`) rather than MAX(seq) over `files`,
+      // because `purgeDeletedFiles` hard-deletes rows — using MAX(seq) would let
+      // a seq value be reused and a client could miss a change.
+      db.exec(`
+        ALTER TABLE files ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;
+
+        CREATE INDEX IF NOT EXISTS idx_files_seq ON files (seq);
+
+        -- Backfill existing rows with a stable, increasing seq (rowid order).
+        UPDATE files
+          SET seq = (SELECT COUNT(*) FROM files f2 WHERE f2.rowid <= files.rowid);
+
+        -- Seed the monotonic counter to the current max seq.
+        INSERT INTO settings (key, value)
+          VALUES ('sync_seq', CAST((SELECT COALESCE(MAX(seq), 0) FROM files) AS TEXT))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

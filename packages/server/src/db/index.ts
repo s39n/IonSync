@@ -11,7 +11,11 @@ interface DbFileRow {
   received_at: number;
   action: string;
   file_type: string;
+  seq: number;
 }
+
+/** A file row plus the sequence number at which its head last changed. */
+export type FileChange = FileEntry & { seq: number };
 
 interface DbVersionRow {
   sha1: string;
@@ -50,6 +54,59 @@ export class SyncDB {
     runMigrations(this.db);
   }
 
+  // --- Sequence cursor (sync redesign phase 0) ------------------------------
+
+  /**
+   * Allocates the next value of the monotonic sync sequence counter.
+   *
+   * The counter is persisted in `settings` (key `sync_seq`) so it never goes
+   * backwards even when rows are hard-deleted by `purgeDeletedFiles`. Call this
+   * inside the same transaction as the row write that stamps the returned seq.
+   */
+  private allocateSeq(): number {
+    const row = this.db
+      .prepare<[], { value: string }>(
+        "UPDATE settings SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'sync_seq' RETURNING value"
+      )
+      .get();
+    if (row) return Number(row.value);
+
+    // Counter row missing (legacy DB created before migration v3 seeded it).
+    // Seed it to MAX(seq)+1 so we never reissue a value already on a row.
+    const max = this.db
+      .prepare<[], { m: number }>("SELECT COALESCE(MAX(seq), 0) AS m FROM files")
+      .get()!.m;
+    const next = max + 1;
+    this.db
+      .prepare<[string, string]>(
+        "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+      )
+      .run("sync_seq", String(next));
+    return next;
+  }
+
+  /** The current value of the monotonic sync sequence counter. */
+  getCurrentSeq(): number {
+    const row = this.db
+      .prepare<[], { value: string }>("SELECT value FROM settings WHERE key = 'sync_seq'")
+      .get();
+    return row ? Number(row.value) : 0;
+  }
+
+  /**
+   * Returns file rows whose head changed after `sinceSeq`, oldest-first and
+   * capped at `limit`. The basis of cursor-based delta sync: a client passes the
+   * highest seq it has seen and receives only what changed since.
+   */
+  getChangesSince(sinceSeq: number, limit: number): FileChange[] {
+    return this.db
+      .prepare<[number, number], DbFileRow>(
+        "SELECT * FROM files WHERE seq > ? ORDER BY seq ASC LIMIT ?"
+      )
+      .all(sinceSeq, limit)
+      .map((r) => ({ ...rowToFileEntry(r), seq: r.seq }));
+  }
+
   // --- Files ----------------------------------------------------------------
 
   getFile(filePath: string): FileEntry | undefined {
@@ -68,26 +125,30 @@ export class SyncDB {
 
   upsertFile(file: FileEntry): void {
     const now = Date.now();
-    this.db
-      .prepare<[string, string, number, number, string, string]>(
-        `INSERT INTO files (path, sha1, mtime, received_at, action, file_type)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(path) DO UPDATE SET
-           sha1        = excluded.sha1,
-           mtime       = excluded.mtime,
-           received_at = excluded.received_at,
-           action      = excluded.action,
-           file_type   = excluded.file_type`
-      )
-      .run(file.path, file.sha1, file.mtime, now, file.action, file.fileType);
-
-    if (file.fileType === "file") {
+    this.db.transaction(() => {
+      const seq = this.allocateSeq();
       this.db
-        .prepare<[string, string, number, number]>(
-          `INSERT INTO file_versions (path, sha1, mtime, received_at) VALUES (?, ?, ?, ?)`
+        .prepare<[string, string, number, number, string, string, number]>(
+          `INSERT INTO files (path, sha1, mtime, received_at, action, file_type, seq)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(path) DO UPDATE SET
+             sha1        = excluded.sha1,
+             mtime       = excluded.mtime,
+             received_at = excluded.received_at,
+             action      = excluded.action,
+             file_type   = excluded.file_type,
+             seq         = excluded.seq`
         )
-        .run(file.path, file.sha1, file.mtime, now);
-    }
+        .run(file.path, file.sha1, file.mtime, now, file.action, file.fileType, seq);
+
+      if (file.fileType === "file") {
+        this.db
+          .prepare<[string, string, number, number]>(
+            `INSERT INTO file_versions (path, sha1, mtime, received_at) VALUES (?, ?, ?, ?)`
+          )
+          .run(file.path, file.sha1, file.mtime, now);
+      }
+    })();
   }
 
   deleteFileMeta(filePath: string): void {
@@ -109,11 +170,14 @@ export class SyncDB {
    * record to the latest good version.
    */
   repointFileRecord(filePath: string, sha1: string, mtime: number): void {
-    this.db
-      .prepare<[string, number, string]>(
-        "UPDATE files SET sha1 = ?, mtime = ? WHERE path = ?"
-      )
-      .run(sha1, mtime, filePath);
+    this.db.transaction(() => {
+      const seq = this.allocateSeq();
+      this.db
+        .prepare<[string, number, number, string]>(
+          "UPDATE files SET sha1 = ?, mtime = ?, seq = ? WHERE path = ?"
+        )
+        .run(sha1, mtime, seq, filePath);
+    })();
   }
 
   // --- Version history ------------------------------------------------------
@@ -307,10 +371,18 @@ export class SyncDB {
    * Returns the number of files restored.
    */
   restoreDeletedFiles(): number {
-    const result = this.db
-      .prepare("UPDATE files SET action = 'active' WHERE action = 'deleted'")
-      .run();
-    return result.changes;
+    return this.db.transaction(() => {
+      const rows = this.db
+        .prepare<[], { path: string }>("SELECT path FROM files WHERE action = 'deleted'")
+        .all();
+      for (const { path: p } of rows) {
+        const seq = this.allocateSeq();
+        this.db
+          .prepare<[number, string]>("UPDATE files SET action = 'active', seq = ? WHERE path = ?")
+          .run(seq, p);
+      }
+      return rows.length;
+    })();
   }
 
   // --- Database manager helpers ---------------------------------------------
@@ -341,10 +413,15 @@ export class SyncDB {
   }
 
   restoreFile(filePath: string): boolean {
-    const result = this.db
-      .prepare<[string]>("UPDATE files SET action = 'active' WHERE path = ? AND action = 'deleted'")
-      .run(filePath);
-    return result.changes > 0;
+    return this.db.transaction(() => {
+      const seq = this.allocateSeq();
+      const result = this.db
+        .prepare<[number, string]>(
+          "UPDATE files SET action = 'active', seq = ? WHERE path = ? AND action = 'deleted'"
+        )
+        .run(seq, filePath);
+      return result.changes > 0;
+    })();
   }
 
   deleteVersionRecord(filePath: string, mtime: number): void {
@@ -389,7 +466,8 @@ export class SyncDB {
    */
   renameFilePath(fromPath: string, toPath: string): void {
     this.db.transaction(() => {
-      this.db.prepare<[string, string]>("UPDATE files SET path = ? WHERE path = ?").run(toPath, fromPath);
+      const seq = this.allocateSeq();
+      this.db.prepare<[string, number, string]>("UPDATE files SET path = ?, seq = ? WHERE path = ?").run(toPath, seq, fromPath);
       this.db.prepare<[string, string]>("UPDATE file_versions SET path = ? WHERE path = ?").run(toPath, fromPath);
     })();
   }
@@ -408,7 +486,8 @@ export class SyncDB {
         .all(like) as Array<{ path: string }>;
       for (const { path: oldPath } of files) {
         const newPath = toPrefix + oldPath.slice(prefixLen);
-        this.db.prepare<[string, string]>("UPDATE files SET path = ? WHERE path = ?").run(newPath, oldPath);
+        const seq = this.allocateSeq();
+        this.db.prepare<[string, number, string]>("UPDATE files SET path = ?, seq = ? WHERE path = ?").run(newPath, seq, oldPath);
         this.db.prepare<[string, string]>("UPDATE file_versions SET path = ? WHERE path = ?").run(newPath, oldPath);
       }
       return files.length;
