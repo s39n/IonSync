@@ -17,6 +17,12 @@ export interface SyncPeer {
   pushQueue: import("@ionsync/protocol").FileEntry[];
   /** True while a sync session is in progress (used to gate sync_done). */
   syncSessionActive: boolean;
+  /**
+   * When set, the next `sync_done` reports this seq as the client's new cursor
+   * (cursor sync, phase 1). Undefined for legacy `sync` sessions, which send
+   * `sync_done` with no cursor. Cleared once `sync_done` is sent.
+   */
+  cursorTarget?: number;
   /** Accumulates client FileEntry records across chunked sync messages. Cleared after last chunk. */
   syncClientMap?: Map<string, import("@ionsync/protocol").FileEntry>;
   /** Whether auto-sync (live broadcast from other peers) is enabled. */

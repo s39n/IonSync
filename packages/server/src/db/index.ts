@@ -462,36 +462,81 @@ export class SyncDB {
 
   /**
    * Renames a single file record from `fromPath` to `toPath`.
-   * Updates both `files` and `file_versions`.
+   *
+   * The destination becomes active (with the renamed content and a fresh seq),
+   * version history moves to the new path, and the OLD path is left as a
+   * `deleted` tombstone with its own fresh seq. The tombstone is essential for
+   * cursor-based delta sync: without it the changes feed has no row at the old
+   * path, so a reconnecting client never learns the old path is gone and keeps
+   * a stale copy.
    */
   renameFilePath(fromPath: string, toPath: string): void {
+    if (fromPath === toPath) return;
     this.db.transaction(() => {
-      const seq = this.allocateSeq();
-      this.db.prepare<[string, number, string]>("UPDATE files SET path = ?, seq = ? WHERE path = ?").run(toPath, seq, fromPath);
-      this.db.prepare<[string, string]>("UPDATE file_versions SET path = ? WHERE path = ?").run(toPath, fromPath);
+      this.renameOneInternal(fromPath, toPath, Date.now());
     })();
   }
 
   /**
    * Renames all file records whose path starts with `fromPrefix/` so they
-   * start with `toPrefix/` instead.  Updates both `files` and `file_versions`.
-   * Returns the number of rows updated.
+   * start with `toPrefix/` instead. Each renamed path leaves a `deleted`
+   * tombstone at its old location (see `renameFilePath`). Returns the number of
+   * rows renamed.
    */
   renameFolderPaths(fromPrefix: string, toPrefix: string): number {
+    if (fromPrefix === toPrefix) return 0;
     const like = fromPrefix.replace(/[%_]/g, "\\$&") + "/%";
     const prefixLen = fromPrefix.length;
     const result = this.db.transaction(() => {
       const files = this.db
         .prepare<[string]>("SELECT path FROM files WHERE path LIKE ? ESCAPE '\\\\'")
         .all(like) as Array<{ path: string }>;
+      const now = Date.now();
       for (const { path: oldPath } of files) {
         const newPath = toPrefix + oldPath.slice(prefixLen);
-        const seq = this.allocateSeq();
-        this.db.prepare<[string, number, string]>("UPDATE files SET path = ?, seq = ? WHERE path = ?").run(newPath, seq, oldPath);
-        this.db.prepare<[string, string]>("UPDATE file_versions SET path = ? WHERE path = ?").run(newPath, oldPath);
+        this.renameOneInternal(oldPath, newPath, now);
       }
       return files.length;
     })();
     return result as number;
+  }
+
+  /**
+   * Core rename step — assumes it runs inside a transaction. Creates/repoints
+   * `toPath` as active, moves version history, and tombstones `fromPath`. Both
+   * the destination and the tombstone get fresh, distinct seqs so each surfaces
+   * independently in the changes feed.
+   */
+  private renameOneInternal(fromPath: string, toPath: string, now: number): void {
+    const row = this.db
+      .prepare<[string], DbFileRow>("SELECT * FROM files WHERE path = ?")
+      .get(fromPath);
+    if (!row) return;
+
+    const seqNew = this.allocateSeq();
+    this.db
+      .prepare<[string, string, number, number, string, number]>(
+        `INSERT INTO files (path, sha1, mtime, received_at, action, file_type, seq)
+         VALUES (?, ?, ?, ?, 'active', ?, ?)
+         ON CONFLICT(path) DO UPDATE SET
+           sha1        = excluded.sha1,
+           mtime       = excluded.mtime,
+           received_at = excluded.received_at,
+           action      = 'active',
+           file_type   = excluded.file_type,
+           seq         = excluded.seq`
+      )
+      .run(toPath, row.sha1, row.mtime, now, row.file_type, seqNew);
+
+    this.db
+      .prepare<[string, string]>("UPDATE file_versions SET path = ? WHERE path = ?")
+      .run(toPath, fromPath);
+
+    const seqOld = this.allocateSeq();
+    this.db
+      .prepare<[number, number, string]>(
+        "UPDATE files SET action = 'deleted', received_at = ?, seq = ? WHERE path = ?"
+      )
+      .run(now, seqOld, fromPath);
   }
 }

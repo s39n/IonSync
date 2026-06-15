@@ -115,3 +115,28 @@ test("getChangesSince honors the limit and stays seq-ordered", () => {
     cleanup(db, dir);
   }
 });
+
+test("renameFilePath tombstones the old path and surfaces both in the feed", () => {
+  const { db, dir } = tmpDb();
+  try {
+    db.upsertFile(entry("old.md", "sha-old", 1000));
+    const cursor = db.getCurrentSeq();
+
+    db.renameFilePath("old.md", "new.md");
+
+    assert.equal(db.getFile("old.md")?.action, "deleted", "old path left as a tombstone");
+    assert.equal(db.getFile("new.md")?.action, "active", "new path is active");
+    assert.equal(db.getFile("new.md")?.sha1, "sha-old", "content carried to the new path");
+
+    // The feed must convey BOTH the new active path and the old path's removal —
+    // otherwise a reconnecting client keeps a stale copy at the old path.
+    const byPath = new Map(db.getChangesSince(cursor, 100).map((c) => [c.path, c]));
+    assert.equal(byPath.get("new.md")?.action, "active", "feed conveys the new path");
+    assert.equal(byPath.get("old.md")?.action, "deleted", "feed conveys removal of the old path");
+
+    assert.ok(db.getVersions("new.md").length >= 1, "version history followed the rename");
+    assert.equal(db.getVersions("old.md").length, 0, "no history left at the old path");
+  } finally {
+    cleanup(db, dir);
+  }
+});

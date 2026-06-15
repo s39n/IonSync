@@ -178,7 +178,17 @@ export function drainPushQueue(ctx: SyncContext, peer: SyncPeer): void {
       const buf = ctx.storage.readLatest(file.path);
       content = buf ? buf.toString("base64") : "";
     }
-    peer.ws.send(JSON.stringify({ type: "file_push" as const, file, content }));
+    // Cursor-sync pushes carry their seq so the client can advance its cursor
+    // even on a live push mid-session. Legacy `sync` pushes have no seq → omit.
+    const seq = (file as FileEntry & { seq?: number }).seq;
+    peer.ws.send(
+      JSON.stringify({
+        type: "file_push" as const,
+        file,
+        content,
+        ...(seq !== undefined ? { seq } : {}),
+      })
+    );
     sent++;
   }
 
@@ -200,7 +210,12 @@ export function checkSyncDone(peer: SyncPeer): void {
     peer.pushQueue.length === 0
   ) {
     peer.syncSessionActive = false;
-    peer.send({ type: "sync_done" });
+    // Cursor sync reports the seq the client is now caught up to; legacy sync
+    // sends sync_done with no cursor. Clear it so a later legacy session can't
+    // inherit a stale cursor.
+    const cursor = peer.cursorTarget;
+    peer.cursorTarget = undefined;
+    peer.send(cursor !== undefined ? { type: "sync_done", cursor } : { type: "sync_done" });
   }
 }
 

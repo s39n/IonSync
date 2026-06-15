@@ -6,6 +6,7 @@ import { pushActivity } from "../context.js";
 import { createPeer } from "./peer.js";
 import { handleAuth } from "./handlers/auth.js";
 import { handleSync } from "./handlers/sync.js";
+import { handleSyncCursor } from "./handlers/syncCursor.js";
 import { handleFileEvent } from "./handlers/fileEvent.js";
 import { handleFileUpload, handleFileDownload } from "./handlers/fileData.js";
 import { handleFileHistory } from "./handlers/fileHistory.js";
@@ -83,6 +84,9 @@ export function attachWebSocketServer(
           break;
         case "sync":
           handleSync(ctx, peer, msg);
+          break;
+        case "sync_cursor":
+          handleSyncCursor(ctx, peer, msg);
           break;
         case "file_event":
           handleFileEvent(ctx, peer, msg);

@@ -95,10 +95,30 @@ export interface FileHistoryRequestMsg {
   path: string;
 }
 
+/**
+ * Cursor-based delta sync (sync redesign phase 1).
+ *
+ * Instead of sending its whole file list (`sync`), a client says "catch me up
+ * since sequence N". The server replays every change with `seq > since` as
+ * `file_push` messages (active files with content, deletions with empty
+ * content), then `sync_done { cursor }`. The client persists `cursor` as its
+ * new `since` for the next reconnect.
+ *
+ * This is the server→client (download) direction only. The client's own local
+ * edits made while offline still flow up as ordinary real-time `file_data`
+ * uploads — they are not part of the cursor exchange.
+ */
+export interface SyncCursorMsg {
+  type: "sync_cursor";
+  /** Highest server seq the client has already applied. 0 = full bootstrap. */
+  since: number;
+}
+
 export type ClientMsg =
   | AuthMsg
   | VersionCheckMsg
   | SyncMsg
+  | SyncCursorMsg
   | FileEventMsg
   | FileDataUploadMsg
   | FileDataRequestMsg
@@ -144,6 +164,14 @@ export interface FilePushMsg {
   type: "file_push";
   file: FileEntry;
   content: string;
+  /**
+   * The server sequence number at which this change was recorded. Present on
+   * cursor-sync pushes and live broadcasts (phase 1). Clients should advance
+   * their stored cursor to the highest `seq` they have applied, so a live push
+   * that arrives mid-session is not missed on the next reconnect. Omitted by
+   * the legacy `sync` push path.
+   */
+  seq?: number;
 }
 
 /** Server responding to a `file_data mode:"send"` download request. */
@@ -169,6 +197,12 @@ export interface VersionCheckResponseMsg {
 /** Sent when all pending sync transfers for a session have resolved. */
 export interface SyncDoneMsg {
   type: "sync_done";
+  /**
+   * Present for cursor sync (phase 1): the seq the client is now caught up to.
+   * The client persists this as its `since` for the next reconnect. Omitted by
+   * the legacy `sync` path.
+   */
+  cursor?: number;
 }
 
 export type ServerMsg =
