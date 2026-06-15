@@ -107,6 +107,14 @@ export class SyncDB {
       .map((r) => ({ ...rowToFileEntry(r), seq: r.seq }));
   }
 
+  /** The seq currently stamped on a path's row, or 0 if the path is unknown. */
+  getFileSeq(filePath: string): number {
+    const row = this.db
+      .prepare<[string], { seq: number }>("SELECT seq FROM files WHERE path = ?")
+      .get(filePath);
+    return row?.seq ?? 0;
+  }
+
   // --- Files ----------------------------------------------------------------
 
   getFile(filePath: string): FileEntry | undefined {

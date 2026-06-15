@@ -51,6 +51,18 @@ export interface PluginSettings {
    * in plaintext until they are next modified and re-uploaded.
    */
   encryptionEnabled: boolean;
+
+  // ── Cursor sync state (phase 2) ───────────────────────────────────────────
+  /**
+   * Highest server sequence number this device has applied. Sent as `since` in
+   * `sync_cursor`; the server replays only changes past it. 0 = full bootstrap.
+   */
+  lastSyncedSeq: number;
+  /**
+   * The server endpoint (`host:port:tls`) the cursor belongs to. If it changes,
+   * the cursor is meaningless and we bootstrap from 0.
+   */
+  lastSyncedEndpoint: string;
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
@@ -82,6 +94,8 @@ const DEFAULT_SETTINGS: PluginSettings = {
   exclusionList: "",
   maxFileSizeMB: 25,
   encryptionEnabled: false,
+  lastSyncedSeq: 0,
+  lastSyncedEndpoint: "",
 };
 
 // ---------- Plugin ----------

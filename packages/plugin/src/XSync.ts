@@ -10,8 +10,6 @@ import type { IonSyncPlugin } from "./main.js";
 import { diff_match_patch } from "diff-match-patch";
 import { deriveKey, encryptToBase64, decryptFromBase64, isEncryptedBase64 } from "./Crypto.js";
 
-const CHUNK_SIZE = 2_000;
-
 interface DeleteQueueEntry {
   metadata: Partial<FileEntry>;
   timestamp: number;
@@ -45,6 +43,11 @@ export class XSync {
 
   private inited = false;
   private isEnabled = false;
+
+  // Cursor sync (phase 2): highest server seq we have applied. Persisted in
+  // plugin settings; sent as `since` in sync_cursor. The upload direction is
+  // reconciled locally after sync_done (see _reconcileUploads).
+  private _lastSyncedSeq = 0;
 
   private responseListeners: Array<(msg: ServerMsg) => boolean> = [];
   private messageQueue: ServerMsg[] = [];
@@ -111,6 +114,7 @@ export class XSync {
 
     await this.storage.init();
     this.deleteQueue = await this.storage.loadDeleteQueue();
+    this._lastSyncedSeq = this.plugin.settings.lastSyncedSeq ?? 0;
 
     this._registerVaultEvent("create");
     this._registerVaultEvent("modify");
@@ -274,8 +278,16 @@ export class XSync {
         break;
       case "file_push":
         await this._applyServerFile(msg.file, msg.content);
+        // Advance the cursor as we apply, so a live push (or a mid-session drop)
+        // is not re-pulled needlessly next time.
+        if (typeof msg.seq === "number" && msg.seq > this._lastSyncedSeq) {
+          this._lastSyncedSeq = msg.seq;
+        }
         break;
       case "sync_done":
+        if (typeof msg.cursor === "number" && msg.cursor > this._lastSyncedSeq) {
+          this._lastSyncedSeq = msg.cursor;
+        }
         await this._onSyncDone();
         break;
     }
@@ -518,38 +530,21 @@ export class XSync {
 
       await this.acquireWakeLock();
       this.xNotify.notifyStatus(NotifyType.SYNCING);
-      await this.storage.computeTree();
 
-      const files: FileEntry[] = [];
-      for (const [path, entry] of Object.entries(this.storage.tree)) {
-        if (!this.exclusionFilter?.isExcluded(path)) files.push(entry);
+      // Cursor sync (phase 2): ask the server for everything changed since our
+      // cursor instead of sending the whole tree and having the server diff it.
+      // A different endpoint means the cursor is meaningless → bootstrap from 0.
+      // The UPLOAD direction is reconciled locally in _onSyncDone, AFTER the
+      // server's changes are applied — that ordering is what stops a fresh device
+      // from re-uploading (and clobbering) the config it just received.
+      const endpoint = this._endpointKey();
+      if (this.plugin.settings.lastSyncedEndpoint !== endpoint) {
+        this.plugin.log(
+          `[IonSync] Endpoint changed (${this.plugin.settings.lastSyncedEndpoint || "none"} → ${endpoint}) — bootstrapping from seq 0`
+        );
+        this._lastSyncedSeq = 0;
       }
-
-      // Include metadata entries for files that were acknowledged but not
-      // written to disk — primarily encrypted files received on a device
-      // without an E2EE key.  Sending the server's own SHA back causes
-      // compareFiles to return null, stopping the perpetual re-push loop.
-      for (const [path, entry] of Object.entries(this.storage.getAllMetadata())) {
-        if (
-          !this.storage.tree[path] &&               // not already covered by tree
-          entry.action === "active" &&               // not a deletion record
-          !this.exclusionFilter?.isExcluded(path)
-        ) {
-          files.push(entry);
-        }
-      }
-
-      if (files.length === 0) {
-        this.ws.send({ type: "sync", files: [], last: true });
-      } else {
-        const chunkCount = Math.ceil(files.length / CHUNK_SIZE);
-        for (let i = 0; i < files.length; i += CHUNK_SIZE) {
-          await new Promise<void>((r) => setTimeout(r, 0));
-          const chunkIndex = Math.floor(i / CHUNK_SIZE);
-          const isLast = chunkIndex === chunkCount - 1;
-          this.ws.send({ type: "sync", files: files.slice(i, i + CHUNK_SIZE), last: isLast });
-        }
-      }
+      this.ws.send({ type: "sync_cursor", since: this._lastSyncedSeq });
     } catch (e) {
       this.isSyncing = false;
       this.releaseWakeLock();
@@ -559,12 +554,25 @@ export class XSync {
 
   private async _onSyncDone(): Promise<void> {
     const wasFirstSync = this._isFirstSync;
-    this.isSyncing = false;
     this._isFirstSync = false;  // device is now fully synced
+    // NOTE: isSyncing stays TRUE until the end of this method. It suppresses the
+    // 5-second config poller (_checkConfigFiles) while we reconcile uploads, so a
+    // fresh device cannot upload its local config before the server's config has
+    // been applied — the original cause of fresh devices clobbering settings.
+
     // Clear any stale _applyingPaths entries.  Normally each entry is consumed
     // as its vault event fires, but folder paths added during makeFolder calls
     // may never receive a matching event (e.g. folder already existed).
     this._applyingPaths.clear();
+
+    // Download direction complete — persist the cursor we are now caught up to.
+    this.plugin.settings.lastSyncedSeq = this._lastSyncedSeq;
+    this.plugin.settings.lastSyncedEndpoint = this._endpointKey();
+    await this.plugin.saveSettings();
+
+    // UPLOAD direction: now that server changes are applied and metadata reflects
+    // them, scan the vault and upload only paths whose content genuinely differs.
+    await this._reconcileUploads();
 
     // After a first-ever sync, discard every delete-queue entry that accumulated
     // during the initial write burst.  The platform (iOS iCloud eviction, Android
@@ -608,6 +616,48 @@ export class XSync {
     this.syncApplyCount = 0;
     this.storage.tree = {};
     await this.storage.flushMetadata();
+    this.isSyncing = false;
+  }
+
+  /** Stable key for the current server endpoint, used to invalidate the cursor. */
+  private _endpointKey(): string {
+    const { host, port, tls } = this.plugin.settings;
+    return `${host}:${port}:${tls ? "tls" : "tcp"}`;
+  }
+
+  /**
+   * Upload direction for cursor sync. Runs AFTER server changes are applied so
+   * metadata reflects the server's head — that ordering prevents a fresh device
+   * from re-uploading (and overwriting) config it just received. Scans the vault
+   * and uploads only paths whose content differs from last-synced metadata.
+   *
+   * Offline DELETES are intentionally not propagated here: the legacy full-list
+   * sync never propagated them either (it resurrected missing files), and a
+   * tree-diff delete would be dangerous on mobile where files can transiently
+   * vanish from the index (iCloud eviction). Deletes flow through vault events.
+   */
+  private async _reconcileUploads(): Promise<void> {
+    if (!this.ws.isConnected) return;
+    await this.storage.computeTree();
+
+    const changed: string[] = [];
+    for (const [path, entry] of Object.entries(this.storage.tree)) {
+      if (entry.action !== "active" || entry.fileType !== "file") continue;
+      if (this.exclusionFilter?.isExcluded(path)) continue;
+      const stored = this.storage.readMetadata(path);
+      // No metadata = new local file; differing sha = edited offline. computeTree
+      // reuses the stored entry verbatim when mtime is unchanged, so unchanged
+      // files compare equal here and are skipped.
+      if (!stored || stored.sha1 !== entry.sha1) changed.push(path);
+    }
+
+    if (changed.length === 0) return;
+    this.plugin.log(`[IonSync] Cursor reconcile: uploading ${changed.length} local change(s)`);
+    for (const path of changed) {
+      if (!this.ws.isConnected) break;
+      try { await this._uploadFile(path); }
+      catch (e) { this.plugin.log(`[IonSync] reconcile upload failed for ${path}: ${e}`); }
+    }
   }
 
   private async _uploadFile(path: string): Promise<void> {

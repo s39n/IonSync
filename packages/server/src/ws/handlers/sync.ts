@@ -252,7 +252,11 @@ export function broadcastToPeers(ctx: SyncContext, sourcePeer: SyncPeer, file: F
     }
   }
 
-  const payload = JSON.stringify({ type: "file_push" as const, file, content });
+  // Stamp the change's seq so a connected peer can advance its cursor on a live
+  // push (cursor sync, phase 2) — otherwise the change is only picked up via the
+  // (idempotent) re-pull on the next reconnect.
+  const seq = ctx.db.getFileSeq(file.path);
+  const payload = JSON.stringify({ type: "file_push" as const, file, content, ...(seq ? { seq } : {}) });
 
   // 4. Broadcast raw string directly
   if (file.action === "deleted") {
