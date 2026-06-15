@@ -503,12 +503,11 @@ export class XSync {
     this.syncApplyCount = 0;
 
     // Brand-new device: no prior metadata means we have never completed a sync.
-    // Withhold config/settings uploads until sync_done so the server's
-    // authoritative versions come down first, preventing a fresh device from
-    // overwriting other devices' settings with locally-generated defaults.
+    // Used to block the delete-queue drain during first sync (prevents spurious
+    // platform delete events from wiping the vault on first connect).
     this._isFirstSync = !this.storage.hasAnyMetadata();
     if (this._isFirstSync) {
-      this.plugin.log("[IonSync] First sync detected — config file uploads deferred until sync_done");
+      this.plugin.log("[IonSync] First sync detected — delete queue drain deferred until sync_done");
     }
 
     try {
@@ -613,18 +612,6 @@ export class XSync {
 
   private async _uploadFile(path: string): Promise<void> {
     if (!this.ws.isConnected) return;
-
-    // On a brand-new device (first ever sync), don't upload config/settings
-    // files — let the server push its authoritative versions down instead.
-    // This prevents freshly-created Obsidian defaults from overwriting the
-    // settings that every other device is already using.
-    if (this._isFirstSync) {
-      const configDir = this.plugin.app.vault.configDir;
-      if (path.startsWith(configDir + "/") || path.startsWith(".obsidian/")) {
-        this.plugin.log(`[IonSync] First sync — deferring config upload: ${path}`);
-        return;
-      }
-    }
 
     const hardcodedBinaryCheck = /\.(jpeg|jpg|png|gif|bmp|webp|ico|svg|pdf|mp3|mp4|wav|mov|zip|rar|7z)$/i.test(path);
     const isBinary = Utils.isBinary(path) || hardcodedBinaryCheck;

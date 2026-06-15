@@ -2,6 +2,7 @@ import type { SyncMsg, FileEntry } from "@ionsync/protocol";
 import { compareFiles } from "@ionsync/protocol";
 import type { SyncContext } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
+import { isHiddenOrConfigPath } from "./fileData.js";
 
 /** Max files requested from client simultaneously — bounds server-side buffer memory. */
 const UPLOAD_BATCH = 8;
@@ -90,7 +91,13 @@ export function handleSync(ctx: SyncContext, peer: SyncPeer, msg: SyncMsg): void
 
     const result = compareFiles(clientFile, serverFile);
     if (result === null) continue;
-    if (result === "server_newer") {
+    // For hidden/config paths (.obsidian/**) where the server already has a copy,
+    // the server always wins regardless of mtime. A fresh Obsidian install stamps
+    // config files with current wall-clock time, making them look "newer" than the
+    // server's copy — but those are generated defaults, not real edits. Pushing the
+    // server's authoritative version prevents a new device from overwriting everyone
+    // else's settings on first connect.
+    if (result === "server_newer" || (result === "client_newer" && serverFile.action === "active" && isHiddenOrConfigPath(serverFile.path))) {
       peer.pushQueue.push(serverFile);
     } else {
       toRequest.push(serverFile.path);

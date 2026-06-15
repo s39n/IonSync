@@ -47,14 +47,15 @@ function decideUpload(ctx: SyncContext, msg: FileDataUploadMsg): "accept" | "con
 }
 
 /** True for paths with a dot-segment: ".obsidian/app.json", "foo/.hidden/x". */
-function isHiddenOrConfigPath(p: string): boolean {
+export function isHiddenOrConfigPath(p: string): boolean {
   return p.startsWith(".") || p.includes("/.");
 }
 
-/** Builds "notes/foo (Conflicted Copy 2026-06-11T19-30 abc12345).md" — same
- *  shape the plugin uses locally, plus a short device id so the origin is clear. */
-function conflictCopyPath(originalPath: string, deviceId: string | undefined): string {
-  const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 16);
+/** Builds "notes/foo (Conflicted Copy 2026-06-11T19-30-05 abc12345).md" — same
+ *  shape the plugin uses locally, plus a short device id so the origin is clear.
+ *  `n` disambiguates repeated conflicts within the same second. */
+function conflictCopyPath(originalPath: string, deviceId: string | undefined, n?: number): string {
+  const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   // Only treat a dot inside the basename as an extension separator — a dot in
   // a folder name ("assets.v2/photo") must not be split, and a leading dot
   // (".gitignore") is part of the name, not an extension.
