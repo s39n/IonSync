@@ -1,4 +1,4 @@
-import { Menu, Notice, Platform } from "obsidian";
+import { Menu, Notice, Platform, type MenuItem } from "obsidian";
 import type { XSync } from "./XSync.js";
 
 export const STATUS_OK = "#4caf50";
@@ -28,6 +28,9 @@ export class XNotify {
 
   private msgTimeout: ReturnType<typeof setTimeout> | null = null;
   private pendingNoticeTimeout: ReturnType<typeof setTimeout> | null = null;
+  /** Safety net that stops the mobile spinner if a sync ends without a clean
+   *  summary (e.g. a missed sync_done). */
+  private _spinWatchdog: ReturnType<typeof setTimeout> | null = null;
   private lastNoticeType: string | null = null;
   private _pendingCount = 0;
 
@@ -78,9 +81,17 @@ export class XNotify {
     const paused = !plugin.settings.syncEnabled;
     const autoSync = plugin.settings.autoSync;
 
-    menu.addItem((i) =>
-      i.setTitle(`Status: ${this._currentStatusLabel || (connected ? "Connected" : "Disconnected")}`).setIcon("info").setDisabled(true)
-    );
+    let statusItem: MenuItem | null = null;
+    menu.addItem((i) => {
+      statusItem = i;
+      i.setTitle(`Status: ${this._statusLine()}`).setIcon("info").setDisabled(true);
+    });
+    // While the menu is open, refresh the status line in place so the file being
+    // synced updates live without the user reopening the menu.
+    const statusTimer = window.setInterval(() => {
+      statusItem?.setTitle(`Status: ${this._statusLine()}`);
+    }, 400);
+    menu.onHide(() => window.clearInterval(statusTimer));
     menu.addSeparator();
     menu.addItem((i) =>
       i.setTitle(paused ? "Resume Sync" : "Pause Sync").setIcon(paused ? "play" : "pause")
@@ -115,6 +126,12 @@ export class XNotify {
       })
     );
     menu.showAtMouseEvent(evt);
+  }
+
+  /** The current human-readable status line (e.g. "Syncing… ↓ note.md"),
+   *  used by the live-updating status menu item. */
+  private _statusLine(): string {
+    return this._currentStatusLabel || (this.xSync.ws.isConnected ? "Connected" : "Disconnected");
   }
 
   /** Returns the theme's accent color (--color-accent CSS variable),
@@ -180,7 +197,30 @@ export class XNotify {
     if (this.msgTimeout !== null) { clearTimeout(this.msgTimeout); this.msgTimeout = null; }
     this.statusBarMsg.innerText = text;
     if (this.statusBarItem) this.statusBarItem.setAttr("title", `IonSync — ${text}`);
-    if (this.mobileIndicator) this.mobileIndicator.addClass("syncing");
+    // Only spin during an actual sync session. A live single-file push from
+    // another device also runs _applyServerFile → updateSyncProgress, but it is
+    // NOT followed by sync_done/setSyncSummary, so spinning here would leave the
+    // mobile icon spinning forever.
+    if (this.mobileIndicator && this.xSync.isSyncing) {
+      this.mobileIndicator.addClass("syncing");
+      this._armSpinWatchdog();
+    }
+  }
+
+  /** (Re)arms a timeout that force-stops the spinner if no progress arrives for
+   *  a while and we are no longer syncing — covers a missed sync_done. */
+  private _armSpinWatchdog(): void {
+    if (this._spinWatchdog !== null) clearTimeout(this._spinWatchdog);
+    this._spinWatchdog = setTimeout(() => {
+      this._spinWatchdog = null;
+      if (!this.xSync.isSyncing) this.mobileIndicator?.removeClass("syncing");
+    }, 10_000);
+  }
+
+  /** Stops the mobile spinner and cancels its watchdog. */
+  private _stopSpin(): void {
+    this.mobileIndicator?.removeClass("syncing");
+    if (this._spinWatchdog !== null) { clearTimeout(this._spinWatchdog); this._spinWatchdog = null; }
   }
 
   setSyncSummary(up: number, down: number): void {
@@ -192,8 +232,8 @@ export class XNotify {
     const summary = parts.length > 0 ? `Synced ${parts.join(" ")}` : "Up to date";
     if ((this.xSync.plugin.settings.notifications ?? 0) > 1) this._makeNotice(accent, summary);
     this.setStatusMessage(summary, false, 5_000);
-    
-    if (this.mobileIndicator) this.mobileIndicator.removeClass("syncing");
+
+    this._stopSpin();
   }
 
   notifyStatus(type: NotifyType): void {
@@ -201,8 +241,9 @@ export class XNotify {
 
     if (type === NotifyType.SYNCING) {
       this.mobileIndicator?.addClass("syncing");
+      this._armSpinWatchdog();
     } else {
-      this.mobileIndicator?.removeClass("syncing");
+      this._stopSpin();
     }
 
     switch (type) {
@@ -281,6 +322,7 @@ export class XNotify {
   cleanup(): void {
     if (this.msgTimeout !== null) { clearTimeout(this.msgTimeout); this.msgTimeout = null; }
     if (this.pendingNoticeTimeout !== null) { clearTimeout(this.pendingNoticeTimeout); this.pendingNoticeTimeout = null; }
+    if (this._spinWatchdog !== null) { clearTimeout(this._spinWatchdog); this._spinWatchdog = null; }
     if (this.mobileIndicator) { this.mobileIndicator.remove(); this.mobileIndicator = null; }
   }
 }
