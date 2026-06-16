@@ -48,6 +48,14 @@ export class XSync {
   // plugin settings; sent as `since` in sync_cursor. The upload direction is
   // reconciled locally after sync_done (see _reconcileUploads).
   private _lastSyncedSeq = 0;
+  // True between sending sync_cursor and receiving sync_done. While set, only
+  // ordered session pushes advance the checkpoint; live pushes are deferred.
+  private _inCursorSession = false;
+  // Highest seq from live (non-session) pushes during a session, folded into the
+  // cursor at sync_done once the ordered stream is fully applied.
+  private _liveMaxSeq = 0;
+  // Throttle timer for persisting the cursor mid-stream (resumable bootstrap).
+  private _cursorCheckpointTimer: number | null = null;
 
   private responseListeners: Array<(msg: ServerMsg) => boolean> = [];
   private messageQueue: ServerMsg[] = [];
@@ -115,6 +123,13 @@ export class XSync {
     await this.storage.init();
     this.deleteQueue = await this.storage.loadDeleteQueue();
     this._lastSyncedSeq = this.plugin.settings.lastSyncedSeq ?? 0;
+    // Existing installs that already synced (have metadata) predate the
+    // bootstrapComplete flag — mark them complete so they aren't treated as a
+    // fresh first-sync (which would wipe their delete queue).
+    if (!this.plugin.settings.bootstrapComplete && this.storage.hasAnyMetadata()) {
+      this.plugin.settings.bootstrapComplete = true;
+      await this.plugin.saveSettings();
+    }
 
     this._registerVaultEvent("create");
     this._registerVaultEvent("modify");
@@ -162,6 +177,11 @@ export class XSync {
       window.clearInterval(this.configCheckInterval);
       this.configCheckInterval = null;
     }
+    if (this._cursorCheckpointTimer !== null) {
+      window.clearTimeout(this._cursorCheckpointTimer);
+      this._cursorCheckpointTimer = null;
+    }
+    this._inCursorSession = false;
 
     if (this.eventRefs["visibility-change"]) {
       document.removeEventListener("visibilitychange", this.eventRefs["visibility-change"]);
@@ -278,16 +298,34 @@ export class XSync {
         break;
       case "file_push":
         await this._applyServerFile(msg.file, msg.content);
-        // Advance the cursor as we apply, so a live push (or a mid-session drop)
-        // is not re-pulled needlessly next time.
-        if (typeof msg.seq === "number" && msg.seq > this._lastSyncedSeq) {
-          this._lastSyncedSeq = msg.seq;
+        if (typeof msg.seq === "number") {
+          if (msg.session) {
+            // Ordered session push: everything up to this seq is now applied, so
+            // it is safe to checkpoint. Persist incrementally so an interrupted
+            // bootstrap resumes from here instead of restarting from 0.
+            if (msg.seq > this._lastSyncedSeq) this._lastSyncedSeq = msg.seq;
+            this._scheduleCursorCheckpoint();
+          } else if (this._inCursorSession) {
+            // Live push arriving mid-session: applied now, but its seq is ahead of
+            // the ordered stream — defer it to sync_done so we don't checkpoint a
+            // gap over un-applied session files.
+            if (msg.seq > this._liveMaxSeq) this._liveMaxSeq = msg.seq;
+          } else {
+            // Live push while idle (already caught up): safe to advance + persist.
+            if (msg.seq > this._lastSyncedSeq) this._lastSyncedSeq = msg.seq;
+            this._scheduleCursorCheckpoint();
+          }
         }
         break;
       case "sync_done":
+        // Session fully applied — fold in the session cursor and any live edges
+        // that landed during it (everything ≤ those seqs is now on disk).
+        this._inCursorSession = false;
         if (typeof msg.cursor === "number" && msg.cursor > this._lastSyncedSeq) {
           this._lastSyncedSeq = msg.cursor;
         }
+        if (this._liveMaxSeq > this._lastSyncedSeq) this._lastSyncedSeq = this._liveMaxSeq;
+        this._liveMaxSeq = 0;
         await this._onSyncDone();
         break;
     }
@@ -517,9 +555,12 @@ export class XSync {
     // Brand-new device: no prior metadata means we have never completed a sync.
     // Used to block the delete-queue drain during first sync (prevents spurious
     // platform delete events from wiping the vault on first connect).
-    this._isFirstSync = !this.storage.hasAnyMetadata();
+    // First sync = bootstrap not yet completed. Using a persisted flag (rather
+    // than "has any metadata") means an interrupted, partially-applied bootstrap
+    // is still treated as first-sync, keeping the delete-queue safety guard.
+    this._isFirstSync = !this.plugin.settings.bootstrapComplete;
     if (this._isFirstSync) {
-      this.plugin.log("[IonSync] First sync detected — delete queue drain deferred until sync_done");
+      this.plugin.log("[IonSync] First sync (bootstrap incomplete) — delete queue drain deferred until sync_done");
     }
 
     try {
@@ -544,9 +585,12 @@ export class XSync {
         );
         this._lastSyncedSeq = 0;
       }
+      this._inCursorSession = true;
+      this._liveMaxSeq = 0;
       this.ws.send({ type: "sync_cursor", since: this._lastSyncedSeq });
     } catch (e) {
       this.isSyncing = false;
+      this._inCursorSession = false;
       this.releaseWakeLock();
       this.xNotify.notifyStatus(this.ws.isConnected ? NotifyType.CONNECTED : NotifyType.NOT_CONNECTED);
     }
@@ -565,9 +609,15 @@ export class XSync {
     // may never receive a matching event (e.g. folder already existed).
     this._applyingPaths.clear();
 
-    // Download direction complete — persist the cursor we are now caught up to.
+    // Download direction complete — persist the cursor we are now caught up to,
+    // and mark the bootstrap finished so future syncs are treated as deltas.
+    if (this._cursorCheckpointTimer !== null) {
+      window.clearTimeout(this._cursorCheckpointTimer);
+      this._cursorCheckpointTimer = null;
+    }
     this.plugin.settings.lastSyncedSeq = this._lastSyncedSeq;
     this.plugin.settings.lastSyncedEndpoint = this._endpointKey();
+    this.plugin.settings.bootstrapComplete = true;
     await this.plugin.saveSettings();
 
     // UPLOAD direction: now that server changes are applied and metadata reflects
@@ -623,6 +673,28 @@ export class XSync {
   private _endpointKey(): string {
     const { host, port, tls } = this.plugin.settings;
     return `${host}:${port}:${tls ? "tls" : "tcp"}`;
+  }
+
+  /**
+   * Throttled mid-stream checkpoint of the cursor (resumable bootstrap). Fires
+   * at most once every 2s while a long session streams in. It flushes metadata
+   * FIRST so the persisted cursor is never ahead of durable file state — on a
+   * crash the cursor points at files we definitely wrote, and the rest is simply
+   * re-pulled on the next sync.
+   */
+  private _scheduleCursorCheckpoint(): void {
+    if (this._cursorCheckpointTimer !== null) return; // throttle: already scheduled
+    this._cursorCheckpointTimer = window.setTimeout(async () => {
+      this._cursorCheckpointTimer = null;
+      try {
+        await this.storage.flushMetadata();
+        this.plugin.settings.lastSyncedSeq = this._lastSyncedSeq;
+        this.plugin.settings.lastSyncedEndpoint = this._endpointKey();
+        await this.plugin.saveSettings();
+      } catch (e) {
+        this.plugin.log(`[IonSync] cursor checkpoint failed: ${e}`);
+      }
+    }, 2_000);
   }
 
   /**

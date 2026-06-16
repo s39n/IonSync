@@ -63,6 +63,13 @@ export interface PluginSettings {
    * the cursor is meaningless and we bootstrap from 0.
    */
   lastSyncedEndpoint: string;
+  /**
+   * True once the device has completed at least one full bootstrap (a sync that
+   * ended in sync_done). Used instead of "has any metadata" to detect first
+   * sync, so an *interrupted* bootstrap that wrote some files is still treated
+   * as first-sync (keeping the delete-queue safety guard) until it finishes.
+   */
+  bootstrapComplete: boolean;
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
@@ -96,6 +103,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
   encryptionEnabled: false,
   lastSyncedSeq: 0,
   lastSyncedEndpoint: "",
+  bootstrapComplete: false,
 };
 
 // ---------- Plugin ----------

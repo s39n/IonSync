@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import type { FileEntry } from "@ionsync/protocol";
 import { connectClient, startTestServer, waitForOpen, type TestClient } from "./helpers.js";
 
-interface PushMsg { type: "file_push"; file: FileEntry; content: string; seq?: number }
+interface PushMsg { type: "file_push"; file: FileEntry; content: string; seq?: number; session?: boolean }
 interface DoneMsg { type: "sync_done"; cursor?: number }
 
 function seed(srv: Awaited<ReturnType<typeof startTestServer>>, file: FileEntry, content: string): void {
@@ -52,6 +52,7 @@ describe("sync_cursor", () => {
 
     assert.deepEqual(pushes.map((p) => p.file.path).sort(), ["a.md", "b.md"]);
     assert.ok(pushes.every((p) => typeof p.seq === "number"), "each push carries its seq");
+    assert.ok(pushes.every((p) => p.session === true), "session pushes are flagged so the client checkpoints only the ordered stream");
     assert.equal(Buffer.from(pushes.find((p) => p.file.path === "a.md")!.content, "base64").toString(), "alpha");
     assert.equal(done.cursor, current, "sync_done reports the current counter as the new cursor");
 

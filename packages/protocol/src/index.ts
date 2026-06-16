@@ -172,6 +172,14 @@ export interface FilePushMsg {
    * the legacy `sync` push path.
    */
   seq?: number;
+  /**
+   * True only for pushes that are part of an in-order cursor-sync session (the
+   * server replaying `getChangesSince`). Live broadcasts omit it. The client
+   * uses this to checkpoint its cursor only from the ordered stream: a live edge
+   * arriving mid-session has a higher seq and must not advance the checkpoint,
+   * or an interrupted bootstrap would skip the un-applied middle. (phase 2a+)
+   */
+  session?: boolean;
 }
 
 /** Server responding to a `file_data mode:"send"` download request. */

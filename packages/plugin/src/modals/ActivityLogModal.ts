@@ -31,6 +31,11 @@ export class ActivityLogModal extends Modal {
       "box-shadow:inset 0 1px 3px rgba(0,0,0,0.08)",
       "white-space:pre-wrap",
       "word-break:break-word",
+      // Obsidian disables text selection on UI chrome by default — re-enable it
+      // here so log lines can be selected and copied.
+      "user-select:text",
+      "-webkit-user-select:text",
+      "cursor:text",
     ].join(";");
 
     this._render();

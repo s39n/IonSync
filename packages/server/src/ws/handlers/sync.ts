@@ -178,15 +178,19 @@ export function drainPushQueue(ctx: SyncContext, peer: SyncPeer): void {
       const buf = ctx.storage.readLatest(file.path);
       content = buf ? buf.toString("base64") : "";
     }
-    // Cursor-sync pushes carry their seq so the client can advance its cursor
-    // even on a live push mid-session. Legacy `sync` pushes have no seq → omit.
+    // Cursor-sync pushes carry their seq so the client can advance its cursor.
+    // `session:true` marks them as part of the ordered cursor stream (set when
+    // cursorTarget is present) so the client checkpoints only from this stream,
+    // not from interleaved live broadcasts. Legacy `sync` pushes have neither.
     const seq = (file as FileEntry & { seq?: number }).seq;
+    const inSession = peer.cursorTarget !== undefined;
     peer.ws.send(
       JSON.stringify({
         type: "file_push" as const,
         file,
         content,
         ...(seq !== undefined ? { seq } : {}),
+        ...(inSession ? { session: true } : {}),
       })
     );
     sent++;
