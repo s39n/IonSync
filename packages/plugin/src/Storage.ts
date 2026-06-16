@@ -2,8 +2,18 @@ import type { FileEntry } from "@ionsync/protocol";
 import { TFile, TFolder, type App } from "obsidian";
 import { FSAdapter } from "./FSAdapter.js";
 import { ExclusionFilter } from "./ExclusionFilter.js";
+import { IndexStore } from "./IndexStore.js";
 import Utils from "./Utils.js";
 import type { PluginSettings } from "./main.js";
+
+/**
+ * Phase 2b master switch. When false (default), file metadata persists to
+ * `data/metadata.json` exactly as before — so a build under device-test is
+ * unaffected. Flip to true to persist via IndexedDB (per-record writes, no
+ * full-file rewrite). Re-test on desktop + mobile when enabling: IndexedDB is
+ * a different durability surface (see IndexStore).
+ */
+const USE_INDEXEDDB = false;
 
 /**
  * Manages local file metadata, vault I/O, Delta-Sync Shadow Copies,
@@ -15,6 +25,8 @@ export class Storage {
   private fsVault: FSAdapter;
   private fsInternal: FSAdapter;
   private metadata: Record<string, FileEntry> = {};
+  /** IndexedDB backing when USE_INDEXEDDB is on and available; null = json path. */
+  private idb: IndexStore | null = null;
   private aborted = false;
   private saveTimeout: ReturnType<typeof setTimeout> | null = null;
   private deleteQueueData: Record<string, { metadata: Partial<FileEntry>; timestamp: number }> = {};
@@ -26,8 +38,41 @@ export class Storage {
 
   async init(): Promise<void> {
     await this.ensureDataDir();
-    await this.loadMetadata();
+
+    if (USE_INDEXEDDB && IndexStore.isSupported()) {
+      try {
+        // Scope the DB name per vault. Obsidian isolates storage per vault, but
+        // appId makes the name unambiguous regardless.
+        const appId = (this.app as unknown as { appId?: string }).appId ?? "default";
+        this.idb = new IndexStore(`ionsync-index-${appId}`);
+        await this.idb.open();
+        // One-time migration: seed IndexedDB from an existing metadata.json.
+        if ((await this.idb.count()) === 0) await this._importJsonToIdb();
+        this.metadata = await this.idb.getAllFiles();
+      } catch (e) {
+        console.warn("[IonSync] IndexedDB unavailable — falling back to metadata.json:", e);
+        this.idb = null;
+        await this.loadMetadata();
+      }
+    } else {
+      await this.loadMetadata();
+    }
+
     await this.loadDeleteQueue();
+  }
+
+  /** Seed IndexedDB from a pre-existing metadata.json (one-time upgrade path). */
+  private async _importJsonToIdb(): Promise<void> {
+    if (!this.idb) return;
+    try {
+      const raw = await this.fsInternal.read("data/metadata.json");
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Record<string, FileEntry>;
+      const entries = Object.values(parsed);
+      if (entries.length) await this.idb.putManyFiles(entries);
+    } catch {
+      // No json or invalid — nothing to import; start with an empty index.
+    }
   }
 
   private async ensureDataDir(): Promise<void> {
@@ -138,12 +183,22 @@ export class Storage {
 
   async writeMetadata(entry: FileEntry): Promise<void> {
     this.metadata[entry.path] = entry;
-    this.requestSave();
+    if (this.idb) {
+      // Per-record durable write — no full-file rewrite. Fire-and-forget: the
+      // in-memory map is authoritative for sync logic; a lost put just re-syncs.
+      void this.idb.putFile(entry).catch((e) => console.warn("[IonSync] idb putFile failed:", e));
+    } else {
+      this.requestSave();
+    }
   }
 
   async deleteMetadata(path: string): Promise<void> {
     delete this.metadata[path];
-    this.requestSave();
+    if (this.idb) {
+      void this.idb.deleteFile(path).catch((e) => console.warn("[IonSync] idb deleteFile failed:", e));
+    } else {
+      this.requestSave();
+    }
   }
 
   /**
@@ -161,10 +216,12 @@ export class Storage {
     }
     // Also clear the computed tree so computeTree() recomputes everything fresh
     this.tree = {};
-    await this.saveMetadata();
+    if (this.idb) await this.idb.putManyFiles(Object.values(this.metadata));
+    else await this.saveMetadata();
   }
 
   async flushMetadata(): Promise<void> {
+    if (this.idb) return; // per-record IndexedDB writes are already durable
     if (this.saveTimeout) { clearTimeout(this.saveTimeout); this.saveTimeout = null; }
     await this.saveMetadata();
   }
@@ -419,5 +476,15 @@ export class Storage {
   async makeFolder(path: string, entry: FileEntry): Promise<void> {
     await this.fsVault.makeFolder(path);
     await this.writeMetadata(entry);
+  }
+
+  /**
+   * Closes the IndexedDB connection if one is open. Call from XSync.unload()
+   * when USE_INDEXEDDB is enabled so connections don't leak across plugin
+   * reloads. No-op on the json path.
+   */
+  close(): void {
+    this.idb?.close();
+    this.idb = null;
   }
 }
