@@ -56,6 +56,9 @@ export class XSync {
   private _liveMaxSeq = 0;
   // Throttle timer for persisting the cursor mid-stream (resumable bootstrap).
   private _cursorCheckpointTimer: number | null = null;
+  // Highest seq applied per path. Lets a live push that jumped ahead of a sync
+  // backlog avoid being clobbered by an older bootstrap push for the same file.
+  private _appliedSeq = new Map<string, number>();
 
   private responseListeners: Array<(msg: ServerMsg) => boolean> = [];
   private messageQueue: ServerMsg[] = [];
@@ -265,7 +268,15 @@ export class XSync {
   // ── Incoming Messages ─────────────────────────────────────────────────────
 
   private async _queueMessage(msg: ServerMsg): Promise<void> {
-    this.messageQueue.push(msg);
+    // Live file pushes (not part of the ordered cursor stream) jump ahead of a
+    // large sync backlog, so a peer's edit shows up promptly even while this
+    // device is mid-bootstrap. Same-path ordering is protected by the per-path
+    // seq guard in _handleServerMessage.
+    if (msg.type === "file_push" && !msg.session) {
+      this.messageQueue.unshift(msg);
+    } else {
+      this.messageQueue.push(msg);
+    }
     if (this.isProcessingQueue) return;
     this.isProcessingQueue = true;
     while (this.messageQueue.length > 0) {
@@ -296,8 +307,16 @@ export class XSync {
           this.xNotify.showNotification(STATUS_WARN, `Sync conflict: ${msg.path} — your edits were saved as a conflicted copy`);
         }
         break;
-      case "file_push":
-        await this._applyServerFile(msg.file, msg.content);
+      case "file_push": {
+        // Skip applying a push that is older than what we already applied for
+        // this path — happens when a live edit jumped ahead of the bootstrap
+        // stream and an older session push for the same file arrives later.
+        const prior = this._appliedSeq.get(msg.file.path);
+        const stale = typeof msg.seq === "number" && prior !== undefined && msg.seq < prior;
+        if (!stale) {
+          await this._applyServerFile(msg.file, msg.content);
+          if (typeof msg.seq === "number") this._appliedSeq.set(msg.file.path, msg.seq);
+        }
         if (typeof msg.seq === "number") {
           if (msg.session) {
             // Ordered session push: everything up to this seq is now applied, so
@@ -317,6 +336,7 @@ export class XSync {
           }
         }
         break;
+      }
       case "sync_done":
         // Session fully applied — fold in the session cursor and any live edges
         // that landed during it (everything ≤ those seqs is now on disk).
@@ -666,6 +686,9 @@ export class XSync {
     this.syncApplyCount = 0;
     this.storage.tree = {};
     await this.storage.flushMetadata();
+    // Backlog is drained; drop the per-path seq guard (live edits now apply in
+    // order anyway). Bounds memory after a large bootstrap.
+    this._appliedSeq.clear();
     this.isSyncing = false;
   }
 
