@@ -1,6 +1,27 @@
 # IonSync v2 — Sync Redesign Plan
 
-Status: draft for review · Date: 2026-06-15
+Status: implemented · Date: 2026-06-15
+
+## Status summary
+
+- **Phase 0 — seq counter:** done, tested (migration v3, monotonic counter).
+- **Phase 1 — cursor protocol + handler + rename tombstones:** done, tested.
+- **Phase 2a — client hard switch to cursor + reconcile uploads:** done; in
+  device testing. Plus resumable bootstrap (mid-stream cursor checkpoints,
+  session-flagged pushes) and live-push prioritization over a sync backlog.
+- **Phase 2b — IndexedDB index:** written but DORMANT behind `USE_INDEXEDDB =
+  false` in `Storage.ts`. Activate (flip flag + wire `storage.close()` into
+  `XSync.unload()`) and re-test on desktop + mobile when ready. Optimization
+  only — not required for correctness.
+- **Phase 3 — config stream:** the *goal* (no `.obsidian` flapping, workspace
+  layout kept per-device) is already satisfied by existing code:
+  `ExclusionFilter.dangerousFiles` hard-excludes `workspace.json`,
+  `workspace-mobile.json`, `sync.json`, `graph.json`; config/dot-paths never
+  mint conflict copies (server LWW + client skip); config uploads debounce at
+  5s. A dedicated `configSince`/`configCursor` stream was deferred — build it
+  only if per-device config profiles are needed.
+- **Phase 4 — initial/full sync speedup:** delivered by the cursor work; no
+  separate phase remaining.
 
 ## Goal
 
