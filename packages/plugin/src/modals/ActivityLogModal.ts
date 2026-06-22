@@ -1,4 +1,4 @@
-import { Modal } from "obsidian";
+import { Modal, Notice } from "obsidian";
 import type { IonSyncPlugin } from "../main.js";
 
 export class ActivityLogModal extends Modal {
@@ -13,7 +13,14 @@ export class ActivityLogModal extends Modal {
   override onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "Activity Log" });
+
+    // Header row: title + a "Copy all" button.
+    const header = contentEl.createEl("div");
+    header.style.cssText = "display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;";
+    header.createEl("h2", { text: "Activity Log" }).style.margin = "0";
+
+    const copyBtn = header.createEl("button", { text: "Copy all" });
+    copyBtn.onclick = () => { void this._copyAll(); };
 
     // A white "log sheet" panel — paper-like regardless of the Obsidian theme.
     this.sheetEl = contentEl.createEl("div");
@@ -41,6 +48,18 @@ export class ActivityLogModal extends Modal {
     this._render();
     // Live refresh while the modal is open so activity appears without reopening.
     this.timer = window.setInterval(() => this._render(), 1_000);
+  }
+
+  /** Copy the full activity log to the clipboard. */
+  private async _copyAll(): Promise<void> {
+    const text = this.plugin.xSync.getActivityLog().join("\n");
+    if (!text) { new Notice("Activity log is empty"); return; }
+    try {
+      await navigator.clipboard.writeText(text);
+      new Notice("Activity log copied");
+    } catch {
+      new Notice("Couldn't copy — select the text and copy manually");
+    }
   }
 
   /** Rebuilds the sheet only when the log actually changed, so an idle modal
