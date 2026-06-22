@@ -59,6 +59,11 @@ export class XSync {
   // Highest seq applied per path. Lets a live push that jumped ahead of a sync
   // backlog avoid being clobbered by an older bootstrap push for the same file.
   private _appliedSeq = new Map<string, number>();
+  // The full-vault reconcile scan only catches edits made while the app was
+  // CLOSED; in-session edits are captured by vault events. So it only needs to
+  // run on the first sync after load — reconnect syncs skip the O(vault) scan.
+  // Reset to true in load().
+  private _needsFullReconcile = true;
 
   private responseListeners: Array<(msg: ServerMsg) => boolean> = [];
   private messageQueue: ServerMsg[] = [];
@@ -126,6 +131,7 @@ export class XSync {
     await this.storage.init();
     this.deleteQueue = await this.storage.loadDeleteQueue();
     this._lastSyncedSeq = this.plugin.settings.lastSyncedSeq ?? 0;
+    this._needsFullReconcile = true; // first sync after load does the offline scan
     // Existing installs that already synced (have metadata) predate the
     // bootstrapComplete flag — mark them complete so they aren't treated as a
     // fresh first-sync (which would wipe their delete queue).
@@ -771,6 +777,11 @@ export class XSync {
    */
   private async _reconcileUploads(): Promise<void> {
     if (!this.ws.isConnected) return;
+    // Only scan once per app load. The scan exists to catch edits made while the
+    // app was closed; anything edited in-session is already captured by vault
+    // events, so re-scanning on every reconnect is wasted O(vault) work + a full
+    // tree allocation + a config-dir stat — a real drag on slow devices.
+    if (!this._needsFullReconcile) return;
     await this.storage.computeTree();
 
     const changed: string[] = [];
@@ -783,6 +794,8 @@ export class XSync {
       // files compare equal here and are skipped.
       if (!stored || stored.sha1 !== entry.sha1) changed.push(path);
     }
+    // Offline scan complete for this app session — don't repeat it on reconnects.
+    this._needsFullReconcile = false;
 
     if (changed.length === 0) return;
     this.plugin.log(`[IonSync] Cursor reconcile: uploading ${changed.length} local change(s)`);
