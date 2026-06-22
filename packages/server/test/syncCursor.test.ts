@@ -150,6 +150,30 @@ describe("sync_cursor", () => {
     await srv.stop();
   });
 
+  it("caps a batch by total bytes, not just count", async () => {
+    const srv = await startTestServer();
+    const big = "x".repeat(3 * 1024 * 1024); // 3 MB each; cap is 8 MB
+    for (let i = 0; i < 4; i++) seed(srv, entry(`big${i}.bin`, 1000 + i), big);
+
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    // 8 MB cap → two 3 MB files fit, the third would exceed → batch of 2, more.
+    client.send({ type: "sync_cursor", since: 0 });
+    const b1 = await drain(client);
+    assert.equal(b1.pushes.length, 2, "byte cap cuts the batch before the 250 count cap");
+    assert.equal(b1.done.more, true);
+
+    client.send({ type: "sync_cursor", since: b1.done.cursor! });
+    const b2 = await drain(client);
+    assert.equal(b2.pushes.length, 2, "remaining large files arrive in the next batch");
+    assert.ok(!b2.done.more, "no more after the final batch");
+
+    client.close();
+    await srv.stop();
+  });
+
   it("a cursor ahead of the server forces a full bootstrap", async () => {
     const srv = await startTestServer();
     seed(srv, entry("a.md", 1000), "alpha");

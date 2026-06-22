@@ -4,12 +4,14 @@ import type { SyncPeer } from "../peer.js";
 import { drainPushQueue } from "./sync.js";
 
 /**
- * Max changes delivered per sync_cursor request. The client applies a batch
- * then asks for the next (sync_done.more = true), so only one batch of file
- * contents is ever in flight — this bounds peak memory during a large bootstrap
- * on low-RAM devices instead of firehosing the whole vault at once.
+ * A batch is capped by BOTH a file count and a total content-byte budget, so
+ * only one bounded chunk is ever in flight (sync_done.more drives the next
+ * pull). The byte cap matters on low-RAM devices: 250 large PDFs/images would
+ * blow the budget even though it's "only" 250 files. A single file larger than
+ * the byte cap is still sent alone (capped by the server's 50 MB payload limit).
  */
-const BATCH = 250;
+const MAX_BATCH_COUNT = 250;
+const MAX_BATCH_BYTES = 8 * 1024 * 1024; // 8 MB of content per batch
 
 function pushLog(ctx: SyncContext, msg: string): void {
   if (ctx.config.logs.level < 3) return;
@@ -47,24 +49,36 @@ export function handleSyncCursor(ctx: SyncContext, peer: SyncPeer, msg: SyncCurs
     since = 0;
   }
 
-  // Deliver ONE bounded batch. The client applies it then requests the next
-  // (driven by sync_done.more), so only one batch of file contents is ever in
-  // flight — this caps peak memory on the receiving device.
-  const changes = ctx.db.getChangesSince(since, BATCH);
-  for (const c of changes) peer.pushQueue.push(c);
+  // Deliver ONE bounded batch — capped by count AND total content bytes. The
+  // client applies it then requests the next (driven by sync_done.more), so only
+  // one bounded chunk of file content is ever in flight.
+  const candidates = ctx.db.getChangesSince(since, MAX_BATCH_COUNT);
+  let bytes = 0;
+  let taken = 0;
+  for (const c of candidates) {
+    const size =
+      c.action === "active" && c.fileType === "file"
+        ? (ctx.storage.getSizeLatest(c.path) ?? 0)
+        : 0;
+    // Always take at least one file (else an oversized file would stall sync).
+    if (taken > 0 && bytes + size > MAX_BATCH_BYTES) break;
+    peer.pushQueue.push(c);
+    bytes += size;
+    taken++;
+  }
 
-  // `more` is true when this batch was full — there may be further changes. The
-  // client re-requests with the new cursor. When done, advance the reported
-  // cursor to the current counter so the client is fully caught up (covers
+  // `more` when we stopped early (byte cap) or filled the count cap — there may
+  // be further changes; the client re-requests with the returned cursor. When
+  // fully drained, report the current counter so the client is caught up (covers
   // counter gaps left by purges).
-  const more = changes.length === BATCH;
-  peer.cursorTarget = more ? changes[changes.length - 1]!.seq : current;
+  const more = taken < candidates.length || candidates.length === MAX_BATCH_COUNT;
+  peer.cursorTarget = more ? candidates[taken - 1]!.seq : current;
   peer.syncMore = more;
   peer.syncSessionActive = true;
 
   pushLog(
     ctx,
-    `[CursorSync] ${peer.deviceId} since=${since} → ${changes.length} change(s)${more ? " (more)" : ""}, cursor→${peer.cursorTarget}`
+    `[CursorSync] ${peer.deviceId} since=${since} → ${taken} change(s), ${(bytes / 1024).toFixed(0)}KB${more ? " (more)" : ""}, cursor→${peer.cursorTarget}`
   );
 
   // Streams file_push (each with its seq), then sync_done { cursor, more }. An
