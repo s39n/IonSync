@@ -23,6 +23,11 @@ export interface SyncPeer {
    * `sync_done` with no cursor. Cleared once `sync_done` is sent.
    */
   cursorTarget?: number;
+  /**
+   * True when the current cursor batch was full and more changes remain — the
+   * next `sync_done` carries `more:true` so the client pulls another batch.
+   */
+  syncMore: boolean;
   /** Accumulates client FileEntry records across chunked sync messages. Cleared after last chunk. */
   syncClientMap?: Map<string, import("@ionsync/protocol").FileEntry>;
   /** Whether auto-sync (live broadcast from other peers) is enabled. */
@@ -43,6 +48,7 @@ export function createPeer(id: string, nonce: string, ws: WebSocket): SyncPeer {
     uploadQueue: [],
     pushQueue: [],
     syncSessionActive: false,
+    syncMore: false,
     autoSync: true,
 
     send(msg) {

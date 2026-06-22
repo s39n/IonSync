@@ -211,6 +211,13 @@ export interface SyncDoneMsg {
    * the legacy `sync` path.
    */
   cursor?: number;
+  /**
+   * True when this was a bounded batch and more changes remain. The client
+   * should immediately send another `sync_cursor { since: cursor }` to continue.
+   * This keeps only one batch of file content in flight during a large bootstrap
+   * (memory bound on low-RAM devices). Absent/false = fully caught up.
+   */
+  more?: boolean;
 }
 
 export type ServerMsg =

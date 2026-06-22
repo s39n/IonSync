@@ -3,8 +3,13 @@ import type { SyncContext } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 import { drainPushQueue } from "./sync.js";
 
-/** Change rows gathered from the DB per loop iteration before draining. */
-const GATHER_BATCH = 5000;
+/**
+ * Max changes delivered per sync_cursor request. The client applies a batch
+ * then asks for the next (sync_done.more = true), so only one batch of file
+ * contents is ever in flight — this bounds peak memory during a large bootstrap
+ * on low-RAM devices instead of firehosing the whole vault at once.
+ */
+const BATCH = 250;
 
 function pushLog(ctx: SyncContext, msg: string): void {
   if (ctx.config.logs.level < 3) return;
@@ -42,31 +47,27 @@ export function handleSyncCursor(ctx: SyncContext, peer: SyncPeer, msg: SyncCurs
     since = 0;
   }
 
-  // Gather every change since the cursor synchronously. Doing the whole gather
-  // in one run (no event-loop yield) means no concurrent write can interleave
-  // and leave a gap between what we read and the cursor we report.
-  let cursor = since;
-  for (;;) {
-    const changes = ctx.db.getChangesSince(cursor, GATHER_BATCH);
-    if (changes.length === 0) break;
-    for (const c of changes) peer.pushQueue.push(c);
-    cursor = changes[changes.length - 1]!.seq;
-    if (changes.length < GATHER_BATCH) break;
-  }
+  // Deliver ONE bounded batch. The client applies it then requests the next
+  // (driven by sync_done.more), so only one batch of file contents is ever in
+  // flight — this caps peak memory on the receiving device.
+  const changes = ctx.db.getChangesSince(since, BATCH);
+  for (const c of changes) peer.pushQueue.push(c);
 
-  // Report the server's current counter as the new cursor. The client receives
-  // everything up to max(files.seq) through this feed; any change above that
-  // (or one that lands live during the drain) arrives as a live `file_push`
-  // carrying its own seq, which the client also folds into its stored cursor.
-  peer.cursorTarget = current;
+  // `more` is true when this batch was full — there may be further changes. The
+  // client re-requests with the new cursor. When done, advance the reported
+  // cursor to the current counter so the client is fully caught up (covers
+  // counter gaps left by purges).
+  const more = changes.length === BATCH;
+  peer.cursorTarget = more ? changes[changes.length - 1]!.seq : current;
+  peer.syncMore = more;
   peer.syncSessionActive = true;
 
   pushLog(
     ctx,
-    `[CursorSync] ${peer.deviceId} since=${since} → ${peer.pushQueue.length} change(s), cursor→${current}`
+    `[CursorSync] ${peer.deviceId} since=${since} → ${changes.length} change(s)${more ? " (more)" : ""}, cursor→${peer.cursorTarget}`
   );
 
-  // Streams file_push (each with its seq), then sync_done { cursor }. An empty
-  // queue resolves straight to sync_done via checkSyncDone.
+  // Streams file_push (each with its seq), then sync_done { cursor, more }. An
+  // empty queue resolves straight to sync_done via checkSyncDone.
   drainPushQueue(ctx, peer);
 }

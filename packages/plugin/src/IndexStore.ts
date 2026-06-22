@@ -54,14 +54,25 @@ export class IndexStore {
     return this.db.transaction(name, mode).objectStore(name);
   }
 
-  /** Load every file record into a path→entry map (called once on startup). */
+  /**
+   * Load every file record into a path→entry map (called once on startup).
+   *
+   * Streams via a cursor rather than getAll() so we never hold the full result
+   * array AND the map at once — important on low-RAM devices with big vaults.
+   */
   getAllFiles(): Promise<Record<string, FileEntry>> {
     return new Promise((resolve, reject) => {
-      const req = this.store(FILES_STORE, "readonly").getAll();
+      const out: Record<string, FileEntry> = {};
+      const req = this.store(FILES_STORE, "readonly").openCursor();
       req.onsuccess = () => {
-        const out: Record<string, FileEntry> = {};
-        for (const e of req.result as FileEntry[]) out[e.path] = e;
-        resolve(out);
+        const cursor = req.result;
+        if (cursor) {
+          const e = cursor.value as FileEntry;
+          out[e.path] = e;
+          cursor.continue();
+        } else {
+          resolve(out);
+        }
       };
       req.onerror = () => reject(req.error);
     });
@@ -83,14 +94,22 @@ export class IndexStore {
     return this.done(this.store(FILES_STORE, "readwrite").delete(path));
   }
 
-  /** Bulk write in a single transaction — used for the metadata.json import. */
-  putManyFiles(entries: FileEntry[]): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const store = this.store(FILES_STORE, "readwrite");
-      for (const e of entries) store.put(e);
-      store.transaction.oncomplete = () => resolve();
-      store.transaction.onerror = () => reject(store.transaction.error);
-    });
+  /**
+   * Bulk write, chunked into bounded transactions — used for the metadata.json
+   * import. A single transaction over a whole large vault buffers every record
+   * in memory before committing, which can OOM a low-RAM device; chunking caps
+   * the peak.
+   */
+  async putManyFiles(entries: FileEntry[], chunkSize = 1_000): Promise<void> {
+    for (let i = 0; i < entries.length; i += chunkSize) {
+      const slice = entries.slice(i, i + chunkSize);
+      await new Promise<void>((resolve, reject) => {
+        const store = this.store(FILES_STORE, "readwrite");
+        for (const e of slice) store.put(e);
+        store.transaction.oncomplete = () => resolve();
+        store.transaction.onerror = () => reject(store.transaction.error);
+      });
+    }
   }
 
   getMeta(key: string): Promise<string | null> {

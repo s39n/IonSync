@@ -315,7 +315,10 @@ export class XSync {
         const stale = typeof msg.seq === "number" && prior !== undefined && msg.seq < prior;
         if (!stale) {
           await this._applyServerFile(msg.file, msg.content);
-          if (typeof msg.seq === "number") this._appliedSeq.set(msg.file.path, msg.seq);
+          // Only record seq for LIVE pushes (the ones that can jump ahead). Ordered
+          // session pushes never overtake each other, so tracking them would just
+          // bloat the map to vault size during a bootstrap — wasteful on low RAM.
+          if (typeof msg.seq === "number" && !msg.session) this._appliedSeq.set(msg.file.path, msg.seq);
         }
         if (typeof msg.seq === "number") {
           if (msg.session) {
@@ -338,12 +341,20 @@ export class XSync {
         break;
       }
       case "sync_done":
-        // Session fully applied — fold in the session cursor and any live edges
-        // that landed during it (everything ≤ those seqs is now on disk).
-        this._inCursorSession = false;
         if (typeof msg.cursor === "number" && msg.cursor > this._lastSyncedSeq) {
           this._lastSyncedSeq = msg.cursor;
         }
+        if (msg.more) {
+          // Bounded batch finished and more remain — checkpoint progress and pull
+          // the next batch. Only one batch is ever in flight, capping memory.
+          // Stay in-session; do NOT finalize (uploads/reconcile wait for the end).
+          this._scheduleCursorCheckpoint();
+          if (this.ws.isConnected) this.ws.send({ type: "sync_cursor", since: this._lastSyncedSeq });
+          break;
+        }
+        // Final batch — fold in any live edges that landed during the session
+        // (everything ≤ those seqs is now on disk), then finalize.
+        this._inCursorSession = false;
         if (this._liveMaxSeq > this._lastSyncedSeq) this._lastSyncedSeq = this._liveMaxSeq;
         this._liveMaxSeq = 0;
         await this._onSyncDone();
@@ -607,6 +618,7 @@ export class XSync {
       }
       this._inCursorSession = true;
       this._liveMaxSeq = 0;
+      this._appliedSeq.clear();
       this.ws.send({ type: "sync_cursor", since: this._lastSyncedSeq });
     } catch (e) {
       this.isSyncing = false;

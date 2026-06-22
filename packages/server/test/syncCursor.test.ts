@@ -11,7 +11,7 @@ import type { FileEntry } from "@ionsync/protocol";
 import { connectClient, startTestServer, waitForOpen, type TestClient } from "./helpers.js";
 
 interface PushMsg { type: "file_push"; file: FileEntry; content: string; seq?: number; session?: boolean }
-interface DoneMsg { type: "sync_done"; cursor?: number }
+interface DoneMsg { type: "sync_done"; cursor?: number; more?: boolean }
 
 function seed(srv: Awaited<ReturnType<typeof startTestServer>>, file: FileEntry, content: string): void {
   srv.ctx.db.upsertFile(file);
@@ -117,6 +117,34 @@ describe("sync_cursor", () => {
     const del = pushes.find((p) => p.file.path === "gone.md");
     assert.ok(del, "deletion surfaces in the feed");
     assert.equal(del!.file.action, "deleted", "delivered as a tombstone, not an active file");
+
+    client.close();
+    await srv.stop();
+  });
+
+  it("delivers a large bootstrap in bounded batches (more flag)", async () => {
+    const srv = await startTestServer();
+    const N = 260; // > BATCH (250)
+    for (let i = 0; i < N; i++) seed(srv, entry(`n${i}.md`, 1000 + i), `c${i}`);
+
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    // First batch is capped and signals more.
+    client.send({ type: "sync_cursor", since: 0 });
+    const b1 = await drain(client);
+    assert.equal(b1.pushes.length, 250, "first batch capped at BATCH");
+    assert.equal(b1.done.more, true, "more remains after a full batch");
+
+    // Client pulls the next batch with the returned cursor.
+    client.send({ type: "sync_cursor", since: b1.done.cursor! });
+    const b2 = await drain(client);
+    assert.equal(b2.pushes.length, 10, "remainder delivered in the next batch");
+    assert.ok(!b2.done.more, "no more after the final batch");
+
+    const all = [...b1.pushes, ...b2.pushes].map((p) => p.file.path);
+    assert.equal(new Set(all).size, N, "every file delivered exactly once across batches");
 
     client.close();
     await srv.stop();

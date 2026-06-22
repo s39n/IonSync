@@ -216,10 +216,18 @@ export function checkSyncDone(peer: SyncPeer): void {
     peer.syncSessionActive = false;
     // Cursor sync reports the seq the client is now caught up to; legacy sync
     // sends sync_done with no cursor. Clear it so a later legacy session can't
-    // inherit a stale cursor.
+    // inherit a stale cursor. `more` tells a cursor client to pull the next batch.
     const cursor = peer.cursorTarget;
+    const more = peer.syncMore;
     delete peer.cursorTarget;
-    peer.send(cursor !== undefined ? { type: "sync_done", cursor } : { type: "sync_done" });
+    peer.syncMore = false;
+    peer.send(
+      cursor !== undefined
+        ? more
+          ? { type: "sync_done", cursor, more: true }
+          : { type: "sync_done", cursor }
+        : { type: "sync_done" }
+    );
   }
 }
 
