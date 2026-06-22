@@ -349,7 +349,15 @@ export class XSync {
           // the next batch. Only one batch is ever in flight, capping memory.
           // Stay in-session; do NOT finalize (uploads/reconcile wait for the end).
           this._scheduleCursorCheckpoint();
-          if (this.ws.isConnected) this.ws.send({ type: "sync_cursor", since: this._lastSyncedSeq });
+          // Pace to the device: writing the batch triggers Obsidian's indexer, so
+          // yield the main thread back to it before pulling more — otherwise a
+          // slow device (e.g. an old Surface) crawls under the combined load.
+          // Done off the message queue so live edits stay responsive meanwhile.
+          void this._waitForIdle().then(() => {
+            if (this.ws.isConnected && this._inCursorSession) {
+              this.ws.send({ type: "sync_cursor", since: this._lastSyncedSeq });
+            }
+          });
           break;
         }
         // Final batch — fold in any live edges that landed during the session
@@ -702,6 +710,24 @@ export class XSync {
     // order anyway). Bounds memory after a large bootstrap.
     this._appliedSeq.clear();
     this.isSyncing = false;
+  }
+
+  /**
+   * Resolve once the app has idle time (or after `timeoutMs` as a safety net).
+   * Used to pace the batched bootstrap: each applied batch fires a burst of vault
+   * events that Obsidian indexes, and pulling the next batch before that settles
+   * makes a slow device crawl. Yielding to idle keeps it responsive. Falls back
+   * to a short delay where requestIdleCallback is unavailable (some mobile
+   * webviews).
+   */
+  private _waitForIdle(timeoutMs = 2_000): Promise<void> {
+    return new Promise((resolve) => {
+      const ric = (window as unknown as {
+        requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => void;
+      }).requestIdleCallback;
+      if (typeof ric === "function") ric(() => resolve(), { timeout: timeoutMs });
+      else setTimeout(resolve, 50);
+    });
   }
 
   /** Stable key for the current server endpoint, used to invalidate the cursor. */
