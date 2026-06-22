@@ -975,7 +975,11 @@ export class XSync {
       return;
     }
 
-    let delay = Math.max(this.plugin.settings.delayedSync ?? 2, 2);
+    // Lower floor (0.75s) so an edit propagates to other devices quickly while
+    // still batching a typing burst (the prior 2s floor felt laggy). A larger
+    // delayedSync setting is still honored. Config files keep a 5s delay — they
+    // flap constantly and have no merge value.
+    let delay = Math.max(this.plugin.settings.delayedSync ?? 0, 0.75);
     if (file.path.startsWith(this.plugin.app.vault.configDir + "/")) delay = 5;
 
     this.xTimeouts.set(file.path, delay * 1_000, async () => {

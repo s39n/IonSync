@@ -87,7 +87,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Delayed sync (seconds)")
-      .setDesc("Wait this many seconds after a modify event before uploading (0 = instant)")
+      .setDesc("Wait this many seconds after a modify event before uploading (0 = fastest, ~0.75s)")
       .addSlider((s) =>
         s.setLimits(0, 60, 1)
           .setValue(this.plugin.settings.delayedSync)
