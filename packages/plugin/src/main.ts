@@ -153,21 +153,25 @@ export class IonSyncPlugin extends Plugin {
 
     this.addSettingTab(new IonSyncSettingsTab(this.app, this));
 
-    this.app.workspace.onLayoutReady(() => {
-      // Defer the first connect/sync until the vault's initial indexing settles,
-      // so the plugin doesn't compete with Obsidian's indexer (which crawls slow
-      // devices) and the first reconcile sees a fully-loaded file list. Start on
-      // the metadataCache "resolved" event, or after a safety timeout.
-      let started = false;
-      const start = () => {
-        if (started) return;
-        started = true;
-        if (this._startTimer !== null) { window.clearTimeout(this._startTimer); this._startTimer = null; }
-        void this.xSync.enabled(true);
-      };
-      this.registerEvent(this.app.metadataCache.on("resolved", start));
-      this._startTimer = window.setTimeout(start, 10_000);
-    });
+    // Defer the first connect/sync until BOTH the layout is ready AND the vault's
+    // metadata indexing has settled — so the plugin doesn't compete with the
+    // indexer (which crawls slow devices) and the first reconcile sees a complete
+    // file list. The "resolved" listener is registered now (before layout ready)
+    // so a warm-start event firing early isn't missed. On a slow device indexing
+    // can take much longer than a fixed delay, so the timer is only a last resort.
+    let layoutReady = false;
+    let indexed = false;
+    let started = false;
+    const maybeStart = () => {
+      if (started || !layoutReady || !indexed) return;
+      started = true;
+      if (this._startTimer !== null) { window.clearTimeout(this._startTimer); this._startTimer = null; }
+      void this.xSync.enabled(true);
+    };
+    this.registerEvent(this.app.metadataCache.on("resolved", () => { indexed = true; maybeStart(); }));
+    this.app.workspace.onLayoutReady(() => { layoutReady = true; maybeStart(); });
+    // Last resort: start anyway if "resolved" never arrives on this setup.
+    this._startTimer = window.setTimeout(() => { indexed = true; layoutReady = true; maybeStart(); }, 45_000);
   }
 
   override onunload(): void {

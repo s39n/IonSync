@@ -95,7 +95,10 @@ export class XNotify {
     menu.addSeparator();
     menu.addItem((i) =>
       i.setTitle(paused ? "Resume Sync" : "Pause Sync").setIcon(paused ? "play" : "pause")
-        .onClick(async () => { plugin.settings.syncEnabled = !paused; await plugin.saveSettings(); })
+        // Toggle: new state is the opposite of current. `paused` already is the
+        // opposite of syncEnabled, so assign it directly. (Was `!paused`, which
+        // re-set syncEnabled to its current value — a no-op, so Pause did nothing.)
+        .onClick(async () => { plugin.settings.syncEnabled = paused; await plugin.saveSettings(); })
     );
     menu.addItem((i) =>
       i.setTitle(autoSync ? "Disable Auto-Sync" : "Enable Auto-Sync").setIcon("refresh-cw")
