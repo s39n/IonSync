@@ -402,7 +402,9 @@ export class XSync {
         return;
       }
       try {
-        const plainBytes = await decryptFromBase64(key, content);
+        // `key` above only guards that E2EE is configured; decrypt derives the
+        // version-correct key from the password (handles legacy v1 blobs too).
+        const plainBytes = await decryptFromBase64(content, this.plugin.getEncryptionPassword());
         // Re-encode as plain base64 so the existing write path handles it normally.
         content = Utils.toBase64(new Uint8Array(plainBytes));
       } catch (e) {

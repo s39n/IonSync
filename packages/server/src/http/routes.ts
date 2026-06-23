@@ -1,36 +1,20 @@
 import express, { type Request, type Response } from "express";
 import fs from "node:fs";
 import path from "node:path";
-import nodeCrypto from "node:crypto";
 import archiver from "archiver";
 import type { SyncContext } from "../context.js";
 import { sha256 } from "../crypto.js";
+import { isE2eeEncrypted, makeE2eeDecryptor } from "../e2ee.js";
 import { diff_match_patch } from "diff-match-patch";
 import type { BackgroundSyncReq } from "@ionsync/protocol";
 import { verifyTOTP, generateSecret, totpUri, createPendingToken, consumePendingToken,
   generateRecoveryCodes, formatRecoveryCode, normalizeRecoveryCode, hashRecoveryCode } from "../totp.js";
 import { pushActivity } from "../context.js";
 
-// ── E2EE helpers (mirrors Crypto.ts in the plugin) ───────────────────────────
-// Same algorithm: PBKDF2-SHA256 / 100k iterations / fixed salt → AES-256-GCM.
-// Wire format: MAGIC[8] + IV[12] + ciphertext+tag[N]  (tag = last 16 bytes).
-
-const _E2EE_MAGIC_SERVER = Buffer.from([0x49, 0x4f, 0x4e, 0x45, 0x4e, 0x43, 0x76, 0x31]);
-const _E2EE_PBKDF2_SALT  = Buffer.from("IonSync-AES-GCM-v1-salt");
-
-function _deriveE2eeKey(password: string): Buffer {
-  return nodeCrypto.pbkdf2Sync(password, _E2EE_PBKDF2_SALT, 100_000, 32, "sha256");
-}
-
-function _decryptE2ee(key: Buffer, buf: Buffer): Buffer {
-  // buf = MAGIC[8] + IV[12] + ciphertext[N-16] + authTag[16]
-  const iv         = buf.slice(8, 20);
-  const tag        = buf.slice(buf.length - 16);
-  const ciphertext = buf.slice(20, buf.length - 16);
-  const decipher   = nodeCrypto.createDecipheriv("aes-256-gcm", key, iv);
-  decipher.setAuthTag(tag);
-  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-}
+// E2EE helpers live in ../e2ee.js (shared, version-aware). The dashboard
+// export/preview routes use makeE2eeDecryptor(password), which derives one key
+// per format version and caches it, so a bulk export pays PBKDF2 once per
+// version rather than once per file.
 
 // ── 1. PUBLIC ROUTER (Exposed to the Tunnel) ────────────────────────────────
 
@@ -286,10 +270,9 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
 
     if (!buf) { res.status(404).json({ error: "File not found" }); return; }
 
-    // Detect E2EE magic ("IONENCv1") so the dashboard can show the lock icon
+    // Detect E2EE magic ("IONENCv<N>") so the dashboard can show the lock icon
     // and prompt for the passphrase without having to re-implement detection JS.
-    const E2EE_MAGIC = Buffer.from([0x49, 0x4f, 0x4e, 0x45, 0x4e, 0x43, 0x76, 0x31]);
-    const encrypted = buf.length >= E2EE_MAGIC.length && buf.slice(0, E2EE_MAGIC.length).equals(E2EE_MAGIC);
+    const encrypted = isE2eeEncrypted(buf);
 
     res.json({ content: buf.toString("base64"), encrypted, size: buf.length, mtime: resolvedMtime });
   });
@@ -504,15 +487,8 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     // Optional E2EE password — if provided, encrypted files are decrypted on
     // the fly before being added to the ZIP so the export is plaintext.
     const e2eePw = String(req.headers["x-e2ee-password"] ?? "").trim();
-    let e2eeKey: Buffer | null = null;
-    if (e2eePw) {
-      try {
-        e2eeKey = _deriveE2eeKey(e2eePw);
-        console.log("[export] E2EE key derived — files will be decrypted in ZIP");
-      } catch (err) {
-        console.error("[export] Failed to derive E2EE key:", err);
-      }
-    }
+    const decryptE2ee = e2eePw ? makeE2eeDecryptor(e2eePw) : null;
+    if (decryptE2ee) console.log("[export] E2EE password supplied — files will be decrypted in ZIP");
 
     const snapFiles = ctx.db.getSnapshotFiles(asOfMs);
     const dateLabel = new Date(asOfMs).toISOString().slice(0, 10);
@@ -540,12 +516,11 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
         continue;
       }
 
-      const isEncrypted = buf.length > 20 && buf.slice(0, 8).equals(_E2EE_MAGIC_SERVER);
       let finalBuf = buf;
 
-      if (isEncrypted && e2eeKey) {
+      if (isE2eeEncrypted(buf) && decryptE2ee) {
         try {
-          finalBuf = _decryptE2ee(e2eeKey, buf);
+          finalBuf = decryptE2ee(buf);
           console.log(`[export] decrypted "${filePath}" (${buf.length} → ${finalBuf.length} bytes)`);
         } catch {
           console.warn(`[export] decryption failed for "${filePath}" — wrong key? Including encrypted.`);
@@ -570,10 +545,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     }
 
     const e2eePw = String(req.headers["x-e2ee-password"] ?? "").trim();
-    let e2eeKey: Buffer | null = null;
-    if (e2eePw) {
-      try { e2eeKey = _deriveE2eeKey(e2eePw); } catch {}
-    }
+    const decryptE2ee = e2eePw ? makeE2eeDecryptor(e2eePw) : null;
 
     const timestamp = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "-");
     res.setHeader("Content-Type", "application/zip");
@@ -589,10 +561,9 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
         console.warn(`[export-selected] skipping "${filePath}" — no stored version`);
         continue;
       }
-      const isEncrypted = buf.length > 20 && buf.slice(0, 8).equals(_E2EE_MAGIC_SERVER);
       let finalBuf = buf;
-      if (isEncrypted && e2eeKey) {
-        try { finalBuf = _decryptE2ee(e2eeKey, buf); } catch {}
+      if (isE2eeEncrypted(buf) && decryptE2ee) {
+        try { finalBuf = decryptE2ee(buf); } catch {}
       }
       archive.append(finalBuf, { name: filePath });
     }

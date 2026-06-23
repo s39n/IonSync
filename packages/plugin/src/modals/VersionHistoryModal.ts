@@ -149,6 +149,8 @@ export class VersionHistoryModal extends Modal {
     if (!content) throw new Error("Server returned empty content for this version.");
 
     if (isEncryptedBase64(content)) {
+      // getE2eeKey() only confirms E2EE is configured; decrypt derives the
+      // version-correct key from the password (handles legacy v1 blobs too).
       const key = await this.plugin.xSync.getE2eeKey();
       if (!key) {
         throw new Error(
@@ -156,7 +158,7 @@ export class VersionHistoryModal extends Modal {
           "Enable encryption and enter your vault key to preview encrypted files."
         );
       }
-      const plainBuf = await decryptFromBase64(key, content);
+      const plainBuf = await decryptFromBase64(content, this.plugin.getEncryptionPassword());
       return new TextDecoder().decode(plainBuf);
     }
 

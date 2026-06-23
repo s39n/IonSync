@@ -3,11 +3,8 @@ import type { SyncContext } from "../../context.js";
 import { pushActivity } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 import { broadcastToPeers, checkSyncDone } from "./sync.js";
+import { isE2eeEncrypted } from "../../e2ee.js";
 import crypto from "node:crypto";
-
-// Magic header written by the plugin's Crypto.ts when E2EE is enabled.
-// Matches the first 8 bytes of the binary payload (MAGIC = "IONENCv1").
-const E2EE_MAGIC = Buffer.from([0x49, 0x4f, 0x4e, 0x45, 0x4e, 0x43, 0x76, 0x31]);
 
 /**
  * Decide whether an upload fast-forwards the server head or is a concurrent
@@ -85,11 +82,11 @@ export function handleFileUpload(
   if (file.action === "active" && file.fileType === "file" && content) {
     const buf = Buffer.from(content, "base64");
 
-    // Detect E2EE: the plugin prepends an 8-byte magic header ("IONENCv1")
+    // Detect E2EE: the plugin prepends an 8-byte magic header ("IONENCv<N>")
     // to every encrypted payload.  When present the SHA1 in the file entry
     // is of the *plaintext* (not the ciphertext), so we must skip the SHA1
     // check -- the server can't verify content it cannot decrypt.
-    isE2EE = buf.length >= E2EE_MAGIC.length && buf.slice(0, E2EE_MAGIC.length).equals(E2EE_MAGIC);
+    isE2EE = isE2eeEncrypted(buf);
 
     // 1. Check size limit
     const limitBytes = ctx.config.maxFileSizeMb * 1024 * 1024;
@@ -285,7 +282,7 @@ function purgeUnencryptedVersions(ctx: SyncContext, filePath: string, currentMti
     if (mtime >= currentMtime) continue; // keep current version and anything newer
     const buf = ctx.storage.readVersion(filePath, mtime);
     if (!buf) continue;
-    const isEncrypted = buf.length >= E2EE_MAGIC.length && buf.slice(0, E2EE_MAGIC.length).equals(E2EE_MAGIC);
+    const isEncrypted = isE2eeEncrypted(buf);
     if (!isEncrypted) {
       ctx.storage.deleteVersion(filePath, mtime);
       ctx.db.deleteVersionRecord(filePath, mtime);

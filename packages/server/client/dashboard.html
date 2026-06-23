@@ -2071,13 +2071,7 @@ async function _loadFileText(filePath) {
     const savedPw = sessionStorage.getItem('e2ee-pw') || '';
     if (savedPw && crypto?.subtle) {
       try {
-        const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(savedPw), 'PBKDF2', false, ['deriveKey']);
-        const key = await crypto.subtle.deriveKey(
-          { name: 'PBKDF2', salt: E2EE_PBKDF2_SALT, iterations: 100_000, hash: 'SHA-256' },
-          km, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
-        );
-        const raw = Uint8Array.from(atob(data.content), c => c.charCodeAt(0));
-        const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.slice(8, 20) }, key, raw.slice(20));
+        const plain = await e2eeDecryptB64(data.content, savedPw);
         return new TextDecoder('utf-8', { fatal: true }).decode(plain);
       } catch { /* fall through to locked message */ }
     }
@@ -2142,19 +2136,58 @@ tryRestoreSession();
 // ── File preview + E2EE client-side decryption ────────────────────────────
 //
 // The plugin encrypts files as:  base64( MAGIC[8] + IV[12] + AES-GCM-ct )
-// where MAGIC = "IONENCv1" (0x49 0x4F 0x4E 0x45 0x4E 0x43 0x76 0x31).
+// where MAGIC = "IONENCv<N>" and N is the format version digit.
 //
 // The server's /api/file-content endpoint tells us whether the stored file
 // is encrypted via the `encrypted` flag in the JSON response, so we don't
 // have to detect the magic ourselves here.
 //
-// Decryption mirrors Crypto.ts exactly:
-//   key  = PBKDF2-SHA256(password, salt="IonSync-AES-GCM-v1-salt", 100 000 iter)
+// Decryption mirrors Crypto.ts exactly (see e2eeDecryptB64 below):
+//   version = magic byte 7 - '0'  (v1 -> 100k iters, v2 -> 600k iters)
+//   key  = PBKDF2-SHA256(password, salt="IonSync-AES-GCM-v1-salt", iters)
 //   iv   = bytes[8..19]   (12 bytes after the magic)
 //   ct   = bytes[20..]
 //   text = AES-GCM-decrypt(key, iv, ct)
 
 const E2EE_PBKDF2_SALT = new TextEncoder().encode('IonSync-AES-GCM-v1-salt');
+
+// Iteration count is pinned to the format version stamped in the magic header
+// ("IONENCv<N>"), so files written by any plugin build stay decryptable:
+//   v1 -> 100 000 iterations (legacy)   v2 -> 600 000 iterations (current)
+const E2EE_ITERATIONS_BY_VERSION = { 1: 100_000, 2: 600_000 };
+const _e2eeKeyCache = new Map(); // `${version}\0${pw}` -> CryptoKey
+
+// Reads the version digit from the 8-byte magic prefix "IONENCv", or null.
+function e2eeReadVersion(bytes) {
+  const PFX = [0x49, 0x4f, 0x4e, 0x45, 0x4e, 0x43, 0x76];
+  if (bytes.length < 8) return null;
+  for (let i = 0; i < PFX.length; i++) if (bytes[i] !== PFX[i]) return null;
+  return bytes[PFX.length] - 0x30;
+}
+
+async function e2eeDeriveKey(pw, version) {
+  const iters = E2EE_ITERATIONS_BY_VERSION[version];
+  if (!iters) throw new Error('Unsupported E2EE format version ' + version);
+  const ck = version + '\0' + pw;
+  if (_e2eeKeyCache.has(ck)) return _e2eeKeyCache.get(ck);
+  const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: E2EE_PBKDF2_SALT, iterations: iters, hash: 'SHA-256' },
+    km, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
+  );
+  _e2eeKeyCache.set(ck, key);
+  return key;
+}
+
+// Decrypts a base64 blob, deriving the version-correct key from the magic.
+async function e2eeDecryptB64(b64, pw) {
+  const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const version = e2eeReadVersion(raw);
+  if (version === null) throw new Error('Not an IonSync encrypted blob');
+  const key = await e2eeDeriveKey(pw, version);
+  return crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.slice(8, 20) }, key, raw.slice(20));
+}
+
 let previewCurrentPath = '';
 let previewCurrentB64 = '';   // raw base64 from server (may be encrypted)
 let previewIsEncrypted = false;
@@ -2245,24 +2278,8 @@ async function decryptPreview() {
   errEl.textContent = '';
 
   try {
-    const keyMaterial = await crypto.subtle.importKey(
-      'raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveKey']
-    );
-    const key = await crypto.subtle.deriveKey(
-      { name: 'PBKDF2', salt: E2EE_PBKDF2_SALT, iterations: 100_000, hash: 'SHA-256' },
-      keyMaterial,
-      { name: 'AES-GCM', length: 256 },
-      false,
-      ['decrypt']
-    );
-
-    // Decode the stored base64 blob
-    const raw = Uint8Array.from(atob(previewCurrentB64), c => c.charCodeAt(0));
-    // Layout: MAGIC[8] + IV[12] + ciphertext[N]
-    const iv = raw.slice(8, 20);
-    const ciphertext = raw.slice(20);
-
-    const plainBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+    // Derives the version-correct key from the blob's magic (handles v1 + v2).
+    const plainBuf = await e2eeDecryptB64(previewCurrentB64, pw);
 
     let text;
     try {
