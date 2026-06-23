@@ -1078,7 +1078,10 @@ export class XSync {
   }
 
   private _onDisconnected(): void {
-    this.xNotify.notifyStatus(NotifyType.CONNECTION_LOST);
+    // Distinguish a deliberate pause from a dropped connection.
+    this.xNotify.notifyStatus(
+      this.plugin.settings.syncEnabled ? NotifyType.CONNECTION_LOST : NotifyType.PLUGIN_DISABLED
+    );
     this.isSyncing = false;
     this.releaseWakeLock();
   }

@@ -128,6 +128,18 @@ export class IonSyncSettingsTab extends PluginSettingTab {
         );
     };
 
+    new Setting(containerEl)
+      .setName("Keep settings local to this device")
+      .setDesc(
+        "Per-device profile: don't sync any Obsidian settings (.obsidian config) on this device — " +
+        "appearance, hotkeys, plugins, layout, etc. stay local. Notes still sync. " +
+        "Overrides the individual config toggles below."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.keepConfigLocal)
+          .onChange(async (v) => { this.plugin.settings.keepConfigLocal = v; await this.plugin.saveSettings(); })
+      );
+
     toggleSetting("Hidden files", "Files/folders starting with '.'", "syncHiddenFiles");
     toggleSetting("Trash (.trash)", "Obsidian trash folder", "syncTrash");
     toggleSetting("Images", "png, jpg, gif, etc.", "syncImages");

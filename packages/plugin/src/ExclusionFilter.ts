@@ -33,6 +33,11 @@ export class ExclusionFilter {
     //    that must not bleed across devices regardless of any toggle.
     if (path.startsWith(`${this.configDir}/plugins/ion-sync/`)) return true;
 
+    // 3. PER-DEVICE PROFILE: keep all Obsidian config local to this device.
+    //    Overrides every individual config toggle below — nothing under the
+    //    config folder is uploaded or applied. Notes still sync.
+    if (this.settings.keepConfigLocal && path.startsWith(`${this.configDir}/`)) return true;
+
     // Obsidian trash folder
     if (this.isTrashPath(path) && !this.settings.syncTrash) return true;
 

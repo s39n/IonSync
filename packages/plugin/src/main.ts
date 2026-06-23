@@ -30,6 +30,13 @@ export interface PluginSettings {
   syncCorePluginSettings: boolean;
   syncActiveCommunityPlugins: boolean;
   syncInstalledCommunityPlugins: boolean;
+  /**
+   * Per-device master switch: when true, this device keeps ALL Obsidian config
+   * (.obsidian/**) local — nothing under the config folder is uploaded or
+   * applied, so appearance, hotkeys, plugins, layout, etc. stay device-specific.
+   * Notes still sync normally. Overrides the individual config toggles above.
+   */
+  keepConfigLocal: boolean;
   exclusionList: string;
   /**
    * Files strictly larger than this value (in MB) are silently skipped during
@@ -98,6 +105,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
   syncCorePluginSettings: false,
   syncActiveCommunityPlugins: false,
   syncInstalledCommunityPlugins: false,
+  keepConfigLocal: false,
   exclusionList: "",
   maxFileSizeMB: 25,
   encryptionEnabled: false,
@@ -112,6 +120,8 @@ export class IonSyncPlugin extends Plugin {
   // Obsidian 1.13+ typings declare `Plugin.settings?: unknown` — narrow it here.
   override settings!: PluginSettings;
   xSync!: XSync;
+  /** Safety timer for the deferred (post-indexing) startup. */
+  private _startTimer: number | null = null;
 
   override async onload(): Promise<void> {
     await this.loadSettings();
@@ -144,11 +154,24 @@ export class IonSyncPlugin extends Plugin {
     this.addSettingTab(new IonSyncSettingsTab(this.app, this));
 
     this.app.workspace.onLayoutReady(() => {
-      void this.xSync.enabled(true);
+      // Defer the first connect/sync until the vault's initial indexing settles,
+      // so the plugin doesn't compete with Obsidian's indexer (which crawls slow
+      // devices) and the first reconcile sees a fully-loaded file list. Start on
+      // the metadataCache "resolved" event, or after a safety timeout.
+      let started = false;
+      const start = () => {
+        if (started) return;
+        started = true;
+        if (this._startTimer !== null) { window.clearTimeout(this._startTimer); this._startTimer = null; }
+        void this.xSync.enabled(true);
+      };
+      this.registerEvent(this.app.metadataCache.on("resolved", start));
+      this._startTimer = window.setTimeout(start, 10_000);
     });
   }
 
   override onunload(): void {
+    if (this._startTimer !== null) { window.clearTimeout(this._startTimer); this._startTimer = null; }
     this.xSync?.destroy();
   }
 
@@ -172,7 +195,8 @@ export class IonSyncPlugin extends Plugin {
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
     if (this.xSync) {
-      this.xSync.ws.isEnabled = this.settings.syncEnabled;
+      // Connect/disconnect immediately so Pause/Resume actually takes effect.
+      this.xSync.ws.setEnabled(this.settings.syncEnabled);
     }
   }
 

@@ -88,6 +88,18 @@ export class WsManager {
     }
   }
 
+  /**
+   * Enable or disable syncing and act on it immediately. Previously Pause only
+   * flipped `isEnabled`, which left an already-open socket connected and syncing
+   * — so pausing did nothing visible. Now it connects/disconnects right away.
+   */
+  setEnabled(enabled: boolean): void {
+    if (this.isEnabled === enabled) return;
+    this.isEnabled = enabled;
+    if (enabled) this.connect();
+    else this.disconnect();
+  }
+
   connect(): void {
     if (!this.isEnabled) return;
     if (!this.plugin.getPassword()) {
