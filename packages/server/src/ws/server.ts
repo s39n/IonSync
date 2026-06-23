@@ -11,6 +11,7 @@ import { handleFileEvent } from "./handlers/fileEvent.js";
 import { handleFileUpload, handleFileDownload } from "./handlers/fileData.js";
 import { handleFileHistory } from "./handlers/fileHistory.js";
 import { handleVersionCheck } from "./handlers/versionCheck.js";
+import { ConnectionRateLimiter } from "./rateLimit.js";
 import type { IncomingMessage } from "node:http";
 import { diff_match_patch } from "diff-match-patch"; // ✅ Phase 2 Import
 
@@ -21,8 +22,10 @@ export function attachWebSocketServer(
   const wss = new WebSocketServer({ server: httpServer, maxPayload: 50 * 1024 * 1024 });
 
   const isAlive = new WeakMap<WebSocket, boolean>();
+  const rateLimiter = new ConnectionRateLimiter();
 
   const pingInterval = setInterval(() => {
+    rateLimiter.sweep();
     for (const ws of wss.clients) {
       if (isAlive.get(ws) === false) {
         ws.terminate();
@@ -34,7 +37,19 @@ export function attachWebSocketServer(
   }, 30_000);
   wss.on("close", () => clearInterval(pingInterval));
 
-  wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
+  wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
+    const ip = req.socket.remoteAddress ?? "unknown";
+
+    // Per-IP connection cap: refuse (and immediately close) connections from an
+    // IP that is flooding or has been blocked for repeated auth failures. We
+    // close rather than leave the socket open so a flooding client cannot hold
+    // file descriptors / memory.
+    if (!rateLimiter.allowConnection(ip)) {
+      pushLog(ctx, `[ratelimit] refused connection from ${ip}`);
+      ws.close(1013, "Rate limited"); // 1013 = Try Again Later
+      return;
+    }
+
     const peerId = uuidv4();
     const nonce = uuidv4();
     const peer = createPeer(peerId, nonce, ws);
@@ -67,6 +82,10 @@ export function attachWebSocketServer(
           handleAuth(ctx, peer, msg);
           if (peer.authed) {
             pushActivity(ctx, { kind: "connect", deviceId: peer.deviceId ?? undefined, detail: peer.id });
+          } else {
+            // Wrong password: count it toward the per-IP brute-force budget so a
+            // guessing client gets blocked well before exhausting the keyspace.
+            rateLimiter.recordAuthFailure(ip);
           }
         } else {
           peer.disconnect("Not authenticated");
@@ -93,8 +112,8 @@ export function attachWebSocketServer(
           break;
         case "file_data": {
           // ✅ This is the line that was missing! It defines rawMsg so the rest of the block can use it.
-          const rawMsg = msg as any; 
-          
+          const rawMsg = msg as any;
+
           if (rawMsg.mode === "patch") {
             // Conflict pre-check: a delta patch is only meaningful against the
             // base it was diffed from. If the server head has moved past the
@@ -116,7 +135,7 @@ export function attachWebSocketServer(
             }
             try {
               console.log(`[Delta Patch] Stitching update for: ${rawMsg.file.path}`);
-              
+
               // 1. Read current server file (latest stored version)
               const currentBuffer = ctx.storage.readLatest(rawMsg.file.path);
               const currentText = currentBuffer ? currentBuffer.toString("utf-8") : "";
@@ -135,10 +154,10 @@ export function attachWebSocketServer(
             } catch (err) {
               pushLog(ctx, `[Delta] Failed to patch ${rawMsg.file?.path}: ${err}`);
             }
-          } 
+          }
           else if (rawMsg.mode === "apply") {
             handleFileUpload(ctx, peer, rawMsg);
-          } 
+          }
           else {
             handleFileDownload(ctx, peer, rawMsg);
           }
