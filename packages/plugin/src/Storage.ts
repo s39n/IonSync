@@ -13,7 +13,7 @@ import type { PluginSettings } from "./main.js";
  * full-file rewrite). Re-test on desktop + mobile when enabling: IndexedDB is
  * a different durability surface (see IndexStore).
  */
-const USE_INDEXEDDB = false;
+const USE_INDEXEDDB = true;
 
 /**
  * Manages local file metadata, vault I/O, Delta-Sync Shadow Copies,
@@ -433,7 +433,7 @@ export class Storage {
 
   async readBinary(path: string): Promise<ArrayBuffer | null> { return this.fsVault.readBinary(path); }
 
-  async write(path: string, content: string, entry: FileEntry): Promise<void> {
+  async write(path: string, content: string, entry: FileEntry, withShadow = true): Promise<void> {
     await this.ensureParentDir(path); // ✅ Call the guard before writing
 
     const text = new TextDecoder("utf-8").decode(Utils.fromBase64(content));
@@ -447,7 +447,11 @@ export class Storage {
     const stat = await this.app.vault.adapter.stat(path);
     const metaEntry = stat ? { ...entry, mtime: stat.mtime } : entry;
     await this.writeMetadata(metaEntry);
-    await this.writeShadow(path, text);
+    // Shadow copies are only needed for delta UPLOADS. Skipping them on the
+    // download/apply path saves an extra write per file — a real cost on
+    // obsidian-web where every write is an HTTP round-trip. The shadow is
+    // recreated lazily on the first local edit (which just sends a full file).
+    if (withShadow) await this.writeShadow(path, text);
   }
 
   async writeBinary(path: string, content: string, entry: FileEntry): Promise<void> {

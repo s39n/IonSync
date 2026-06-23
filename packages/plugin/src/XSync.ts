@@ -180,6 +180,7 @@ export class XSync {
     void this.storage.flushMetadata();
     this.storage.abortTree();
     this.storage.tree = {};
+    this.storage.close(); // close IndexedDB connection (no-op on the json path)
     this.xTimeouts.clear();
     this._recentlyApplied.clear();
     if (this.configCheckInterval !== null) {
@@ -510,7 +511,7 @@ export class XSync {
             // in _processLocalEvent and suppressed (prevents spurious re-uploads).
             this._applyingPaths.add(file.path);
             if (Utils.isBinary(file.path)) await this.storage.writeBinary(file.path, content, file);
-            else await this.storage.write(file.path, content, file);
+            else await this.storage.write(file.path, content, file, /* withShadow */ false);
             writeErr = null;
             break;
           } catch (e) {
@@ -1083,6 +1084,13 @@ export class XSync {
       this.plugin.settings.syncEnabled ? NotifyType.CONNECTION_LOST : NotifyType.PLUGIN_DISABLED
     );
     this.isSyncing = false;
+    this._inCursorSession = false;
+    // Drop any buffered server messages (e.g. a large bootstrap backlog). Without
+    // this, a pause/disconnect keeps grinding through every already-received
+    // file_push — applying files and resetting the status to "Syncing" — even
+    // though the socket is closed. The cursor resumes from its last checkpoint on
+    // reconnect, so nothing is lost.
+    this.messageQueue = [];
     this.releaseWakeLock();
   }
 

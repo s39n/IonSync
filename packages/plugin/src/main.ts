@@ -2,6 +2,11 @@ import { Plugin } from "obsidian";
 import { XSync } from "./XSync.js";
 import { IonSyncSettingsTab } from "./SettingsTab.js";
 
+// Stamped by the esbuild post-build plugin — lets you confirm in the dev console
+// (Ctrl+Shift+I) which build is actually running after a rebuild/redeploy.
+declare const __IONSYNC_BUILD__: string;
+const BUILD = typeof __IONSYNC_BUILD__ !== "undefined" ? __IONSYNC_BUILD__ : "dev";
+
 // ---------- Settings ----------
 
 export interface PluginSettings {
@@ -124,6 +129,7 @@ export class IonSyncPlugin extends Plugin {
   private _startTimer: number | null = null;
 
   override async onload(): Promise<void> {
+    console.log(`[IonSync] plugin loaded — build ${BUILD}`);
     await this.loadSettings();
 
     if (!this.settings.deviceId) {
