@@ -524,3 +524,78 @@ docker run --rm -v ${PWD}:/repo:ro node:20-alpine sh /repo/run-tests-docker.sh
 1. Add a new entry to the `MIGRATIONS` array in `packages/server/src/db/migrations.ts` with the next version number.
 2. Add any new query methods to `SyncDB` in `packages/server/src/db/index.ts`.
 3. **Never edit existing migration entries** — they are applied exactly once in production.
+
+---
+
+## Security model
+
+### Auth token comparison (`src/ws/handlers/auth.ts`)
+
+The auth token is compared with `crypto.timingSafeEqual` (length-guarded), never
+`===`/`!==`. A short-circuiting string compare leaks, via response timing, how
+many leading characters matched, which allows byte-by-byte token recovery. The
+length check both satisfies `timingSafeEqual`'s equal-length requirement and
+rejects malformed tokens. Do not "simplify" this back to `!==`.
+
+### WebSocket rate limiting (`src/ws/rateLimit.ts`)
+
+`ConnectionRateLimiter` is per-IP and in-memory. It caps connection attempts per
+window and counts failed auths; exceeding either blocks the IP for a backoff
+period before the challenge is even sent. Wired in `server.ts`: `allowConnection`
+gates each `connection`, `recordAuthFailure` is called when `handleAuth` leaves
+the peer unauthed, and `sweep()` runs on the 30s ping interval. Defaults:
+60 conn/min, 10 auth-fails, 5-min block. This is a mitigation, not a substitute
+for a reverse-proxy/WAF rate limit. Keep the limits generous enough that the
+test suite's localhost reconnects don't trip them.
+
+### E2EE format versioning (`plugin/src/Crypto.ts`, `server/src/e2ee.ts`, `dashboard.html`)
+
+Encrypted blobs are `base64( MAGIC[8] + IV[12] + AES-256-GCM-ct )` where
+`MAGIC = "IONENCv<N>"` and `N` is the **format version digit**. PBKDF2-SHA256
+iterations are pinned per version: **v1 = 100 000 (legacy), v2 = 600 000
+(current, `WRITE_VERSION`)**. New content is always written at `WRITE_VERSION`;
+decryption reads the blob's own version and derives the matching key, so legacy
+v1 vaults stay readable.
+
+**CRITICAL — never bump the iteration count in place.** The key is re-derived on
+every decrypt, so changing iterations for an existing version makes all prior
+ciphertext permanently undecryptable. To raise the cost, add a new version entry
+and bump `WRITE_VERSION`; leave older versions' iteration counts untouched.
+
+Detection keys on the **fixed first 7 bytes `"IONENCv"`** (only the 8th byte
+changes), so the base64 fast-path prefix `"SU9ORU5D"` and the server's
+upload/export detection remain valid across versions. Server-side detection and
+decryption live in the shared `server/src/e2ee.ts` (`isE2eeEncrypted`,
+`e2eeVersion`, `makeE2eeDecryptor` — which caches one derived key per version so
+bulk export pays PBKDF2 once per version, not per file). Key derivation in the
+plugin (`deriveKey(password, version?)`) and dashboard (`e2eeDeriveKey`) is
+likewise cached per `(version, password)`.
+
+Security tests (no sqlite dependency, run under `npm test`):
+`packages/server/test/security.test.ts`.
+
+---
+
+## Working via the Cowork / AI-agent sandbox
+
+If you are an AI agent editing this repo through Cowork's Linux sandbox, the
+sandbox mounts the Windows working tree over a network filesystem that **caches
+stale file size/inode after a tool writes a file**:
+
+- A file that **grew** reads back **truncated** at the old length (parser sees
+  "unterminated" / "'}' expected"); a file that **shrank** reads back
+  **NUL-padded** ("Invalid character").
+- `git status` may **miss** these edits (stale `lstat`), and `git add` can then
+  **commit truncated content**. `git hash-object <f>` vs `git rev-parse HEAD:<f>`
+  reveals the real diff.
+- `better-sqlite3`'s `better_sqlite3.node` in `node_modules` is the **Windows**
+  build — it fails with `invalid ELF header` in the Linux sandbox, so the
+  sqlite-backed tests cannot run there. **Do not** `npm rebuild` it in the shared
+  `node_modules` (that breaks native Windows runs).
+
+**Fix: run git, build, typecheck, and tests through Desktop Commander
+(PowerShell on Windows), which reads the real files** — not the sandbox mount.
+Use the Linux bash only for quick scratch. If you must refresh a stale read
+without Windows tooling, write the corrected content to a **new path** then `mv`
+it over the original (a new inode forces a re-read); for NUL-padded files,
+`tr -d '\000'` also works.
