@@ -20,6 +20,11 @@ packages/server/config.js
 # Server runtime data
 packages/server/data/
 
+# Generated script output / build logs / temp artifacts
+*_results.txt
+docker-build-output.txt
+_tmp_*
+
 # Docker env file (contains password)
 .env
 
