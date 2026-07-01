@@ -28,6 +28,10 @@ export default {
   password: process.env.IONSYNC_PASSWORD,
   port:     Number(process.env.IONSYNC_PORT     ?? 3000),
   host:     process.env.IONSYNC_HOST            ?? "0.0.0.0",
+  // Inside a container the admin server must bind 0.0.0.0 to be reachable via
+  // the published port; exposure is controlled by the compose port mapping.
+  adminHost: process.env.IONSYNC_ADMIN_HOST     ?? "0.0.0.0",
+  adminPort: Number(process.env.IONSYNC_ADMIN_PORT ?? 3001),
   appDir:   "/app",
   dataDir:  "/data",
   cleanup: {

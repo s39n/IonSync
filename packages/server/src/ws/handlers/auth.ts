@@ -19,11 +19,40 @@ function tokensMatch(received: string, expected: string): boolean {
   return timingSafeEqual(a, b);
 }
 
+/**
+ * Device IDs are plugin-generated UUIDs (but historically free-form). They
+ * flow into settings keys, log lines, dashboard HTML, and — truncated — into
+ * "(Conflicted Copy … <id>)" file paths, so an attacker-chosen string must not
+ * be able to smuggle path separators, dots, or markup. Allow only a
+ * conservative identifier charset.
+ */
+const DEVICE_ID_RE = /^[0-9A-Za-z_-]{1,64}$/;
+
+/**
+ * Display names are user-typed: drop control characters (codepoints < 0x20 and
+ * DEL), then cap the length. Rendered into dashboard HTML (escaped there too —
+ * defence in depth).
+ */
+function sanitizeDeviceName(name: string): string {
+  let out = "";
+  for (const ch of name) {
+    const c = ch.codePointAt(0) ?? 0;
+    if (c >= 32 && c !== 127) out += ch;
+  }
+  return out.trim().slice(0, 64);
+}
+
 export function handleAuth(ctx: SyncContext, peer: SyncPeer, msg: AuthMsg): void {
   const want = expectedToken(peer.nonce, ctx.config.password);
 
   if (!tokensMatch(msg.token ?? "", want)) {
     peer.send({ type: "auth_error", message: "Invalid credentials" });
+    peer.disconnect("Auth failed");
+    return;
+  }
+
+  if (typeof msg.deviceId !== "string" || !DEVICE_ID_RE.test(msg.deviceId)) {
+    peer.send({ type: "auth_error", message: "Invalid device ID" });
     peer.disconnect("Auth failed");
     return;
   }
@@ -36,7 +65,8 @@ export function handleAuth(ctx: SyncContext, peer: SyncPeer, msg: AuthMsg): void
 
   // Persist the device name if the plugin sent one
   if (msg.deviceName) {
-    ctx.db.setDeviceName(msg.deviceId, msg.deviceName);
+    const clean = sanitizeDeviceName(msg.deviceName);
+    if (clean) ctx.db.setDeviceName(msg.deviceId, clean);
   }
 
   peer.send({ type: "auth_ok" });
