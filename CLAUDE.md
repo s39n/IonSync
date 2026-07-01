@@ -194,6 +194,12 @@ Schema (migration v1):
 - `files(path TEXT PK, sha1, mtime, received_at, action, file_type)` — current state of each file
 - `file_versions(id AUTOINCREMENT, path, sha1, mtime, received_at)` — append-only version log
 
+Later migrations: v2 `settings(key,value)`; v3 `files.seq` (cursor sync); **v4
+`files.renamed_to`** — set on a tombstone created by a rename so `decideUpload`
+can tell a renamed-away path from a plain delete (structural conflicts). Read it
+via `getRenameTarget(path)`; `renameOneInternal` stamps it and clears it on the
+destination.
+
 **Rules:**
 - `upsertFile(entry)` always inserts into `file_versions` too — never bypass it to add a version row.
 - Never edit past migrations. Add a new `version: N+1` entry to `MIGRATIONS` array.
@@ -378,10 +384,17 @@ Server → Client: { type: "auth_ok" }  |  { type: "auth_error", message: "..." 
 
 ```
 Client → Server: { type: "version_check", version: "2.0.0", build: "1700000000000" }
-Server → Client: { type: "version_check_response", needsUpdate: false }
-             or: { type: "version_check_response", needsUpdate: true,
+Server → Client: { type: "version_check_response", needsUpdate: false, caps: ["file_rename"] }
+             or: { type: "version_check_response", needsUpdate: true, caps: ["file_rename"],
                    files: { "main.js": "<base64>", "styles.css": "<base64>", "manifest.json": "<base64>" } }
 ```
+
+`caps` advertises server capability tokens (defined as `SERVER_CAPS` in
+`handlers/versionCheck.ts`). It lets a new plugin feature-detect without a
+version-number handshake. **Absent on old servers → the plugin must assume the
+capability is unavailable and fall back.** `WsManager` stores `serverCaps` and
+clears it on disconnect (so a reconnect to an older server can't inherit a stale
+capability). Currently the only token is `"file_rename"` (see Rename below).
 
 ### Sync (bulk)
 
@@ -421,6 +434,27 @@ Client → Server: { type: "file_history", path: "notes/foo.md" }
 Server → Client: { type: "file_history_response", path, versions: VersionEntry[] }
 ```
 
+### Rename (atomic)
+
+```
+Client → Server: { type: "file_rename", from, to, sha1, mtime, baseSha1?, fileType }
+```
+
+Sent **only when the server advertises the `"file_rename"` cap** (else the plugin
+falls back to the legacy delete(from)+create(to) — an old server's WS switch has
+`default: break` and would silently drop an unknown message, losing the move).
+The plugin sends it for **file** moves; folder moves still use the legacy path.
+No content field: the server relinks the bytes it already holds, or pulls the new
+content when needed. `baseSha1` is the sha1 the client last synced for `from` —
+it drives structural-conflict detection (see below). Handled by `handlers/rename.ts`:
+
+- **Pure move** (`sha1 == from head`, base matches) → `renameFilePath` relinks
+  history + storage, tombstones `from`; server pushes delete(from)+push(to) to peers.
+- **Rename + unsynced edit** (`sha1 != from head`, base matches) → relink, then
+  `file_event_result{ path: to, result: "client_newer" }` pulls the new content.
+- **Structural conflict** (`baseSha1 != from head` — `from` was edited concurrently)
+  → see Conflict resolution below.
+
 ### Conflict resolution
 
 Two layers:
@@ -433,7 +467,10 @@ Two layers:
 **2. Upload conflict gate (baseSha1).** Every `file_data mode:"apply"` upload may carry `baseSha1` — the sha1 the client last synced for that path (from its stored metadata). `decideUpload` in `handlers/fileData.ts` resolves it clock-independently:
 
 ```
-no server record / record deleted      → accept (new file or re-add)
+no server record                       → accept (new file)
+record deleted, NO renamed_to          → accept (re-add after a plain delete)
+record deleted, renamed_to set (non-   → STRUCTURAL_CONFLICT (edit raced a rename;
+  hidden)                                see below) — old path is NOT resurrected
 upload sha1 == server head sha1        → accept (idempotent resend)
 no baseSha1 (legacy client/first sync) → accept (LWW fallback)
 baseSha1 == server head sha1           → accept (fast-forward)
@@ -451,6 +488,12 @@ These files flap constantly between devices; minting a copy per flap multiplies
 files without bound (this happened in production — June 2026).
 
 On conflict the server **never overwrites its head**. Instead it stores the client's content as a `"<name> (Conflicted Copy <ts> <deviceId[0:8]>).<ext>"` file, pushes that copy to all peers (including the uploader), sends `file_event_result: "conflict"` to the uploader, and re-pushes its current head of the original path so the uploader converges. No edit is ever silently relegated to version history.
+
+**3. Structural conflict (rename vs. concurrent edit).** When one device moves `X → Y` while another edits `X`, the rename always completes to `Y` and the concurrent edit is preserved as a `(Conflicted Copy …)` beside `Y`. It is detected on **both** arrival orders, which converge to the identical tree:
+- *Rename lands first:* `X` is tombstoned with `renamed_to = Y` (migration v4 column). A later upload to `X` hits the `renamed_to` branch in `decideUpload` and routes to `applyStructuralConflict` (`handlers/fileData.ts`) — the old path is NOT resurrected; the edit becomes `Y (Conflicted Copy …)`; uploader gets `file_event_result: "structural_conflict", renamedTo: Y`.
+- *Edit lands first:* `handleRename` (`handlers/rename.ts`) sees `baseSha1 != from head`, preserves the current `X` head as `Y (Conflicted Copy …)`, completes the rename, and pulls the initiator's `Y` content.
+
+If the uploader's content already equals the rename target's head, no copy is minted — it just converges. Hidden/config (dot) paths are exempt (LWW, never a copy), same carve-out as content conflicts. The plugin surfaces `structural_conflict` with a user notice (`XSync` `file_event_result` handler).
 
 Delta (`mode:"patch"`) uploads are pre-checked in `ws/server.ts`: a patch whose `baseSha1` no longer matches the head would corrupt the file if stitched, so the server requests a full upload (`file_event_result: "client_newer"`) instead — the retry arrives as `mode:"apply"` and goes through the regular gate.
 
