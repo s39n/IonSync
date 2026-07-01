@@ -261,6 +261,22 @@ export interface SyncDoneMsg {
   more?: boolean;
 }
 
+/**
+ * Server asking an already-connected client to run a fresh sync cycle.
+ *
+ * Used by the dashboard's "Sync" button (`/api/action/trigger-sync/:peerId`).
+ * That endpoint previously sent a bare `sync_done`, which the client just
+ * files as "nothing pending" bookkeeping (see SyncDoneMsg) rather than
+ * actually reconciling — so admin-triggered changes (e.g. a dashboard file
+ * delete) never reached an already-connected client until it reconnected.
+ * `request_sync` tells the client to call its normal `sync()` cycle (cursor
+ * catch-up from its last-known seq), which picks up anything that changed
+ * server-side since then.
+ */
+export interface RequestSyncMsg {
+  type: "request_sync";
+}
+
 export type ServerMsg =
   | ChallengeMsg
   | AuthOkMsg
@@ -270,7 +286,8 @@ export type ServerMsg =
   | FileDataResponseMsg
   | FileHistoryResponseMsg
   | VersionCheckResponseMsg
-  | SyncDoneMsg;
+  | SyncDoneMsg
+  | RequestSyncMsg;
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 

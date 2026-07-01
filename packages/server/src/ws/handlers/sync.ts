@@ -231,11 +231,13 @@ export function checkSyncDone(peer: SyncPeer): void {
   }
 }
 
-export function broadcastToPeers(ctx: SyncContext, sourcePeer: SyncPeer, file: FileEntry): void {
+export function broadcastToPeers(ctx: SyncContext, sourcePeer: SyncPeer | null, file: FileEntry): void {
   // 1. Collect targets first
   const targets: SyncPeer[] = [];
   for (const peer of ctx.peers.values()) {
-    if (peer.id === sourcePeer.id) continue;
+    // sourcePeer is null for admin-triggered changes (e.g. a dashboard delete)
+    // that have no originating WS connection to exclude — broadcast to everyone.
+    if (sourcePeer && peer.id === sourcePeer.id) continue;
     if (!peer.authed || !peer.autoSync) continue;
     if (peer.ws.readyState === peer.ws.OPEN) {
       targets.push(peer);

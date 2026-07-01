@@ -356,6 +356,13 @@ export class XSync {
         }
         break;
       }
+      case "request_sync":
+        // Admin-triggered resync (dashboard "Sync" button). Run a normal sync
+        // cycle so anything the server changed since our last cursor — e.g. a
+        // dashboard file delete — gets pulled down. sync() is a no-op if one
+        // is already in flight, so this is safe to receive redundantly.
+        void this.sync();
+        break;
       case "sync_done":
         if (typeof msg.cursor === "number" && msg.cursor > this._lastSyncedSeq) {
           this._lastSyncedSeq = msg.cursor;

@@ -1,7 +1,8 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import type { FileEntry } from "@ionsync/protocol";
-import { connectClient, startTestServer, waitForOpen } from "./helpers.js";
+import { connectClient, startTestServer, waitForOpen, TEST_PASSWORD } from "./helpers.js";
 
 describe("auth", () => {
   it("rejects an incorrect password", async () => {
@@ -517,6 +518,81 @@ describe("config/hidden path conflicts (no copies, LWW)", () => {
     assert.ok(!srv.ctx.db.getAllFiles().some((f) => f.path.includes("(Conflicted Copy")));
 
     client.close();
+    await srv.stop();
+  });
+});
+
+describe("dashboard admin actions", () => {
+  function dashHeaders(): Record<string, string> {
+    const token = createHash("sha256").update(TEST_PASSWORD + "-dashboard").digest("hex");
+    return { Cookie: `dash_token=${token}` };
+  }
+
+  it("trigger-sync asks the client to actually resync, instead of a bare sync_done", async () => {
+    const srv = await startTestServer();
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth("device-a");
+
+    const peer = [...srv.ctx.peers.values()].find((p) => p.deviceId === "device-a");
+    assert.ok(peer, "peer should be registered after auth");
+
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/action/trigger-sync/${peer!.id}`, {
+      headers: dashHeaders(),
+    });
+    assert.equal(res.status, 200);
+
+    // Previously this endpoint sent a bare `sync_done`, which the client just
+    // treats as "no pending transfers" and does not reconcile from. It must
+    // now send `request_sync` so the client actually runs a sync cycle.
+    const msg = await client.nextMsg<{ type: string }>(
+      (m) => (m as { type: string }).type === "request_sync"
+    );
+    assert.equal(msg.type, "request_sync");
+
+    client.close();
+    await srv.stop();
+  });
+
+  it("delete-file pushes the deletion live to other connected peers", async () => {
+    const srv = await startTestServer();
+    const uploader = connectClient(srv.port);
+    await waitForOpen(uploader);
+    await uploader.auth("device-a");
+
+    const PATH = "notes/to-delete.md";
+    const sha1 = "7bd81a159ea42d0f32dc1bcac2b3756123a985c7"; // sha1("v one")
+    const content = Buffer.from("v one").toString("base64");
+    uploader.send({
+      type: "file_data",
+      mode: "apply",
+      file: { path: PATH, sha1, mtime: 1000, action: "active", fileType: "file" },
+      content,
+    });
+    uploader.send({ type: "file_history", path: PATH });
+    await uploader.nextMsg((m) => (m as { type: string }).type === "file_history_response");
+    assert.equal(srv.ctx.db.getFile(PATH)?.action, "active");
+
+    // A second peer connects AFTER the upload, so it only ever learns about
+    // the delete via the live broadcast this test is checking for.
+    const watcher = connectClient(srv.port);
+    await waitForOpen(watcher);
+    await watcher.auth("device-b");
+
+    const res = await fetch(
+      `http://127.0.0.1:${srv.port}/api/delete-file/${encodeURIComponent(PATH)}`,
+      { method: "DELETE", headers: dashHeaders() }
+    );
+    assert.equal(res.status, 200);
+
+    const push = await watcher.nextMsg<{ type: string; file: FileEntry }>(
+      (m) => (m as { type: string }).type === "file_push" && (m as { file: FileEntry }).file.path === PATH
+    );
+    assert.equal(push.file.action, "deleted");
+    assert.equal(srv.ctx.db.getFile(PATH)?.action, "deleted");
+
+    uploader.close();
+    watcher.close();
     await srv.stop();
   });
 });

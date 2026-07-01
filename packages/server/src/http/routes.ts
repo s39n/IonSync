@@ -5,6 +5,7 @@ import archiver from "archiver";
 import type { SyncContext } from "../context.js";
 import { sha256 } from "../crypto.js";
 import { isE2eeEncrypted, makeE2eeDecryptor } from "../e2ee.js";
+import { broadcastToPeers } from "../ws/handlers/sync.js";
 import { diff_match_patch } from "diff-match-patch";
 import type { BackgroundSyncReq } from "@ionsync/protocol";
 import { verifyTOTP, generateSecret, totpUri, createPendingToken, consumePendingToken,
@@ -204,7 +205,12 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
       target.disconnect("Disconnected by admin");
       res.json({ ok: true });
     } else if (action === "trigger-sync") {
-      target.send({ type: "sync_done" }); 
+      // Ask the client to actually run a sync cycle (cursor catch-up), rather
+      // than sending a bare sync_done — which the client just treats as "no
+      // pending transfers" bookkeeping and does not reconcile anything from.
+      // Without this, admin-side changes (e.g. a dashboard delete) never
+      // reached an already-connected client until it reconnected.
+      target.send({ type: "request_sync" });
       res.json({ ok: true });
     } else {
       res.status(400).json({ error: `Unknown action: ${action}` });
@@ -296,8 +302,17 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     if (!existing) { res.status(404).json({ error: "File not found" }); return; }
 
     // Mark deleted in DB and remove all stored version files from disk
-    ctx.db.upsertFile({ ...existing, action: "deleted", mtime: Date.now() });
+    const deletedEntry = { ...existing, action: "deleted" as const, mtime: Date.now() };
+    ctx.db.upsertFile(deletedEntry);
     ctx.storage.deleteAllVersions(filePath);
+
+    // Push the deletion to already-connected peers immediately. Without this,
+    // a client that stays connected never sees the delete until it happens to
+    // reconnect — clicking the dashboard's "Sync" button used to be a no-op
+    // (see trigger-sync above), so the file would appear to "come back" on
+    // every dashboard sync attempt. sourcePeer is null: this delete has no
+    // originating WS connection to exclude from the broadcast.
+    broadcastToPeers(ctx, null, deletedEntry);
 
     res.json({ ok: true });
   });
