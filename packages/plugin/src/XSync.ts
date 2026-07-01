@@ -1044,6 +1044,17 @@ export class XSync {
       }
     }
 
+    // Content is byte-identical to what we last synced — only the mtime moved
+    // (a `touch`, a metadata shuffle, an iCloud eviction/redownload). Sending
+    // would just be an idempotent no-op the server accepts (sha1 == head) after
+    // uselessly broadcasting to every peer. Skip the upload; refresh the stored
+    // mtime so we don't re-hash this path on the next spurious event. Honour
+    // forceChanged (version restore / pushFile) which must always send.
+    if (!forceChanged && sha1 && stored?.sha1 === sha1) {
+      await this.storage.writeMetadata({ path: file.path, sha1, mtime: stat.mtime, action: "active", fileType: "file" });
+      return;
+    }
+
     const entry: FileEntry = { path: file.path, sha1: sha1 ?? "", mtime: stat.mtime, action: "active", fileType: "file" };
     // baseSha1 = the sha we last synced for this path. The server uses it to
     // detect concurrent edits (stale base) without trusting device clocks.
