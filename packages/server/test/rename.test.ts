@@ -200,4 +200,28 @@ describe("file_rename", () => {
     client.close();
     await srv.stop();
   });
+
+  it("folder rename relinks every child path (content + tombstones)", async () => {
+    const srv = await startTestServer();
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    await uploadNew(client, "proj/a.md", "aaa", 1000);
+    await uploadNew(client, "proj/notes/b.md", "bbb", 1100);
+
+    client.send({ type: "file_rename", from: "proj", to: "work", sha1: "", mtime: 2000, fileType: "folder" });
+    await settle(client, "work/a.md");
+
+    assert.equal(srv.ctx.db.getFile("work/a.md")?.action, "active");
+    assert.equal(srv.ctx.storage.readLatest("work/a.md")?.toString(), "aaa");
+    assert.equal(srv.ctx.db.getFile("work/notes/b.md")?.action, "active");
+    assert.equal(srv.ctx.storage.readLatest("work/notes/b.md")?.toString(), "bbb");
+    assert.equal(srv.ctx.db.getFile("proj/a.md")?.action, "deleted");
+    assert.equal(srv.ctx.db.getFile("proj/notes/b.md")?.action, "deleted");
+    assert.ok(!hasCopy(srv));
+
+    client.close();
+    await srv.stop();
+  });
 });

@@ -499,7 +499,7 @@ export class SyncDB {
     const prefixLen = fromPrefix.length;
     const result = this.db.transaction(() => {
       const files = this.db
-        .prepare<[string]>("SELECT path FROM files WHERE path LIKE ? ESCAPE '\\\\'")
+        .prepare<[string]>("SELECT path FROM files WHERE path LIKE ? ESCAPE '\\'")
         .all(like) as Array<{ path: string }>;
       const now = Date.now();
       for (const { path: oldPath } of files) {
