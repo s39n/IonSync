@@ -313,6 +313,15 @@ export class XSync {
           this.addActivity("down", msg.path);
           this.xNotify.showNotification(STATUS_WARN, `Sync conflict: ${msg.path} — your edits were saved as a conflicted copy`);
         }
+        else if (msg.result === "structural_conflict") {
+          // The path was renamed/moved on another device while we edited it. The
+          // rename completed to `renamedTo`; our concurrent edit was preserved as
+          // a "(Conflicted Copy …)" beside it, arriving via file_push.
+          const target = (msg as { renamedTo?: string }).renamedTo ?? "the new location";
+          this.plugin.log(`[Conflict] ${msg.path} was renamed to ${target} while edited here — edit saved as a conflicted copy`);
+          this.addActivity("down", msg.path);
+          this.xNotify.showNotification(STATUS_WARN, `Sync conflict: ${msg.path} was moved to ${target} — your edits were saved as a conflicted copy`);
+        }
         break;
       case "file_push": {
         // Skip applying a push that is older than what we already applied for
@@ -912,6 +921,41 @@ export class XSync {
     if (action === "rename") {
       const oldPath = args[0] as string;
       const oldMeta = this.storage.readMetadata(oldPath);
+
+      // Atomic rename: when the server advertises "file_rename", send the move
+      // as one correlated message so the server can relink history and detect a
+      // structural conflict (a concurrent edit of the source). Files only — a
+      // folder move falls through to the legacy path below. An older server (no
+      // capability) would silently drop an unknown message type, so we MUST fall
+      // back to delete+create there.
+      const stat = await this.plugin.app.vault.adapter.stat(file.path);
+      if (this.ws.isConnected && this.ws.serverCaps.includes("file_rename") && stat?.type === "file") {
+        let newSha1 = "";
+        if (Utils.isBinary(file.path)) {
+          const buf = await this.storage.readBinary(file.path);
+          if (buf) newSha1 = (await Utils.getSHABinary(buf)) ?? "";
+        } else {
+          const txt = await this.storage.read(file.path);
+          if (txt !== null) newSha1 = (await Utils.getSHA(txt)) ?? "";
+        }
+        const mtime = stat?.mtime ?? Date.now();
+        this.ws.send({
+          type: "file_rename",
+          from: oldPath,
+          to: file.path,
+          sha1: newSha1,
+          mtime,
+          ...(oldMeta?.sha1 ? { baseSha1: oldMeta.sha1 } : {}),
+          fileType: "file",
+        });
+        // Reflect the move locally: drop the old path's metadata, record the new.
+        await this.storage.deleteMetadata(oldPath);
+        await this.storage.writeMetadata({ path: file.path, sha1: newSha1, mtime, action: "active", fileType: "file" });
+        return;
+      }
+
+      // Legacy fallback (server without "file_rename", or a folder move):
+      // delete the old path, then create the new one.
       this.deleteQueue[oldPath] = {
         metadata: { action: "deleted", sha1: oldMeta?.sha1 ?? "", mtime: Date.now(), fileType: "file" },
         timestamp: Date.now(),

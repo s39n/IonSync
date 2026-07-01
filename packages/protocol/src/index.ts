@@ -235,6 +235,12 @@ export interface VersionCheckResponseMsg {
   needsUpdate: boolean;
   /** Populated only when needsUpdate=true. Keys are filenames, values are base64. */
   files?: Record<string, string>;
+  /**
+   * Optional server capability tokens (e.g. "file_rename"). Absent on older
+   * servers → the client must assume the capability is unavailable and fall
+   * back. Lets new clients feature-detect without a version-number handshake.
+   */
+  caps?: string[];
 }
 
 /** Sent when all pending sync transfers for a session have resolved. */

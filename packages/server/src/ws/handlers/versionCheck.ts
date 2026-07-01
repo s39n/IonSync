@@ -40,6 +40,10 @@ function getBuildInfo(clientDir: string): BuildInfo | null {
 
 const PLUGIN_FILES = ["main.js", "styles.css", "manifest.json"] as const;
 
+/** Capability tokens this server understands. Lets new plugins feature-detect
+ *  (e.g. atomic `file_rename`) without a version-number handshake. */
+const SERVER_CAPS = ["file_rename"];
+
 export function handleVersionCheck(
   ctx: SyncContext,
   peer: SyncPeer,
@@ -49,7 +53,7 @@ export function handleVersionCheck(
 
   if (!serverBuild) {
     // No build info available — treat as up-to-date
-    peer.send({ type: "version_check_response", needsUpdate: false });
+    peer.send({ type: "version_check_response", needsUpdate: false, caps: SERVER_CAPS });
     return;
   }
 
@@ -57,7 +61,7 @@ export function handleVersionCheck(
     msg.version !== serverBuild.version || msg.build !== serverBuild.build;
 
   if (!needsUpdate) {
-    peer.send({ type: "version_check_response", needsUpdate: false });
+    peer.send({ type: "version_check_response", needsUpdate: false, caps: SERVER_CAPS });
     return;
   }
 
@@ -70,5 +74,5 @@ export function handleVersionCheck(
     }
   }
 
-  peer.send({ type: "version_check_response", needsUpdate: true, files });
+  peer.send({ type: "version_check_response", needsUpdate: true, files, caps: SERVER_CAPS });
 }

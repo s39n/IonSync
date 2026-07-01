@@ -45,6 +45,10 @@ const BUILD_STR = typeof __IONSYNC_BUILD__ !== "undefined" ? __IONSYNC_BUILD__ :
 export class WsManager {
   isConnected = false;
   isEnabled = false;
+  /** Capability tokens advertised by the connected server (e.g. "file_rename").
+   *  Empty until version_check_response arrives, and reset on disconnect so a
+   *  reconnect to an older server can't inherit a stale capability. */
+  serverCaps: string[] = [];
 
   private ws: WebSocket | null = null;
   private listeners: Listener[] = [];
@@ -131,6 +135,7 @@ export class WsManager {
     }
     if (this.isConnected) {
       this.isConnected = false;
+      this.serverCaps = [];
       this.emit({ type: "disconnected" });
     }
   }
@@ -182,6 +187,7 @@ export class WsManager {
       this.ws = null;
       if (this.isConnected) {
         this.isConnected = false;
+        this.serverCaps = [];
         this.emit({ type: "disconnected" });
       }
       this.scheduleReconnect();
@@ -229,6 +235,7 @@ export class WsManager {
 
   private _handleVersionCheck(msg: VersionCheckResponseMsg): void {
     if (!msg.needsUpdate) {
+      this.serverCaps = msg.caps ?? [];
       this.isConnected = true;
       this.emit({ type: "connected" });
       return;
