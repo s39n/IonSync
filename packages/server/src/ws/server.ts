@@ -10,6 +10,7 @@ import { handleSyncCursor } from "./handlers/syncCursor.js";
 import { handleFileEvent } from "./handlers/fileEvent.js";
 import { handleFileUpload, handleFileDownload } from "./handlers/fileData.js";
 import { handleFileHistory } from "./handlers/fileHistory.js";
+import { handleRename } from "./handlers/rename.js";
 import { handleVersionCheck } from "./handlers/versionCheck.js";
 import { ConnectionRateLimiter } from "./rateLimit.js";
 import type { IncomingMessage } from "node:http";
@@ -165,6 +166,9 @@ export function attachWebSocketServer(
         }
         case "file_history":
           handleFileHistory(ctx, peer, msg);
+          break;
+        case "file_rename":
+          handleRename(ctx, peer, msg);
           break;
         default:
           break;
