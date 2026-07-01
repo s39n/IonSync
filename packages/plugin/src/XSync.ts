@@ -1,4 +1,4 @@
-import type { FileEntry, ServerMsg, BackgroundSyncReq } from "@ionsync/protocol";
+import type { FileEntry, ServerMsg } from "@ionsync/protocol";
 import type { TAbstractFile } from "obsidian";
 import { WsManager, type UpdateInfo } from "./WsManager.js";
 import { Storage } from "./Storage.js";
@@ -145,10 +145,15 @@ export class XSync {
     this._registerVaultEvent("delete");
     this._registerVaultEvent("rename");
 
-    // PHASE 3: Background Sync Trigger
+    // When the app is backgrounded, flush any debounced file events over the
+    // WebSocket while it is still alive. (An earlier "background sync" design
+    // POSTed pending edits via sendBeacon to an unauthenticated HTTP endpoint
+    // that discarded them — and then cleared the pending queue, silently
+    // losing edits. The queue is now only cleared when an upload really went
+    // out over the authenticated WS; anything unsent is retried next sync.)
     this.eventRefs["visibility-change"] = () => {
-      if (document.visibilityState === "hidden") {
-        void this._performBackgroundSync();
+      if (document.visibilityState === "hidden" && this.ws.isConnected) {
+        this.xTimeouts.executeAll();
       }
     };
     document.addEventListener("visibilitychange", this.eventRefs["visibility-change"]);
@@ -219,57 +224,6 @@ export class XSync {
     this.xNotify.cleanup();
     this.ws.destroy();
     this.messageQueue = [];
-  }
-
-  // ── Background Sync (Phase 3) ───────────────────────────────────────────
-
-  private async _performBackgroundSync(): Promise<void> {
-    const pendingPaths = Object.keys(this.unsentSessionEvents);
-    if (pendingPaths.length === 0) return;
-
-    const payload: BackgroundSyncReq["files"] = [];
-    for (const path of pendingPaths) {
-      const ev = this.unsentSessionEvents[path];
-      if (!ev) continue;
-
-      const stat = await this.plugin.app.vault.adapter.stat(ev.file.path);
-      if (!stat) continue;
-
-      const isBinary = Utils.isBinary(ev.file.path);
-      let content = "";
-      let sha1: string | null = "";
-
-      if (isBinary) {
-        const buf = await this.storage.readBinary(ev.file.path);
-        if (buf) {
-          content = Utils.toBase64(new Uint8Array(buf));
-          sha1 = await Utils.getSHABinary(buf);
-        }
-      } else {
-        const txt = await this.storage.read(ev.file.path);
-        if (txt !== null) {
-          content = Utils.toBase64(txt);
-          sha1 = await Utils.getSHA(txt);
-        }
-      }
-
-      payload.push({
-        file: { path: ev.file.path, sha1: sha1 ?? "", mtime: stat.mtime, action: "active", fileType: "file" },
-        content
-      });
-    }
-
-    const { host, port, tls, deviceId } = this.plugin.settings;
-    const protocol = tls ? "https" : "http";
-    const url = `${protocol}://${host}:${port}/api/sync/background`;
-
-    const blob = new Blob([JSON.stringify({ deviceId: deviceId, files: payload })], { type: 'application/json' });
-
-    const success = navigator.sendBeacon(url, blob);
-    if (success) {
-      this.unsentSessionEvents = {};
-      this.xNotify.updatePendingCount(0);
-    }
   }
 
   // ── Incoming Messages ─────────────────────────────────────────────────────

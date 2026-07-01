@@ -97,19 +97,35 @@ export class Storage {
 
   // ── Delta Sync: Shadow Storage ─────────────────────────────────────────────
 
-  /** Converts a vault path to a safe, flat hex filename for shadow storage */
-  private _getShadowPath(vaultPath: string): string {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(vaultPath);
-    const hex = Array.from(data)
+  /**
+   * Converts a vault path to a safe, flat filename for shadow storage.
+   *
+   * Short paths keep the legacy hex encoding (existing shadows stay valid).
+   * Hex doubles the byte length, so a vault path over ~100 chars would exceed
+   * the 255-byte filename component limit (NTFS/ext4/APFS alike) and every
+   * shadow write for that file would fail with ENAMETOOLONG — quietly
+   * disabling delta sync for long paths. Those fall back to a fixed-length
+   * SHA-1 name instead (worst case: one extra full upload per file while the
+   * shadow is recreated under the new name).
+   */
+  private async _getShadowPath(vaultPath: string): Promise<string> {
+    const data = new TextEncoder().encode(vaultPath);
+    if (data.length <= 100) {
+      const hex = Array.from(data)
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+      return `data/shadow/${hex}.md`;
+    }
+    const digest = await crypto.subtle.digest("SHA-1", data);
+    const hash = Array.from(new Uint8Array(digest))
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
-    return `data/shadow/${hex}.md`;
+    return `data/shadow/h_${hash}.md`;
   }
 
   async readShadow(vaultPath: string): Promise<string | null> {
     try {
-      return await this.fsInternal.read(this._getShadowPath(vaultPath));
+      return await this.fsInternal.read(await this._getShadowPath(vaultPath));
     } catch {
       return null; // Shadow doesn't exist yet
     }
@@ -117,7 +133,7 @@ export class Storage {
 
   async writeShadow(vaultPath: string, content: string): Promise<void> {
     try {
-      await this.fsInternal.write(this._getShadowPath(vaultPath), content);
+      await this.fsInternal.write(await this._getShadowPath(vaultPath), content);
     } catch (e) {
       console.error("[IonSync] Failed to write shadow copy:", e);
     }
