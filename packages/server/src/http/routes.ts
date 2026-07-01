@@ -1,13 +1,13 @@
 import express, { type Request, type Response } from "express";
 import fs from "node:fs";
 import path from "node:path";
+import { timingSafeEqual } from "node:crypto";
 import archiver from "archiver";
+import { ConnectionRateLimiter } from "../ws/rateLimit.js";
 import type { SyncContext } from "../context.js";
 import { sha256 } from "../crypto.js";
 import { isE2eeEncrypted, makeE2eeDecryptor } from "../e2ee.js";
 import { broadcastToPeers } from "../ws/handlers/sync.js";
-import { diff_match_patch } from "diff-match-patch";
-import type { BackgroundSyncReq } from "@ionsync/protocol";
 import { verifyTOTP, generateSecret, totpUri, createPendingToken, consumePendingToken,
   generateRecoveryCodes, formatRecoveryCode, normalizeRecoveryCode, hashRecoveryCode } from "../totp.js";
 import { pushActivity } from "../context.js";
@@ -21,16 +21,25 @@ import { pushActivity } from "../context.js";
 
 export function buildPublicRouter(ctx: SyncContext): express.Router {
   const router = express.Router();
+  // Nothing is exposed over plain HTTP on the public port — all sync traffic
+  // goes through the authenticated WebSocket attached to the same server.
+  // (A previous /api/sync/background stub accepted unauthenticated 50 MB JSON
+  // bodies and silently discarded them; it has been removed. See XSync's
+  // visibility-change handler, which now flushes pending events over the WS.)
+  void ctx;
+  return router;
+}
 
-  // ONLY the background sync endpoint goes here. 
-  // (The WebSocket engine also attaches to this server automatically)
-  router.post("/api/sync/background", express.json({ limit: "50mb" }), async (req: Request, res: Response) => {
-    // ... (Keep all your exact background sync logic here) ...
-    res.status(200).json({ ok: true });
-  });
-
-
-    return router;
+/**
+ * Constant-time string comparison for secrets (dashboard password / session
+ * token). A plain `!==` short-circuits at the first differing character and
+ * leaks match length via response timing.
+ */
+function secretsMatch(received: string, expected: string): boolean {
+  const a = Buffer.from(received, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 // ── 2. ADMIN ROUTER (Locked to Localhost/Trusted Network) ───────────────────
@@ -40,10 +49,35 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
 
   const DASH_TOKEN = sha256(ctx.config.password + "-dashboard");
 
+  // Per-IP throttle for the login endpoints. The WS side has had this from the
+  // start; without it the HTTP login was an unthrottled brute-force oracle.
+  const loginLimiter = new ConnectionRateLimiter({
+    windowMs: 60_000,
+    maxConnections: 30,   // login attempts per IP per minute
+    maxAuthFailures: 10,  // wrong passwords / TOTP codes before a block
+    blockMs: 5 * 60_000,
+  });
+
+  function loginAllowed(req: Request, res: Response): boolean {
+    const ip = req.socket.remoteAddress ?? "unknown";
+    if (!loginLimiter.allowConnection(ip)) {
+      res.status(429).json({ error: "Too many attempts — try again later" });
+      return false;
+    }
+    return true;
+  }
+
+  function recordLoginFailure(req: Request): void {
+    loginLimiter.recordAuthFailure(req.socket.remoteAddress ?? "unknown");
+  }
+
   function grantSession(res: Response, extra: Record<string, unknown> = {}): void {
     const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toUTCString();
+    // SameSite=Strict: the cookie authorises destructive admin actions (factory
+    // reset, delete, purge); without it any web page the admin visits could
+    // fire cross-site requests at these endpoints (CSRF).
     res
-      .setHeader("Set-Cookie", `dash_token=${DASH_TOKEN}; Path=/; Expires=${expires}; HttpOnly`)
+      .setHeader("Set-Cookie", `dash_token=${DASH_TOKEN}; Path=/; Expires=${expires}; HttpOnly; SameSite=Strict`)
       .status(200)
       .json({ ok: true, ...extra });
   }
@@ -58,7 +92,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   }
 
   function checkAuth(req: Request, res: Response): boolean {
-    if (getDashCookie(req) !== DASH_TOKEN) {
+    if (!secretsMatch(getDashCookie(req) ?? "", DASH_TOKEN)) {
       res.status(401).json({ error: "Unauthorized" });
       return false;
     }
@@ -80,8 +114,10 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   // setting the session cookie immediately. The client then posts the
   // 6-digit code to /api/totp/verify-login to complete authentication.
   router.get("/api/login", (req, res) => {
+    if (!loginAllowed(req, res)) return;
     const password = req.headers["x-dashboard-password"];
-    if (password !== ctx.config.password) {
+    if (typeof password !== "string" || !secretsMatch(password, ctx.config.password)) {
+      recordLoginFailure(req);
       res.status(401).json({ error: "Invalid password" });
       return;
     }
@@ -98,10 +134,12 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
 
   // Login — step 2: TOTP code OR recovery code
   router.post("/api/totp/verify-login", express.json(), (req, res) => {
+    if (!loginAllowed(req, res)) return;
     const { tempToken, code } = req.body as { tempToken?: string; code?: string };
     if (!tempToken || !code) { res.status(400).json({ error: "Missing fields" }); return; }
 
     if (!consumePendingToken(tempToken)) {
+      recordLoginFailure(req);
       res.status(401).json({ error: "Token expired or invalid" });
       return;
     }
@@ -131,6 +169,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
       }
     }
 
+    recordLoginFailure(req);
     res.status(401).json({ error: "Invalid code" });
   });
 
@@ -221,13 +260,15 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
 
   router.get("/api/files", (req, res) => {
     if (!checkAuth(req, res)) return;
-    // Source paths from the DB — the old filesystem walk returned storage-layout
-    // paths (e.g. "notes/foo.md/v_1234567890") which broke preview and delete.
-    const files = ctx.db.getAllFiles()
-      .filter(f => f.action === "active" && f.fileType === "file")
+    // Sizes come from the DB column stamped at upload time (migration v5) —
+    // the previous per-file storage stat was O(files) directory scans on every
+    // 5-second dashboard poll, which crawled on 20k–50k file vaults. Rows
+    // predating v5 (size = -1) fall back to a one-off stat and heal on the
+    // next upload.
+    const files = ctx.db.getFilesWithSize("active")
       .map(f => ({
         path: f.path,
-        size: ctx.storage.getSizeLatest(f.path) ?? 0,
+        size: f.size >= 0 ? f.size : (ctx.storage.getSizeLatest(f.path) ?? 0),
         mtime: f.mtime,
         action: f.action,
       }));
@@ -345,13 +386,13 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   router.get("/api/db/stats", (req, res) => {
     if (!checkAuth(req, res)) return;
     const stats = ctx.db.getStats();
-    // Sum storage from disk
+    // Known sizes are a single SUM in SQLite; only pre-v5 rows are statted.
     let totalBytes = 0;
     try {
-      const allPaths = ctx.db.getAllFilePaths();
-      for (const p of allPaths) {
-        const size = ctx.storage.getSizeLatest(p);
-        if (size) totalBytes += size;
+      const { knownBytes, unknownPaths } = ctx.db.getActiveSizeSummary();
+      totalBytes = knownBytes;
+      for (const p of unknownPaths) {
+        totalBytes += ctx.storage.getSizeLatest(p) ?? 0;
       }
     } catch { /* non-fatal */ }
     res.json({ ...stats, totalBytes });
@@ -361,12 +402,12 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   router.get("/api/db/files", (req, res) => {
     if (!checkAuth(req, res)) return;
     const action = (String(req.query.action ?? "all")) as "active" | "deleted" | "all";
-    const files = ctx.db.getFilesByAction(action).map(f => ({
+    const files = ctx.db.getFilesWithSize(action).map(f => ({
       path: f.path,
       sha1: f.sha1,
       mtime: f.mtime,
       action: f.action,
-      size: ctx.storage.getSizeLatest(f.path) ?? 0,
+      size: f.size >= 0 ? f.size : (ctx.storage.getSizeLatest(f.path) ?? 0),
     }));
     res.json(files);
   });
@@ -546,6 +587,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     }
 
     archive.finalize();
+  });
 
   // Export a ZIP of specific files (latest version of each).
   // POST /api/export-selected   body: { paths: string[] }
@@ -586,64 +628,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     archive.finalize();
   });
 
-  });
-
-
-
   // ── TOTP management ──────────────────────────────────────────────────────
-
-  // Status — is TOTP configured?
-  router.get("/api/totp/status", (req, res) => {
-    if (!checkAuth(req, res)) return;
-    const enabled = ctx.db.getSetting("totp_secret") !== null;
-    res.json({ enabled });
-  });
-
-  // Generate a fresh TOTP secret + URI for the setup QR code.
-  // Does NOT save the secret — the client must call /api/totp/enable once
-  // the user has verified the code works in their authenticator app.
-  router.post("/api/totp/generate", (req, res) => {
-    if (!checkAuth(req, res)) return;
-    const secret = generateSecret();
-    const uri = totpUri(secret, "IonSync", "dashboard");
-    res.json({ secret, uri });
-  });
-
-  // Enable TOTP — verify code, save secret, generate recovery codes.
-  // Recovery codes are returned ONCE and never stored in plaintext.
-  router.post("/api/totp/enable", express.json(), (req, res) => {
-    if (!checkAuth(req, res)) return;
-    const { secret, code } = req.body as { secret?: string; code?: string };
-    if (!secret || !code) { res.status(400).json({ error: "Missing fields" }); return; }
-    if (!verifyTOTP(secret, code)) {
-      res.status(401).json({ error: "Code does not match — check your authenticator app" });
-      return;
-    }
-    const rawCodes = generateRecoveryCodes();
-    const hashes = rawCodes.map(hashRecoveryCode);
-    ctx.db.setSetting("totp_secret", secret);
-    ctx.db.setSetting("totp_recovery_codes", JSON.stringify(hashes));
-    res.json({ ok: true, recoveryCodes: rawCodes.map(formatRecoveryCode) });
-  });
-
-  // Disable TOTP — requires the current TOTP code as confirmation.
-  router.post("/api/totp/disable", express.json(), (req, res) => {
-    if (!checkAuth(req, res)) return;
-    const totpSecret = ctx.db.getSetting("totp_secret");
-    if (!totpSecret) { res.json({ ok: true }); return; } // already disabled
-    const { code } = req.body as { code?: string };
-    if (!code) { res.status(400).json({ error: "Missing code" }); return; }
-    if (!verifyTOTP(totpSecret, code)) {
-      res.status(401).json({ error: "Invalid code" });
-      return;
-    }
-    ctx.db.deleteSetting("totp_secret");
-    ctx.db.deleteSetting("totp_recovery_codes");
-    res.json({ ok: true });
-  });
-
-
-  // ── TOTP management (authenticated) ─────────────────────────────────────
 
   // Status — is TOTP configured?
   router.get("/api/totp/status", (req, res) => {
@@ -700,11 +685,11 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   router.get("/api/db/storage-by-folder", (req, res) => {
     if (!checkAuth(req, res)) return;
     try {
-      const allPaths = ctx.db.getAllFilePaths();
+      const files = ctx.db.getFilesWithSize("active");
       const byFolder: Record<string, number> = {};
-      for (const p of allPaths) {
-        const folder = p.includes("/") ? p.split("/")[0]! : "(root)";
-        const size = ctx.storage.getSizeLatest(p) ?? 0;
+      for (const f of files) {
+        const folder = f.path.includes("/") ? f.path.split("/")[0]! : "(root)";
+        const size = f.size >= 0 ? f.size : (ctx.storage.getSizeLatest(f.path) ?? 0);
         byFolder[folder] = (byFolder[folder] ?? 0) + size;
       }
       const rows = Object.entries(byFolder)

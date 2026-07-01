@@ -98,6 +98,11 @@ export function attachWebSocketServer(
         ctx.db.touchDevice(peer.deviceId);
       }
 
+      // A throwing handler must never escape this callback: the listener is
+      // async, so an uncaught exception becomes an unhandled promise rejection
+      // (fatal in modern Node) and, less dramatically, can strand a sync
+      // session with pendingUploads never advancing.
+      try {
       switch (msg.type) {
         case "version_check":
           handleVersionCheck(ctx, peer, msg);
@@ -144,7 +149,18 @@ export function attachWebSocketServer(
               // 2. Apply the incoming patch
               const dmp = new diff_match_patch();
               const patches = dmp.patch_fromText(rawMsg.content);
-              const [newText] = dmp.patch_apply(patches, currentText);
+              const [newText, results] = dmp.patch_apply(patches, currentText);
+
+              // patch_apply reports per-hunk success; a partial apply produces
+              // text that won't match the client's SHA1 and would either be
+              // silently rejected (delaying sync a full cycle) or, for E2EE-ish
+              // edge cases, stored corrupted. Request the full file instead.
+              if ((results as boolean[]).some((ok) => !ok)) {
+                pushLog(ctx, `[Delta] Partial patch apply for ${rawMsg.file.path} — requesting full upload`);
+                peer.pendingUploads.add(rawMsg.file.path);
+                peer.send({ type: "file_event_result", path: rawMsg.file.path, result: "client_newer" });
+                break;
+              }
 
               // 3. Morph message into a standard 'apply' full-file upload
               rawMsg.mode = "apply";
@@ -154,6 +170,9 @@ export function attachWebSocketServer(
               handleFileUpload(ctx, peer, rawMsg);
             } catch (err) {
               pushLog(ctx, `[Delta] Failed to patch ${rawMsg.file?.path}: ${err}`);
+              // Recover by pulling the full file rather than leaving the path stuck.
+              peer.pendingUploads.add(rawMsg.file.path);
+              peer.send({ type: "file_event_result", path: rawMsg.file.path, result: "client_newer" });
             }
           }
           else if (rawMsg.mode === "apply") {
@@ -172,6 +191,9 @@ export function attachWebSocketServer(
           break;
         default:
           break;
+      }
+      } catch (err) {
+        pushLog(ctx, `[ws] handler error for ${msg.type} from ${peer.deviceId ?? peer.id}: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
       }
     });
 

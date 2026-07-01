@@ -64,9 +64,11 @@ console.error = (...args) => { _error(...args); appendLog("ERROR", args); };
 // ── Express apps ──────────────────────────────────────────────────────────────
 
 const publicApp = express();
+publicApp.disable("x-powered-by");
 publicApp.use(buildPublicRouter(ctx));
 
 const adminApp = express();
+adminApp.disable("x-powered-by");
 adminApp.use(buildAdminRouter(ctx));
 
 // ── HTTP / HTTPS servers ──────────────────────────────────────────────────────
@@ -105,22 +107,41 @@ publicServer.listen(config.port, config.host, () => {
   console.log(`[Public] IonSync Engine listening on ${scheme}://${config.host}:${config.port}`);
 });
 
-// Admin Server binds to a DIFFERENT port and strictly to localhost / private LAN
-const ADMIN_PORT = config.port + 1; // e.g., 3001
-const ADMIN_HOST = "0.0.0.0"; // 🚨 Change to "0.0.0.0" ONLY if you want to access it from other computers on your home WiFi
-
-adminServer.listen(ADMIN_PORT, ADMIN_HOST, () => {
-  console.log(`[Admin] Dashboard safely locked to http://${ADMIN_HOST}:${ADMIN_PORT}/dashboard`);
+// Admin Server binds to a DIFFERENT port. Default bind is 127.0.0.1 (loopback
+// only) — the dashboard session runs over plain HTTP and its cookie authorises
+// destructive actions, so exposing it beyond the machine is an explicit opt-in
+// via `adminHost: "0.0.0.0"` in config.js (the Docker entrypoint sets this,
+// where the container boundary provides the isolation).
+adminServer.listen(config.adminPort, config.adminHost, () => {
+  const exposure = config.adminHost === "127.0.0.1" || config.adminHost === "localhost"
+    ? "localhost only"
+    : `bound to ${config.adminHost} — reachable from the network`;
+  console.log(`[Admin] Dashboard on http://${config.adminHost}:${config.adminPort}/dashboard (${exposure})`);
 });
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
 
+let shuttingDown = false;
 function shutdown(): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log("Shutting down…");
   cleanup.stop();
-  db.close();
   adminServer.close();
   publicServer.close(() => {
+    // Close the DB after the servers stop accepting work so in-flight
+    // handlers aren't left with a closed handle.
+    db.close();
     console.log("Servers stopped.");
     process.exit(0);
   });
+  // Docker sends SIGTERM and waits ~10s before SIGKILL; if a peer holds the
+  // socket open past 5s, exit anyway — WAL mode keeps the DB consistent.
+  setTimeout(() => {
+    try { db.close(); } catch { /* already closed */ }
+    process.exit(0);
+  }, 5_000).unref();
 }
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
