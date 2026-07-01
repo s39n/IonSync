@@ -58,7 +58,7 @@ export function handleRename(ctx: SyncContext, peer: SyncPeer, msg: FileRenameMs
         fileType: "file",
       };
       ctx.storage.write(copyEntry.path, copyEntry.mtime, headBuf);
-      ctx.db.upsertFile(copyEntry);
+      ctx.db.upsertFile(copyEntry, headBuf.length);
       peer.send({ type: "file_push", file: copyEntry, content: headBuf.toString("base64") });
       broadcastToPeers(ctx, peer, copyEntry);
       logWarn(

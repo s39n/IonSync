@@ -14,10 +14,15 @@ interface DbFileRow {
   seq: number;
   /** Set only on a tombstone created by a rename — the path the file moved to. */
   renamed_to?: string | null;
+  /** Content size in bytes of the head version; -1 = unknown (pre-v5 row). */
+  size: number;
 }
 
 /** A file row plus the sequence number at which its head last changed. */
 export type FileChange = FileEntry & { seq: number };
+
+/** A file row plus its stored head-content size (-1 = unknown, pre-v5 row). */
+export type FileWithSize = FileEntry & { size: number };
 
 interface DbVersionRow {
   sha1: string;
@@ -133,23 +138,30 @@ export class SyncDB {
       .map(rowToFileEntry);
   }
 
-  upsertFile(file: FileEntry): void {
+  /**
+   * @param size Content size in bytes of the version being recorded. Pass it
+   *   whenever the caller has the bytes in hand (uploads, conflict copies) so
+   *   dashboard size queries never have to stat the disk. Omitted → the
+   *   previously stored size is kept (metadata-only updates, deletions).
+   */
+  upsertFile(file: FileEntry, size?: number): void {
     const now = Date.now();
     this.db.transaction(() => {
       const seq = this.allocateSeq();
       this.db
-        .prepare<[string, string, number, number, string, string, number]>(
-          `INSERT INTO files (path, sha1, mtime, received_at, action, file_type, seq)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+        .prepare<[string, string, number, number, string, string, number, number]>(
+          `INSERT INTO files (path, sha1, mtime, received_at, action, file_type, seq, size)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(path) DO UPDATE SET
              sha1        = excluded.sha1,
              mtime       = excluded.mtime,
              received_at = excluded.received_at,
              action      = excluded.action,
              file_type   = excluded.file_type,
-             seq         = excluded.seq`
+             seq         = excluded.seq,
+             size        = CASE WHEN excluded.size >= 0 THEN excluded.size ELSE files.size END`
         )
-        .run(file.path, file.sha1, file.mtime, now, file.action, file.fileType, seq);
+        .run(file.path, file.sha1, file.mtime, now, file.action, file.fileType, seq, size ?? -1);
 
       if (file.fileType === "file") {
         this.db
@@ -422,6 +434,43 @@ export class SyncDB {
       .map(rowToFileEntry);
   }
 
+  /**
+   * File rows including the stored head-content size. Rows written before
+   * migration v5 carry size = -1; callers should fall back to a storage stat
+   * for those (they heal to a real size on the next upload).
+   */
+  getFilesWithSize(action: "active" | "deleted" | "all"): FileWithSize[] {
+    const rows =
+      action === "all"
+        ? this.db
+            .prepare<[], DbFileRow>("SELECT * FROM files WHERE file_type = 'file' ORDER BY path")
+            .all()
+        : this.db
+            .prepare<[string], DbFileRow>(
+              "SELECT * FROM files WHERE action = ? AND file_type = 'file' ORDER BY path"
+            )
+            .all(action);
+    return rows.map((r) => ({ ...rowToFileEntry(r), size: r.size ?? -1 }));
+  }
+
+  /**
+   * Total bytes of active file heads with a known size, plus the paths whose
+   * size is unknown (pre-v5 rows) so the caller can stat just those.
+   */
+  getActiveSizeSummary(): { knownBytes: number; unknownPaths: string[] } {
+    const known = this.db
+      .prepare<[], { total: number | null }>(
+        "SELECT SUM(size) AS total FROM files WHERE action = 'active' AND file_type = 'file' AND size >= 0"
+      )
+      .get();
+    const unknown = this.db
+      .prepare<[], { path: string }>(
+        "SELECT path FROM files WHERE action = 'active' AND file_type = 'file' AND size < 0"
+      )
+      .all();
+    return { knownBytes: known?.total ?? 0, unknownPaths: unknown.map((r) => r.path) };
+  }
+
   restoreFile(filePath: string): boolean {
     return this.db.transaction(() => {
       const seq = this.allocateSeq();
@@ -525,11 +574,11 @@ export class SyncDB {
 
     const seqNew = this.allocateSeq();
     // Destination becomes active; clear any stale renamed_to (the path may have
-    // been a rename tombstone from an earlier move).
+    // been a rename tombstone from an earlier move). Size travels with the row.
     this.db
-      .prepare<[string, string, number, number, string, number]>(
-        `INSERT INTO files (path, sha1, mtime, received_at, action, file_type, seq, renamed_to)
-         VALUES (?, ?, ?, ?, 'active', ?, ?, NULL)
+      .prepare<[string, string, number, number, string, number, number]>(
+        `INSERT INTO files (path, sha1, mtime, received_at, action, file_type, seq, renamed_to, size)
+         VALUES (?, ?, ?, ?, 'active', ?, ?, NULL, ?)
          ON CONFLICT(path) DO UPDATE SET
            sha1        = excluded.sha1,
            mtime       = excluded.mtime,
@@ -537,9 +586,10 @@ export class SyncDB {
            action      = 'active',
            file_type   = excluded.file_type,
            seq         = excluded.seq,
-           renamed_to  = NULL`
+           renamed_to  = NULL,
+           size        = excluded.size`
       )
-      .run(toPath, row.sha1, row.mtime, now, row.file_type, seqNew);
+      .run(toPath, row.sha1, row.mtime, now, row.file_type, seqNew, row.size ?? -1);
 
     this.db
       .prepare<[string, string]>("UPDATE file_versions SET path = ? WHERE path = ?")

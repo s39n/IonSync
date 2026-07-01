@@ -95,6 +95,17 @@ export const MIGRATIONS: Array<{ version: number; up: (db: Database.Database) =>
       db.exec(`ALTER TABLE files ADD COLUMN renamed_to TEXT;`);
     },
   },
+  {
+    version: 5,
+    up(db) {
+      // Content size (bytes) of the file's head version, stamped at upload
+      // time. -1 = unknown (row predates this migration); readers fall back to
+      // a storage stat for those rows. Before this column existed, every
+      // dashboard file/stats endpoint did a readdir per file to discover sizes
+      // — 50k+ directory scans per 5-second dashboard poll on a large vault.
+      db.exec(`ALTER TABLE files ADD COLUMN size INTEGER NOT NULL DEFAULT -1;`);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

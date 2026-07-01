@@ -88,6 +88,7 @@ export function handleFileUpload(
   const { file, content } = msg;
   let isRejected = false;
   let isE2EE = false;
+  let savedSize: number | undefined;
   const decision = decideUpload(ctx, msg);
 
   // Persist content for active files (not folders, not deleted)
@@ -137,6 +138,7 @@ export function handleFileUpload(
     }
     if (!isRejected) {
       ctx.storage.write(file.path, file.mtime, buf);
+      savedSize = buf.length;
     }
 
     // Help the GC clear the buffer promptly
@@ -163,7 +165,7 @@ export function handleFileUpload(
 
   // Only update the database and broadcast if the file was ACTUALLY saved
   if (!isRejected) {
-    ctx.db.upsertFile(file);
+    ctx.db.upsertFile(file, savedSize);
     broadcastToPeers(ctx, peer, file);
     logInfo(ctx, `[file_data] saved ${file.path} (action=${file.action}, mtime=${file.mtime})`);
     pushActivity(ctx, { kind: "upload", deviceId: peer.deviceId ?? undefined, path: file.path });
@@ -217,7 +219,7 @@ function applyConflict(
       fileType: "file",
     };
     ctx.storage.write(copyEntry.path, copyEntry.mtime, buf);
-    ctx.db.upsertFile(copyEntry);
+    ctx.db.upsertFile(copyEntry, buf.length);
     // Uploader receives the copy directly; broadcastToPeers covers everyone else.
     peer.send({ type: "file_push", file: copyEntry, content: rawContent });
     broadcastToPeers(ctx, peer, copyEntry);
@@ -253,7 +255,7 @@ function applyStructuralConflict(
     // Fall back to accepting the upload as a re-add so no edit is lost.
     if (buf) {
       ctx.storage.write(file.path, file.mtime, buf);
-      ctx.db.upsertFile(file);
+      ctx.db.upsertFile(file, buf.length);
       broadcastToPeers(ctx, peer, file);
     }
     return;
@@ -278,7 +280,7 @@ function applyStructuralConflict(
       fileType: "file",
     };
     ctx.storage.write(copyEntry.path, copyEntry.mtime, buf);
-    ctx.db.upsertFile(copyEntry);
+    ctx.db.upsertFile(copyEntry, buf.length);
     peer.send({ type: "file_push", file: copyEntry, content: rawContent });
     broadcastToPeers(ctx, peer, copyEntry);
     logWarn(ctx, `[Structural] ${peer.deviceId} edited ${file.path} which was renamed to ${renamedTo} — stored edit as ${copyEntry.path}`);
