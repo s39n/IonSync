@@ -12,6 +12,8 @@ interface DbFileRow {
   action: string;
   file_type: string;
   seq: number;
+  /** Set only on a tombstone created by a rename — the path the file moved to. */
+  renamed_to?: string | null;
 }
 
 /** A file row plus the sequence number at which its head last changed. */
@@ -522,17 +524,20 @@ export class SyncDB {
     if (!row) return;
 
     const seqNew = this.allocateSeq();
+    // Destination becomes active; clear any stale renamed_to (the path may have
+    // been a rename tombstone from an earlier move).
     this.db
       .prepare<[string, string, number, number, string, number]>(
-        `INSERT INTO files (path, sha1, mtime, received_at, action, file_type, seq)
-         VALUES (?, ?, ?, ?, 'active', ?, ?)
+        `INSERT INTO files (path, sha1, mtime, received_at, action, file_type, seq, renamed_to)
+         VALUES (?, ?, ?, ?, 'active', ?, ?, NULL)
          ON CONFLICT(path) DO UPDATE SET
            sha1        = excluded.sha1,
            mtime       = excluded.mtime,
            received_at = excluded.received_at,
            action      = 'active',
            file_type   = excluded.file_type,
-           seq         = excluded.seq`
+           seq         = excluded.seq,
+           renamed_to  = NULL`
       )
       .run(toPath, row.sha1, row.mtime, now, row.file_type, seqNew);
 
@@ -540,11 +545,27 @@ export class SyncDB {
       .prepare<[string, string]>("UPDATE file_versions SET path = ? WHERE path = ?")
       .run(toPath, fromPath);
 
+    // Old path becomes a rename tombstone: deleted, but remembering where it
+    // went so decideUpload can tell rename from delete.
     const seqOld = this.allocateSeq();
     this.db
-      .prepare<[number, number, string]>(
-        "UPDATE files SET action = 'deleted', received_at = ?, seq = ? WHERE path = ?"
+      .prepare<[number, number, string, string]>(
+        "UPDATE files SET action = 'deleted', received_at = ?, seq = ?, renamed_to = ? WHERE path = ?"
       )
-      .run(now, seqOld, fromPath);
+      .run(now, seqOld, toPath, fromPath);
+  }
+
+  /**
+   * If `path` is a rename tombstone, returns the path the file was renamed to;
+   * otherwise null. Used by the upload gate to distinguish an edit-to-a-renamed
+   * -file (structural conflict) from a re-add after a plain delete.
+   */
+  getRenameTarget(path: string): string | null {
+    const row = this.db
+      .prepare<[string], { renamed_to: string | null }>(
+        "SELECT renamed_to FROM files WHERE path = ? AND action = 'deleted'"
+      )
+      .get(path);
+    return row?.renamed_to ?? null;
   }
 }

@@ -96,6 +96,32 @@ export interface FileHistoryRequestMsg {
 }
 
 /**
+ * Client telling the server that a path was renamed/moved as a single atomic
+ * operation. Sent instead of the legacy delete(from)+create(to) decomposition
+ * so the server can (a) relink version history in one step and (b) detect a
+ * *structural* conflict — a concurrent content edit of `from` on another device.
+ *
+ * Carries no content: for a pure move the server relinks the bytes it already
+ * holds; if `sha1` differs from its head of `from` (an unsynced local edit
+ * preceded the rename) the server pulls the new content via a normal
+ * file_event_result{ result: "client_newer" } for `to`.
+ */
+export interface FileRenameMsg {
+  type: "file_rename";
+  from: string;
+  to: string;
+  /** sha1 of the content now at `to` (== head of `from` for a pure move). */
+  sha1: string;
+  /** client mtime of the file at `to`. */
+  mtime: number;
+  /** sha1 the client last synced for `from`. Mirrors FileDataUploadMsg.baseSha1:
+   *  if it no longer matches the server head of `from`, the rename raced a
+   *  concurrent edit → structural conflict. Omitted by first-sync/legacy. */
+  baseSha1?: string;
+  fileType: FileType;
+}
+
+/**
  * Cursor-based delta sync (sync redesign phase 1).
  *
  * Instead of sending its whole file list (`sync`), a client says "catch me up
@@ -122,7 +148,8 @@ export type ClientMsg =
   | FileEventMsg
   | FileDataUploadMsg
   | FileDataRequestMsg
-  | FileHistoryRequestMsg;
+  | FileHistoryRequestMsg
+  | FileRenameMsg;
 
 // ─── Server → Client messages ──────────────────────────────────────────────
 
@@ -151,9 +178,17 @@ export interface FileEventResultMsg {
    *   version and stored the client's content as a "(Conflicted Copy …)" file,
    *   which is pushed to all peers (including the uploader). The server also
    *   pushes its current version of the original path back to the uploader.
+   * structural_conflict → an upload/rename raced a rename of the same path on
+   *   another device (the file was moved while this client edited it). The
+   *   server completed the rename and preserved the concurrent edit as a
+   *   "(Conflicted Copy …)" next to the rename target; `renamedTo` names that
+   *   target so the client can reconcile without a full re-sync.
    * null → no-op.
    */
-  result: "client_newer" | "server_newer" | "conflict" | null;
+  result: "client_newer" | "server_newer" | "conflict" | "structural_conflict" | null;
+  /** Present only when result === "structural_conflict": the path the surviving
+   *  rename landed at. */
+  renamedTo?: string;
 }
 
 /**

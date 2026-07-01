@@ -83,6 +83,18 @@ export const MIGRATIONS: Array<{ version: number; up: (db: Database.Database) =>
       `);
     },
   },
+  {
+    version: 4,
+    up(db) {
+      // Structural-conflict support. When a file is retired by a *rename* (not a
+      // plain delete), its tombstone records where it went. A later upload whose
+      // baseSha1 matches the pre-rename head is then recognised as an edit to a
+      // renamed file (structural conflict) and diverted to a conflicted copy of
+      // the rename target — instead of hitting the `action='deleted' → accept`
+      // branch in decideUpload and silently resurrecting the old path.
+      db.exec(`ALTER TABLE files ADD COLUMN renamed_to TEXT;`);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {
