@@ -61,6 +61,8 @@ Set `IONSYNC_PASSWORD` (required) in `.env` or `docker-compose.yml`. Other vars 
 | `IONSYNC_PASSWORD` | *required* | Shared password for plugin + dashboard |
 | `IONSYNC_PORT` | `3000` | Port the server listens on inside the container |
 | `IONSYNC_HOST` | `0.0.0.0` | Bind address |
+| `IONSYNC_ADMIN_HOST` | `0.0.0.0` (Docker) | Bind address of the admin/dashboard server. **Outside Docker the config default is `127.0.0.1`** — set `adminHost: "0.0.0.0"` in config.js to expose the dashboard on the LAN (it runs over plain HTTP and its cookie authorises destructive actions) |
+| `IONSYNC_ADMIN_PORT` | `3001` | Port of the admin/dashboard server (config key `adminPort`, default `port + 1`) |
 | `IONSYNC_LOG_LEVEL` | `3` | 0=silent 1=error 2=warn 3=info |
 | `IONSYNC_VERSIONS_PER_FILE` | `5` | Max stored versions per file |
 | `IONSYNC_CLEANUP_INTERVAL` | `3600` | Cleanup job interval in seconds |
