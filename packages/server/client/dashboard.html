@@ -132,6 +132,12 @@
       font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 10px; min-width: 20px; text-align: center;
     }
     nav .badge.red { background: var(--red); }
+    nav .coffee-link {
+      display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+      border-radius: 6px; text-decoration: none; color: var(--muted);
+      font-size: 12px; transition: color .12s;
+    }
+    nav .coffee-link:hover { color: var(--text); }
 
     /* ── Main pane ────────────────────────────────────────────────────────── */
     main { flex: 1; overflow-y: auto; padding: 24px; background: var(--bg); }
@@ -464,7 +470,7 @@
 <div id="crypto-warning" style="display:none;background:#7c3aed;color:#fff;padding:10px 18px;font-size:13px;text-align:center;position:sticky;top:0;z-index:9999">
   ⚠️ <strong>Web Crypto unavailable</strong> — E2EE decryption and snapshot export require a secure context.
   Open this dashboard at <code style="background:rgba(255,255,255,.15);padding:2px 6px;border-radius:4px">http://localhost:PORT/dashboard</code> or over HTTPS.
-  <button onclick="document.getElementById('crypto-warning').style.display='none'" style="margin-left:12px;background:rgba(255,255,255,.2);border:none;color:#fff;padding:3px 10px;border-radius:4px;cursor:pointer">Dismiss</button>
+  <button data-action="dismiss-crypto" style="margin-left:12px;background:rgba(255,255,255,.2);border:none;color:#fff;padding:3px 10px;border-radius:4px;cursor:pointer">Dismiss</button>
 </div>
 <script>if (!window.crypto?.subtle) document.getElementById('crypto-warning').style.display = '';</script>
 
@@ -489,8 +495,8 @@
       <input id="totp-login-input" type="text" inputmode="numeric" maxlength="6" placeholder="000000" autocomplete="one-time-code">
       <div class="login-error" id="totp-login-error"></div>
       <button class="btn primary" id="totp-login-btn" style="width:100%;margin-top:20px;padding:10px">Verify</button>
-      <button class="btn-back" onclick="backToPassword()">← Back to password</button>
-      <button class="use-recovery-link" id="toggle-recovery-btn" onclick="toggleRecoveryMode()">Use a recovery code instead</button>
+      <button class="btn-back" data-action="back-to-password">← Back to password</button>
+      <button class="use-recovery-link" id="toggle-recovery-btn" data-action="toggle-recovery">Use a recovery code instead</button>
     </div>
   </div>
 </div>
@@ -522,9 +528,7 @@
       <button class="nav-btn" data-panel="security"><span class="icon">🔒</span> Security</button>
       <button class="nav-btn" data-panel="danger"><span class="icon">⚠️</span> Danger Zone</button>
       <div style="margin-top: auto; padding-top: 16px; border-top: 1px solid var(--border);">
-        <a href="https://buymeacoffee.com/seanseanric" target="_blank" rel="noopener"
-           style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;text-decoration:none;color:var(--muted);font-size:12px;transition:color .12s;"
-           onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">
+        <a class="coffee-link" href="https://buymeacoffee.com/seanseanric" target="_blank" rel="noopener">
           ☕ Buy me a coffee
         </a>
       </div>
@@ -565,7 +569,7 @@
           <div class="card-header" style="display:flex;align-items:center;gap:10px">
             <h3>Recent Activity</h3>
             <div style="flex:1"></div>
-            <button class="btn" style="font-size:11px" onclick="loadActivity()">↻ Refresh</button>
+            <button class="btn" style="font-size:11px" data-action="load-activity">↻ Refresh</button>
           </div>
           <div id="activity-feed" style="max-height:320px;overflow-y:auto">
             <div class="empty" style="padding:24px">No activity recorded yet</div>
@@ -578,7 +582,7 @@
         <div class="toolbar">
           <h2 style="margin:0">Active Peers</h2>
           <div class="spacer"></div>
-          <button class="btn" onclick="refreshAll()">↻ Refresh</button>
+          <button class="btn" data-action="refresh-all">↻ Refresh</button>
         </div>
         <div class="card">
           <table>
@@ -593,7 +597,7 @@
         <div class="toolbar">
           <h2 style="margin:0">Known Devices</h2>
           <div class="spacer"></div>
-          <button class="btn" onclick="refreshAll()">↻ Refresh</button>
+          <button class="btn" data-action="refresh-all">↻ Refresh</button>
         </div>
         <div class="card">
           <table>
@@ -608,8 +612,8 @@
         <div class="toolbar">
           <h2 style="margin:0">Files</h2>
           <div class="spacer"></div>
-          <input class="search-bar" id="file-search" type="text" placeholder="Search paths…" oninput="debouncedRenderFileTree()">
-          <button class="btn" onclick="loadFiles()">↻ Refresh</button>
+          <input class="search-bar" id="file-search" type="text" placeholder="Search paths…">
+          <button class="btn" data-action="load-files">↻ Refresh</button>
         </div>
 
         <!-- E2EE global key + snapshot export -->
@@ -618,22 +622,21 @@
           <label for="global-e2ee-pw">Vault key</label>
           <input id="global-e2ee-pw" type="password" class="e2ee-pw-input"
                  placeholder="Encryption password (for E2EE files)"
-                 oninput="sessionStorage.setItem('e2ee-pw', this.value)"
                  autocomplete="off">
           <div class="export-group">
             <label for="snapshot-date">Snapshot date</label>
             <input type="date" id="snapshot-date" class="date-input">
-            <button class="btn primary" onclick="exportSnapshot(event)">⬇ Export ZIP</button>
+            <button class="btn primary" data-action="export-snapshot">⬇ Export ZIP</button>
           </div>
         </div>
 
         <!-- Files bulk-select bar -->
         <div id="files-bulk-bar">
-          <input type="checkbox" id="files-select-all" onchange="filesToggleSelectAll(this.checked)" title="Select all visible">
+          <input type="checkbox" id="files-select-all" data-change="files-select-all" title="Select all visible">
           <span id="files-bulk-count" style="font-size:12px;color:var(--text)">0 selected</span>
           <div style="flex:1"></div>
-          <button class="btn" style="font-size:11px" onclick="filesDownloadZip()">⬇ Download ZIP</button>
-          <button class="btn danger" style="font-size:11px" onclick="filesDeleteSelected()">Delete selected</button>
+          <button class="btn" style="font-size:11px" data-action="files-download-zip">⬇ Download ZIP</button>
+          <button class="btn danger" style="font-size:11px" data-action="files-delete-selected">Delete selected</button>
         </div>
 
         <div class="card" style="overflow:visible">
@@ -650,7 +653,7 @@
           <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
             <input type="checkbox" id="log-scroll" checked> Auto-scroll
           </label>
-          <button class="btn" onclick="loadLogs()">↻ Refresh</button>
+          <button class="btn" data-action="load-logs">↻ Refresh</button>
         </div>
         <div id="log-output"></div>
       </div>
@@ -696,15 +699,15 @@
 
         <!-- Maintenance actions -->
         <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
-          <button class="btn" style="font-size:12px" onclick="dbLoadStats()">↻ Refresh</button>
-          <button class="btn" style="font-size:12px" onclick="pruneCorruptVersions(this)" title="Scan all stored versions and remove any that are 0 bytes (failed or interrupted uploads). Also removes their DB records.">Prune Corrupt Versions</button>
+          <button class="btn" style="font-size:12px" data-action="db-load-stats">↻ Refresh</button>
+          <button class="btn" style="font-size:12px" data-action="prune-corrupt" title="Scan all stored versions and remove any that are 0 bytes (failed or interrupted uploads). Also removes their DB records.">Prune Corrupt Versions</button>
         </div>
 
         <!-- Storage breakdown chart -->
         <div class="card" style="margin-bottom:16px">
           <div class="card-header" style="display:flex;align-items:center;gap:10px">
             <h3 style="margin:0;flex:1">Storage by Folder</h3>
-            <button class="btn" style="font-size:11px" onclick="loadStorageChart()">↻ Refresh</button>
+            <button class="btn" style="font-size:11px" data-action="load-storage-chart">↻ Refresh</button>
           </div>
           <div id="storage-chart-body" class="storage-chart">
             <p style="color:var(--muted);font-size:12px;padding:4px 0">Click refresh to load</p>
@@ -716,24 +719,23 @@
           <div class="card-header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <h3 style="margin:0;flex:1">Files</h3>
             <div style="display:flex;gap:6px">
-              <button class="btn dbmgr-tab active" data-tab="all" onclick="dbSetTab(this,'all')">All</button>
-              <button class="btn dbmgr-tab" data-tab="active" onclick="dbSetTab(this,'active')">Active</button>
-              <button class="btn dbmgr-tab" data-tab="deleted" onclick="dbSetTab(this,'deleted')">Deleted</button>
-              <button class="btn dbmgr-tab" data-tab="conflicts" onclick="dbSetTab(this,'conflicts')">Conflicts</button>
+              <button class="btn dbmgr-tab active" data-action="db-set-tab" data-tab="all">All</button>
+              <button class="btn dbmgr-tab" data-action="db-set-tab" data-tab="active">Active</button>
+              <button class="btn dbmgr-tab" data-action="db-set-tab" data-tab="deleted">Deleted</button>
+              <button class="btn dbmgr-tab" data-action="db-set-tab" data-tab="conflicts">Conflicts</button>
             </div>
             <input id="db-search" type="search" placeholder="Search paths…"
-              style="padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg3);color:var(--text);font-size:12px;width:200px"
-              oninput="debouncedDbRenderFiles()">
-            <button class="btn" onclick="dbLoadFiles()">↻ Refresh</button>
-            <button class="btn danger" id="purge-all-btn" style="display:none;font-size:11px" onclick="dbPurgeAllDeleted(this)" title="Remove all deleted records from the database so the server forgets them entirely">Purge All</button>
+              style="padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg3);color:var(--text);font-size:12px;width:200px">
+            <button class="btn" data-action="db-load-files">↻ Refresh</button>
+            <button class="btn danger" id="purge-all-btn" style="display:none;font-size:11px" data-action="db-purge-all" title="Remove all deleted records from the database so the server forgets them entirely">Purge All</button>
           </div>
           <!-- Bulk-select bar -->
           <div id="bulk-bar">
-            <input type="checkbox" id="bulk-select-all" onchange="dbToggleSelectAll(this.checked)" title="Select all">
+            <input type="checkbox" id="bulk-select-all" data-change="db-select-all" title="Select all">
             <span id="bulk-count" style="font-size:12px;color:var(--text)">0 selected</span>
             <div style="flex:1"></div>
-            <button class="btn" style="font-size:11px" onclick="dbDownloadZip()">⬇ Download ZIP</button>
-            <button class="btn danger" style="font-size:11px" onclick="dbDeleteSelected()">Delete selected</button>
+            <button class="btn" style="font-size:11px" data-action="db-download-zip">⬇ Download ZIP</button>
+            <button class="btn danger" style="font-size:11px" data-action="db-delete-selected">Delete selected</button>
           </div>
           <div id="db-files-body" style="max-height:480px;overflow-y:auto">
             <div class="empty" style="padding:32px">Click refresh to load files</div>
@@ -744,7 +746,7 @@
         <div class="card">
           <div class="card-header" style="display:flex;align-items:center;gap:10px">
             <h3 style="margin:0;flex:1">Devices</h3>
-            <button class="btn" onclick="dbLoadDevices()">↻ Refresh</button>
+            <button class="btn" data-action="db-load-devices">↻ Refresh</button>
           </div>
           <div id="db-devices-body">
             <div class="empty" style="padding:24px">Click refresh to load devices</div>
@@ -769,7 +771,7 @@
             <p style="margin:0 0 16px;font-size:12px;color:var(--muted)">
               File content must still be present in server storage (within the 7-day retention window).
             </p>
-            <button class="btn primary" id="restore-btn" onclick="restoreDeleted(this)">Restore Deleted Files</button>
+            <button class="btn primary" id="restore-btn" data-action="restore-deleted">Restore Deleted Files</button>
           </div>
         </div>
 
@@ -783,7 +785,7 @@
               This resolves all pending conflicts by discarding the conflict copies — the original files are kept untouched.
             </p>
             <p style="margin:0 0 16px;font-size:12px;color:var(--muted)">Conflict copies only. Original files are not affected.</p>
-            <button class="btn danger" id="clear-conflicts-btn" onclick="clearAllConflicts(this)">Remove All Conflicts</button>
+            <button class="btn danger" id="clear-conflicts-btn" data-action="clear-conflicts">Remove All Conflicts</button>
           </div>
         </div>
 
@@ -797,7 +799,7 @@
               from the server. Connected plugins will be disconnected and must re-sync from scratch.
             </p>
             <p style="margin:0 0 16px;font-size:12px;color:var(--muted)">This cannot be undone.</p>
-            <button class="btn danger" id="reset-btn" onclick="resetServer(this)">Reset Server</button>
+            <button class="btn danger" id="reset-btn" data-action="reset-server">Reset Server</button>
           </div>
         </div>
       </div>
@@ -814,8 +816,8 @@
       <button id="preview-close" title="Close">✕</button>
     </div>
     <div id="preview-tabs" style="display:none">
-      <button class="preview-tab active" data-tab="content" onclick="switchPreviewTab('content')">Preview</button>
-      <button class="preview-tab" data-tab="history" onclick="switchPreviewTab('history')">History</button>
+      <button class="preview-tab active" data-action="preview-tab" data-tab="content">Preview</button>
+      <button class="preview-tab" data-action="preview-tab" data-tab="history">History</button>
     </div>
     <div id="preview-body">
       <!-- Rendered by openPreview() -->
@@ -838,15 +840,15 @@
       <div class="compare-pane">
         <div class="compare-pane-title" id="compare-original-title">original</div>
         <div style="padding:4px 12px 8px;display:flex;gap:8px;border-bottom:1px solid var(--border)">
-          <button class="btn danger" style="font-size:11px;padding:3px 10px" onclick="deleteCompareVersion('original')">Delete this version</button>
+          <button class="btn danger" style="font-size:11px;padding:3px 10px" data-action="compare-delete" data-side="original">Delete this version</button>
         </div>
         <pre class="compare-pane-content" id="compare-original-content"></pre>
       </div>
       <div class="compare-pane">
         <div class="compare-pane-title conflict" id="compare-conflict-title">conflicted</div>
         <div style="padding:4px 12px 8px;display:flex;gap:8px;border-bottom:1px solid var(--border)">
-          <button class="btn primary" style="font-size:11px;padding:3px 10px" onclick="promoteConflict()" title="Replace the original with this conflict copy — makes this version canonical">Use as canonical</button>
-          <button class="btn danger" style="font-size:11px;padding:3px 10px" onclick="deleteCompareVersion('conflict')">Delete this version</button>
+          <button class="btn primary" style="font-size:11px;padding:3px 10px" data-action="promote-conflict" title="Replace the original with this conflict copy — makes this version canonical">Use as canonical</button>
+          <button class="btn danger" style="font-size:11px;padding:3px 10px" data-action="compare-delete" data-side="conflict">Delete this version</button>
         </div>
         <pre class="compare-pane-content" id="compare-conflict-content"></pre>
       </div>
@@ -1147,20 +1149,21 @@ function dbRenderFiles() {
         ? `<span class="badge-pill" style="font-size:10px;background:var(--yellow,#f0a500);color:#000">conflict</span>`
         : `<span class="badge-pill" style="font-size:10px;background:var(--green,#22c55e);color:#000">active</span>`;
 
+    const p = escHtml(f.path);
     const actions = isDeleted
-      ? `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbRestoreFile('${jsArg(f.path)}',this)">Restore</button>
-         <button class="btn danger" style="font-size:11px;padding:3px 8px" onclick="dbPurgeFile('${jsArg(f.path)}',this)" title="Erase this deleted record entirely so the server forgets it">Purge</button>`
+      ? `<button class="btn" style="font-size:11px;padding:3px 8px" data-action="db-restore-file" data-path="${p}">Restore</button>
+         <button class="btn danger" style="font-size:11px;padding:3px 8px" data-action="db-purge-file" data-path="${p}" title="Erase this deleted record entirely so the server forgets it">Purge</button>`
       : isConflict
-        ? `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="compareConflict('${jsArg(f.path)}')">Compare</button>
-           <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openHistory('${jsArg(f.path)}')">Versions</button>
-           <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openPreview('${jsArg(f.path)}')">Preview</button>`
-        : `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbEditMeta('${jsArg(f.path)}',${f.mtime},this)">Edit</button>
-           <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openHistory('${jsArg(f.path)}')">Versions</button>
-           <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openPreview('${jsArg(f.path)}')">Preview</button>`;
+        ? `<button class="btn" style="font-size:11px;padding:3px 8px" data-action="compare-conflict" data-path="${p}">Compare</button>
+           <button class="btn" style="font-size:11px;padding:3px 8px" data-action="open-history" data-path="${p}">Versions</button>
+           <button class="btn" style="font-size:11px;padding:3px 8px" data-action="open-preview" data-path="${p}">Preview</button>`
+        : `<button class="btn" style="font-size:11px;padding:3px 8px" data-action="db-edit-meta" data-path="${p}" data-mtime="${f.mtime}">Edit</button>
+           <button class="btn" style="font-size:11px;padding:3px 8px" data-action="open-history" data-path="${p}">Versions</button>
+           <button class="btn" style="font-size:11px;padding:3px 8px" data-action="open-preview" data-path="${p}">Preview</button>`;
 
     const name = f.path.split('/').pop();
     return `<div style="display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--border);font-size:12px">
-      <input type="checkbox" class="db-file-checkbox" data-path="${escHtml(f.path)}" ${dbSelected.has(f.path) ? 'checked' : ''} onchange="dbToggleFile('${jsArg(f.path)}', this.checked)" style="flex-shrink:0">
+      <input type="checkbox" class="db-file-checkbox" data-change="db-toggle-file" data-path="${p}" ${dbSelected.has(f.path) ? 'checked' : ''} style="flex-shrink:0">
       <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(f.path)}">
         <span style="font-weight:500">${escHtml(name)}</span>
         <span style="color:var(--muted);font-size:10px;display:block">${escHtml(f.path)}</span>
@@ -1271,10 +1274,10 @@ async function dbLoadDevices() {
         ? `<span class="badge-pill" style="background:var(--green,#22c55e);color:#000;font-size:10px">online</span>`
         : `<span class="badge-pill" style="font-size:10px">offline</span>`;
       return `<div style="display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--border);font-size:12px">
-        <span style="flex:1;cursor:pointer" onclick="renameDevice('${jsArg(d.id)}','${jsArg(d.name||'')}',this)" title="Click to rename">${deviceLabel(d.id, d.name)}</span>
+        <span style="flex:1;cursor:pointer" data-action="rename-device" data-id="${escHtml(d.id)}" data-name="${escHtml(d.name||'')}" title="Click to rename">${deviceLabel(d.id, d.name)}</span>
         ${pill}
         <span style="color:var(--muted);white-space:nowrap">last: ${fmtDate(d.lastOnline)}</span>
-        <button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbRemoveDevice('${jsArg(d.id)}',this)">Remove</button>
+        <button class="btn" style="font-size:11px;padding:3px 8px" data-action="db-remove-device" data-id="${escHtml(d.id)}">Remove</button>
       </div>`;
     }).join('');
 
@@ -1450,10 +1453,10 @@ function escHtml(s) {
 // named  x'+alert(1)+'.md  would break out of the string and execute in the
 // admin dashboard (vault file names sync in from any connected device).
 // Backslash-escape the JS string first, then entity-encode for the attribute.
-function escJs(s) {
-  return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\r/g, '\\r').replace(/\n/g, '\\n');
-}
-function jsArg(s) { return escHtml(escJs(s)); }
+// NOTE: no values are ever interpolated into JS-string contexts any more —
+// all dynamic handlers go through data-* attributes + the delegated listeners
+// at the bottom of this script, which is what lets the CSP run without
+// 'unsafe-inline' for scripts.
 
 function deviceLabel(deviceId, deviceName) {
   if (!deviceId) return '—';
@@ -1477,12 +1480,12 @@ function renderPeers() {
   }
   tbody.innerHTML = S.peers.map(p => `
     <tr>
-      <td style="cursor:pointer" onclick="renameDevice('${jsArg(p.deviceId)}','${jsArg(p.deviceName||'')}',this)" title="Click to rename">${deviceLabel(p.deviceId, p.deviceName)}</td>
+      <td style="cursor:pointer" data-action="rename-device" data-id="${escHtml(p.deviceId)}" data-name="${escHtml(p.deviceName||'')}" title="Click to rename">${deviceLabel(p.deviceId, p.deviceName)}</td>
       <td>${p.autoSync ? '<span class="badge-pill green">On</span>' : '<span class="badge-pill muted">Off</span>'}</td>
       <td>${p.pendingUploads > 0 ? `<span class="badge-pill red">${p.pendingUploads}</span>` : '<span class="text-muted">0</span>'}</td>
       <td style="display:flex;gap:6px">
-        <button class="btn" onclick="peerAction('trigger-sync','${jsArg(p.id)}',this)">Sync</button>
-        <button class="btn danger" onclick="peerAction('disconnect','${jsArg(p.id)}',this)">Disconnect</button>
+        <button class="btn" data-action="peer-action" data-peer-action="trigger-sync" data-peer="${escHtml(p.id)}">Sync</button>
+        <button class="btn danger" data-action="peer-action" data-peer-action="disconnect" data-peer="${escHtml(p.id)}">Disconnect</button>
       </td>
     </tr>
   `).join('');
@@ -1496,7 +1499,7 @@ function renderDevices() {
   }
   tbody.innerHTML = S.devices.map(d => `
     <tr>
-      <td style="cursor:pointer" onclick="renameDevice('${jsArg(d.id)}','${jsArg(d.name||'')}',this)" title="Click to rename">${deviceLabel(d.id, d.name)}</td>
+      <td style="cursor:pointer" data-action="rename-device" data-id="${escHtml(d.id)}" data-name="${escHtml(d.name||'')}" title="Click to rename">${deviceLabel(d.id, d.name)}</td>
       <td>${escHtml(fmtDate(d.lastOnline))}</td>
       <td>${d.connected ? '<span class="badge-pill green">Connected</span>' : '<span class="badge-pill muted">Offline</span>'}</td>
     </tr>
@@ -1559,16 +1562,16 @@ function renderTreeNode(node, depth) {
     const folderFiles = getAllFilesInFolder(child);
     const allChecked = folderFiles.length > 0 && folderFiles.every(p => filesSelected.has(p));
     html += `<div class="tree-row folder${allChecked ? ' selected' : ''}" style="padding-left:${pad}px">` +
-      `<input type="checkbox" class="tree-cb files-tree-cb" data-type="folder" data-path="${escHtml(fpath)}" ${allChecked ? 'checked' : ''} onclick="event.stopPropagation();filesToggleFolder('${jsArg(fpath)}',this.checked)">` +
-      `<span class="tree-toggle" onclick="toggleFolder('${jsArg(fpath)}')">` +
+      `<input type="checkbox" class="tree-cb files-tree-cb" data-type="folder" data-change="files-toggle-folder" data-path="${escHtml(fpath)}" ${allChecked ? 'checked' : ''}>` +
+      `<span class="tree-toggle" data-action="toggle-folder" data-path="${escHtml(fpath)}">` +
       `<span class="tree-chevron ${isOpen ? 'open' : ''}">▶</span>` +
       `<span class="tree-icon">📁</span>` +
       `<span class="tree-name">${escHtml(name)}</span>` +
       `<span class="tree-meta">${count} file${count !== 1 ? 's' : ''}</span>` +
       `</span>` +
       `<div class="tree-actions">` +
-      `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="openFolderRename('${jsArg(fpath)}')">Rename</button>` +
-      `<button class="btn danger" style="font-size:11px;padding:3px 8px" onclick="deleteFolder('${jsArg(fpath)}',this)">Delete</button>` +
+      `<button class="btn" style="font-size:11px;padding:3px 8px" data-action="folder-rename" data-path="${escHtml(fpath)}">Rename</button>` +
+      `<button class="btn danger" style="font-size:11px;padding:3px 8px" data-action="folder-delete" data-path="${escHtml(fpath)}">Delete</button>` +
       `</div>` +
       `</div>` +
       // Only materialise children of EXPANDED folders. Rendering the whole
@@ -1585,16 +1588,16 @@ function renderTreeNode(node, depth) {
     const icon = getFileIcon(f._name);
     const checked = filesSelected.has(f.path);
     html += `<div class="tree-row file${checked ? ' selected' : ''}" style="padding-left:${pad + 16}px">` +
-      `<input type="checkbox" class="tree-cb files-tree-cb" data-type="file" data-path="${escHtml(f.path)}" ${checked ? 'checked' : ''} onclick="event.stopPropagation();filesToggleFile('${jsArg(f.path)}',this.checked)">` +
+      `<input type="checkbox" class="tree-cb files-tree-cb" data-type="file" data-change="files-toggle-file" data-path="${escHtml(f.path)}" ${checked ? 'checked' : ''}>` +
       `<span class="tree-chevron"></span>` +
       `<span class="tree-icon">${icon}</span>` +
       `<span class="tree-name">${escHtml(f._name)}</span>` +
       `<span class="tree-meta">${fmtSize(f.size)}</span>` +
       `<span class="tree-meta">${escHtml(fmtDate(f.mtime))}</span>` +
       `<div class="tree-actions">` +
-      `<button class="btn" onclick="openPreview('${jsArg(f.path)}')">Preview</button>` +
-      `<button class="btn" onclick="openHistory('${jsArg(f.path)}')">History</button>` +
-      `<button class="btn danger" onclick="deleteFile('${jsArg(f.path)}',this)">Delete</button>` +
+      `<button class="btn" data-action="open-preview" data-path="${escHtml(f.path)}">Preview</button>` +
+      `<button class="btn" data-action="open-history" data-path="${escHtml(f.path)}">History</button>` +
+      `<button class="btn danger" data-action="file-delete" data-path="${escHtml(f.path)}">Delete</button>` +
       `</div>` +
       `</div>`;
   }
@@ -1689,12 +1692,12 @@ function updateOverview() {
   }
   tbody.innerHTML = S.peers.map(p => `
     <tr>
-      <td style="cursor:pointer" onclick="renameDevice('${jsArg(p.deviceId)}','${jsArg(p.deviceName||'')}',this)" title="Click to rename">${deviceLabel(p.deviceId, p.deviceName)}</td>
+      <td style="cursor:pointer" data-action="rename-device" data-id="${escHtml(p.deviceId)}" data-name="${escHtml(p.deviceName||'')}" title="Click to rename">${deviceLabel(p.deviceId, p.deviceName)}</td>
       <td>${p.autoSync ? '<span class="badge-pill green">On</span>' : '<span class="badge-pill muted">Off</span>'}</td>
       <td>${p.pendingUploads > 0 ? `<span class="badge-pill red">${p.pendingUploads}</span>` : '0'}</td>
       <td style="display:flex;gap:6px">
-        <button class="btn" onclick="peerAction('trigger-sync','${jsArg(p.id)}',this)">Sync</button>
-        <button class="btn danger" onclick="peerAction('disconnect','${jsArg(p.id)}',this)">Disconnect</button>
+        <button class="btn" data-action="peer-action" data-peer-action="trigger-sync" data-peer="${escHtml(p.id)}">Sync</button>
+        <button class="btn danger" data-action="peer-action" data-peer-action="disconnect" data-peer="${escHtml(p.id)}">Disconnect</button>
       </td>
     </tr>
   `).join('');
@@ -1768,7 +1771,7 @@ function renderTotpStatus(enabled) {
             placeholder="000000"
             style="width:140px;padding:8px 12px;border-radius:var(--radius);border:1px solid var(--border);background:var(--bg3);color:var(--text);font-size:16px;letter-spacing:4px;text-align:center;font-family:var(--mono)">
         </div>
-        <button class="btn danger" onclick="disableTotp()">Disable 2FA</button>
+        <button class="btn danger" data-action="disable-totp">Disable 2FA</button>
       </div>
       <div class="login-error" id="totp-disable-error" style="margin-top:8px"></div>
     `;
@@ -1778,7 +1781,7 @@ function renderTotpStatus(enabled) {
         Two-factor authentication is not enabled.
         Add an extra layer of security to your dashboard login.
       </p>
-      <button class="btn primary" onclick="startTotpSetup()">Enable 2FA…</button>
+      <button class="btn primary" data-action="start-totp-setup">Enable 2FA…</button>
       <div id="totp-setup-area" style="display:none;margin-top:24px;padding-top:20px;border-top:1px solid var(--border)"></div>
     `;
   }
@@ -1814,7 +1817,7 @@ async function startTotpSetup() {
             placeholder="000000"
             style="width:140px;padding:8px 12px;border-radius:var(--radius);border:1px solid var(--border);background:var(--bg3);color:var(--text);font-size:16px;letter-spacing:4px;text-align:center;font-family:var(--mono)">
         </div>
-        <button class="btn primary" onclick="enableTotp()">Activate 2FA</button>
+        <button class="btn primary" data-action="enable-totp">Activate 2FA</button>
       </div>
       <div class="login-error" id="totp-setup-error" style="margin-top:8px"></div>
     `;
@@ -1870,8 +1873,8 @@ function showRecoveryCodes(codes) {
       Each code can only be used once to sign in if you lose your authenticator.
     </div>
     <div class="recovery-grid">${codesHtml}</div>
-    <button class="btn" style="margin-right:8px" onclick="copyRecoveryCodes(${JSON.stringify(codes)})">Copy all</button>
-    <button class="btn primary" onclick="loadTotpStatus()">Done — I've saved these</button>
+    <button class="btn" style="margin-right:8px" data-action="copy-recovery" data-codes="${escHtml(JSON.stringify(codes))}">Copy all</button>
+    <button class="btn primary" data-action="load-totp-status">Done — I've saved these</button>
     <p style="font-size:11px;color:var(--muted);margin-top:14px">
       Store them in a password manager or print them and keep somewhere safe.
     </p>
@@ -1924,8 +1927,8 @@ function dbEditMeta(filePath, currentMtime, _btn) {
         style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:13px;outline:none;margin-bottom:18px;color-scheme:dark">
       <p style="color:var(--muted);font-size:11px;margin:-10px 0 16px">Changing mtime affects conflict resolution — last-write-wins uses this value.</p>
       <div style="display:flex;gap:8px;justify-content:flex-end">
-        <button class="btn" onclick="this.closest('[data-meta-overlay]').remove()">Cancel</button>
-        <button class="btn primary" onclick="dbSaveMeta('${jsArg(filePath)}',this)">Save</button>
+        <button class="btn" data-action="meta-cancel">Cancel</button>
+        <button class="btn primary" data-action="meta-save" data-path="${escHtml(filePath)}">Save</button>
       </div>
     </div>`;
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
@@ -1965,8 +1968,7 @@ async function renameDevice(deviceId, currentName, cellEl) {
     value="${escHtml(currentName)}"
     placeholder="e.g. MacBook, iPhone…"
     style="width:100%;padding:3px 7px;border:1px solid var(--accent);border-radius:4px;
-           background:var(--bg3);color:var(--text);font-size:12px;font-family:inherit"
-    onclick="event.stopPropagation()">`;
+           background:var(--bg3);color:var(--text);font-size:12px;font-family:inherit">`;
   const input = document.getElementById('device-name-input');
   input.focus();
   input.select();
@@ -2149,6 +2151,94 @@ async function promoteConflict() {
   }
 }
 
+// ── Delegated actions (CSP: no inline handlers) ────────────────────────────
+// Every dynamic control carries data-action / data-change instead of an
+// inline on* attribute, so script-src needs no 'unsafe-inline'. Arguments
+// travel as data-* attributes and are read here at event time — they are
+// never part of executable code, which also closes the injected-handler XSS
+// class entirely.
+const ACTIONS = {
+  'dismiss-crypto':        () => { document.getElementById('crypto-warning').style.display = 'none'; },
+  'back-to-password':      () => backToPassword(),
+  'toggle-recovery':       () => toggleRecoveryMode(),
+  'refresh-all':           () => refreshAll(),
+  'load-activity':         () => loadActivity(),
+  'load-files':            () => loadFiles(),
+  'load-logs':             () => loadLogs(),
+  'load-storage-chart':    () => loadStorageChart(),
+  'export-snapshot':       (el) => exportSnapshot(el),
+  'files-download-zip':    () => filesDownloadZip(),
+  'files-delete-selected': () => filesDeleteSelected(),
+  'db-load-stats':         () => dbLoadStats(),
+  'prune-corrupt':         (el) => pruneCorruptVersions(el),
+  'db-set-tab':            (el) => dbSetTab(el, el.dataset.tab),
+  'db-load-files':         () => dbLoadFiles(),
+  'db-purge-all':          (el) => dbPurgeAllDeleted(el),
+  'db-download-zip':       () => dbDownloadZip(),
+  'db-delete-selected':    () => dbDeleteSelected(),
+  'db-load-devices':       () => dbLoadDevices(),
+  'restore-deleted':       (el) => restoreDeleted(el),
+  'clear-conflicts':       (el) => clearAllConflicts(el),
+  'reset-server':          (el) => resetServer(el),
+  'preview-tab':           (el) => switchPreviewTab(el.dataset.tab),
+  'db-restore-file':       (el) => dbRestoreFile(el.dataset.path, el),
+  'db-purge-file':         (el) => dbPurgeFile(el.dataset.path, el),
+  'compare-conflict':      (el) => compareConflict(el.dataset.path),
+  'compare-delete':        (el) => deleteCompareVersion(el.dataset.side),
+  'promote-conflict':      () => promoteConflict(),
+  'open-history':          (el) => openHistory(el.dataset.path),
+  'open-preview':          (el) => openPreview(el.dataset.path),
+  'db-edit-meta':          (el) => dbEditMeta(el.dataset.path, Number(el.dataset.mtime), el),
+  'rename-device':         (el, e) => {
+    // Ignore clicks on the inline edit input the handler itself creates —
+    // they bubble back up to this same cell.
+    if (e.target.tagName === 'INPUT') return;
+    renameDevice(el.dataset.id, el.dataset.name || '', el);
+  },
+  'db-remove-device':      (el) => dbRemoveDevice(el.dataset.id, el),
+  'peer-action':           (el) => peerAction(el.dataset.peerAction, el.dataset.peer, el),
+  'toggle-folder':         (el) => toggleFolder(el.dataset.path),
+  'folder-rename':         (el) => openFolderRename(el.dataset.path),
+  'folder-delete':         (el) => deleteFolder(el.dataset.path, el),
+  'file-delete':           (el) => deleteFile(el.dataset.path, el),
+  'meta-cancel':           (el) => el.closest('[data-meta-overlay]').remove(),
+  'meta-save':             (el) => dbSaveMeta(el.dataset.path, el),
+  'copy-recovery':         (el) => copyRecoveryCodes(JSON.parse(el.dataset.codes)),
+  'load-totp-status':      () => loadTotpStatus(),
+  'start-totp-setup':      () => startTotpSetup(),
+  'enable-totp':           () => enableTotp(),
+  'disable-totp':          () => disableTotp(),
+  'decrypt-preview':       () => decryptPreview(),
+  'preview-version':       (el) => previewVersion(el.dataset.path, Number(el.dataset.mtime)),
+  'preview-diff':          (el) => previewVersionDiff(el.dataset.path, Number(el.dataset.latest), Number(el.dataset.mtime)),
+};
+
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const fn = ACTIONS[el.dataset.action];
+  if (fn) fn(el, e);
+});
+
+document.addEventListener('change', (e) => {
+  const el = e.target.closest('[data-change]');
+  if (!el) return;
+  switch (el.dataset.change) {
+    case 'db-toggle-file':      dbToggleFile(el.dataset.path, el.checked); break;
+    case 'db-select-all':       dbToggleSelectAll(el.checked); break;
+    case 'files-select-all':    filesToggleSelectAll(el.checked); break;
+    case 'files-toggle-file':   filesToggleFile(el.dataset.path, el.checked); break;
+    case 'files-toggle-folder': filesToggleFolder(el.dataset.path, el.checked); break;
+  }
+});
+
+document.addEventListener('input', (e) => {
+  const el = e.target;
+  if (el.id === 'file-search') debouncedRenderFileTree();
+  else if (el.id === 'db-search') debouncedDbRenderFiles();
+  else if (el.id === 'global-e2ee-pw') sessionStorage.setItem('e2ee-pw', el.value);
+});
+
 // ── Event wiring ───────────────────────────────────────────────────────────
 document.getElementById('login-btn').addEventListener('click', login);
 document.getElementById('pw-input').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
@@ -2289,7 +2379,7 @@ function renderE2eeUnlock() {
       <label for="e2ee-pw">Encryption password</label>
       <input id="e2ee-pw" type="password" placeholder="your-encryption-passphrase" autocomplete="off">
       <div id="e2ee-err"></div>
-      <button class="btn primary" id="e2ee-btn" onclick="decryptPreview()">Decrypt &amp; preview</button>
+      <button class="btn primary" id="e2ee-btn" data-action="decrypt-preview">Decrypt &amp; preview</button>
     </div>`;
   const input = document.getElementById('e2ee-pw');
   input.addEventListener('keydown', e => { if (e.key === 'Enter') decryptPreview(); });
@@ -2386,11 +2476,10 @@ function loadScript(src) {
   });
 }
 
-async function exportSnapshot(event) {
+async function exportSnapshot(btn) {
   const dateInput = document.getElementById('snapshot-date').value;
   if (!dateInput) { toast('Pick a snapshot date first', 'error'); return; }
 
-  const btn = event.currentTarget;
   const origText = btn.textContent;
   btn.disabled = true;
   btn.textContent = 'Downloading…';
@@ -2485,8 +2574,8 @@ async function loadVersionHistory(filePath) {
         </span>
         <span class="version-sha" title="${escHtml(v.sha1 || '')}">${escHtml(sha)}…</span>
         <span class="version-size">${fmtSize(v.size)}</span>
-        <button class="btn" style="font-size:11px;padding:3px 9px" onclick="previewVersion('${jsArg(filePath)}', ${v.mtime})">View</button>
-        ${!isLatest ? `<button class="btn" style="font-size:11px;padding:3px 9px;margin-left:4px" onclick="previewVersionDiff('${jsArg(filePath)}', ${versions[0].mtime}, ${v.mtime})">Diff</button>` : '<span style="display:inline-block;width:65px"></span>'}
+        <button class="btn" style="font-size:11px;padding:3px 9px" data-action="preview-version" data-path="${escHtml(filePath)}" data-mtime="${v.mtime}">View</button>
+        ${!isLatest ? `<button class="btn" style="font-size:11px;padding:3px 9px;margin-left:4px" data-action="preview-diff" data-path="${escHtml(filePath)}" data-latest="${versions[0].mtime}" data-mtime="${v.mtime}">Diff</button>` : '<span style="display:inline-block;width:65px"></span>'}
       </div>`;
     }).join('');
 

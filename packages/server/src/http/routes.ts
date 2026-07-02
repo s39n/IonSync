@@ -1,7 +1,7 @@
 import express, { type Request, type Response } from "express";
 import fs from "node:fs";
 import path from "node:path";
-import { timingSafeEqual } from "node:crypto";
+import { timingSafeEqual, randomBytes } from "node:crypto";
 import archiver from "archiver";
 import { ConnectionRateLimiter } from "../ws/rateLimit.js";
 import type { SyncContext } from "../context.js";
@@ -56,15 +56,16 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   });
 
   // Content-Security-Policy for the dashboard page — defence in depth on top
-  // of the output escaping in dashboard.html. 'unsafe-inline' is required by
-  // the current inline <script>/onclick architecture, but the policy still:
-  //   - restricts external scripts to cdnjs (qrcodejs/JSZip),
-  //   - blocks framing (clickjacking), plugins, base-tag hijacks, and
-  //     form exfiltration to foreign origins,
-  //   - limits fetch/XHR targets to the dashboard's own origin.
-  const DASHBOARD_CSP = [
+  // of the output escaping in dashboard.html. Scripts run only with the
+  // per-request nonce (injected into the <script> tags when the page is
+  // served) or from cdnjs (qrcodejs/JSZip, which are inserted dynamically and
+  // therefore matched by host). No 'unsafe-inline' for scripts: the dashboard
+  // uses delegated listeners instead of inline on* handlers, so injected
+  // markup can never execute. Styles keep 'unsafe-inline' (inline style
+  // attributes are cosmetic and not a script-execution vector).
+  const dashboardCsp = (nonce: string): string => [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com",
+    `script-src 'nonce-${nonce}' https://cdnjs.cloudflare.com`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data:",
     "connect-src 'self'",
@@ -126,12 +127,17 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     return true;
   }
 
-  // Dashboard HTML
+  // Dashboard HTML — served with a fresh script nonce stamped into every
+  // <script> tag so the CSP can drop 'unsafe-inline' for scripts entirely.
   router.get("/dashboard", (_req, res) => {
-    res.setHeader("Content-Security-Policy", DASHBOARD_CSP);
+    const nonce = randomBytes(16).toString("base64");
+    res.setHeader("Content-Security-Policy", dashboardCsp(nonce));
     const htmlPath = path.join(ctx.clientDir, "dashboard.html");
     if (fs.existsSync(htmlPath)) {
-      res.sendFile(htmlPath);
+      const html = fs
+        .readFileSync(htmlPath, "utf8")
+        .replace(/<script\b/g, `<script nonce="${nonce}"`);
+      res.type("html").send(html);
     } else {
       res.status(200).type("html").send("Dashboard not built yet.");
     }
