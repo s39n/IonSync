@@ -47,6 +47,33 @@ function secretsMatch(received: string, expected: string): boolean {
 export function buildAdminRouter(ctx: SyncContext): express.Router {
   const router = express.Router();
 
+  // Baseline hardening headers on every admin response.
+  router.use((_req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("X-Frame-Options", "DENY");
+    next();
+  });
+
+  // Content-Security-Policy for the dashboard page — defence in depth on top
+  // of the output escaping in dashboard.html. 'unsafe-inline' is required by
+  // the current inline <script>/onclick architecture, but the policy still:
+  //   - restricts external scripts to cdnjs (qrcodejs/JSZip),
+  //   - blocks framing (clickjacking), plugins, base-tag hijacks, and
+  //     form exfiltration to foreign origins,
+  //   - limits fetch/XHR targets to the dashboard's own origin.
+  const DASHBOARD_CSP = [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join("; ");
+
   const DASH_TOKEN = sha256(ctx.config.password + "-dashboard");
 
   // Per-IP throttle for the login endpoints. The WS side has had this from the
@@ -101,6 +128,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
 
   // Dashboard HTML
   router.get("/dashboard", (_req, res) => {
+    res.setHeader("Content-Security-Policy", DASHBOARD_CSP);
     const htmlPath = path.join(ctx.clientDir, "dashboard.html");
     if (fs.existsSync(htmlPath)) {
       res.sendFile(htmlPath);
@@ -559,34 +587,56 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     });
 
     archive.on("finish", () => {
-      console.log(`[export] ZIP complete — ${archive.pointer()} bytes`);
+      console.log(`[export] ZIP complete — ${archive.pointer()} bytes (${snapFiles.length} entries considered)`);
+    });
+
+    // Stop reading files if the client disconnects mid-download.
+    res.on("close", () => {
+      if (!res.writableFinished) {
+        try { archive.abort(); } catch { /* already finalized */ }
+      }
     });
 
     archive.pipe(res);
 
-    for (const { path: filePath, mtime } of snapFiles) {
-      console.log(`[export] reading "${filePath}"`);
-      const buf = ctx.storage.readVersion(filePath, mtime);
-      if (!buf) {
-        console.warn(`[export] skipping "${filePath}" — no stored version found`);
-        continue;
-      }
-
-      let finalBuf = buf;
-
-      if (isE2eeEncrypted(buf) && decryptE2ee) {
+    // Stream ONE entry at a time: the next file is appended when archiver
+    // fires "entry" for the previous one. The old loop appended every file's
+    // Buffer up front, so a 50k-file export held the whole vault's content in
+    // archiver's internal queue. Plain files are appended as lazy read
+    // streams; only E2EE files that must be decrypted are buffered (AES-GCM
+    // needs the full blob), and never more than one at a time.
+    let idx = 0;
+    const appendNext = (): void => {
+      while (idx < snapFiles.length) {
+        const { path: filePath, mtime } = snapFiles[idx++]!;
         try {
-          finalBuf = decryptE2ee(buf);
-          console.log(`[export] decrypted "${filePath}" (${buf.length} → ${finalBuf.length} bytes)`);
-        } catch {
-          console.warn(`[export] decryption failed for "${filePath}" — wrong key? Including encrypted.`);
+          const prefix = ctx.storage.readVersionPrefix(filePath, mtime, 8);
+          if (!prefix) continue; // no stored version — skip
+
+          if (decryptE2ee && isE2eeEncrypted(prefix)) {
+            const buf = ctx.storage.readVersion(filePath, mtime);
+            if (!buf) continue;
+            let finalBuf = buf;
+            try {
+              finalBuf = decryptE2ee(buf);
+            } catch {
+              console.warn(`[export] decryption failed for "${filePath}" — wrong key? Including encrypted.`);
+            }
+            archive.append(finalBuf, { name: filePath, date: new Date(mtime) });
+          } else {
+            const stream = ctx.storage.openVersionStream(filePath, mtime);
+            if (!stream) continue;
+            archive.append(stream, { name: filePath, date: new Date(mtime) });
+          }
+          return; // wait for "entry" before appending the next file
+        } catch (e) {
+          console.warn(`[export] skipping "${filePath}": ${e}`);
         }
       }
-
-      archive.append(finalBuf, { name: filePath, date: new Date(mtime) });
-    }
-
-    archive.finalize();
+      void archive.finalize();
+    };
+    archive.on("entry", appendNext);
+    appendNext();
   });
 
   // Export a ZIP of specific files (latest version of each).
@@ -610,22 +660,44 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
 
     const archive = archiver("zip", { zlib: { level: 6 } });
     archive.on("error", (err) => console.error("[export-selected] archiver error:", err));
+    res.on("close", () => {
+      if (!res.writableFinished) {
+        try { archive.abort(); } catch { /* already finalized */ }
+      }
+    });
     archive.pipe(res);
 
-    for (const filePath of paths as string[]) {
-      const buf = ctx.storage.readLatest(filePath);
-      if (!buf) {
-        console.warn(`[export-selected] skipping "${filePath}" — no stored version`);
-        continue;
-      }
-      let finalBuf = buf;
-      if (isE2eeEncrypted(buf) && decryptE2ee) {
-        try { finalBuf = decryptE2ee(buf); } catch {}
-      }
-      archive.append(finalBuf, { name: filePath });
-    }
+    // One entry in flight at a time — see export-snapshot above for rationale.
+    const pathList = (paths as unknown[]).map(String);
+    let idx = 0;
+    const appendNext = (): void => {
+      while (idx < pathList.length) {
+        const filePath = pathList[idx++]!;
+        try {
+          const mtime = ctx.storage.latestVersionMtime(filePath);
+          if (mtime === null) continue; // no stored version — skip
 
-    archive.finalize();
+          const prefix = ctx.storage.readVersionPrefix(filePath, mtime, 8);
+          if (prefix && decryptE2ee && isE2eeEncrypted(prefix)) {
+            const buf = ctx.storage.readVersion(filePath, mtime);
+            if (!buf) continue;
+            let finalBuf = buf;
+            try { finalBuf = decryptE2ee(buf); } catch { /* wrong key — include encrypted */ }
+            archive.append(finalBuf, { name: filePath });
+          } else {
+            const stream = ctx.storage.openVersionStream(filePath, mtime);
+            if (!stream) continue;
+            archive.append(stream, { name: filePath });
+          }
+          return;
+        } catch (e) {
+          console.warn(`[export-selected] skipping "${filePath}": ${e}`);
+        }
+      }
+      void archive.finalize();
+    };
+    archive.on("entry", appendNext);
+    appendNext();
   });
 
   // ── TOTP management ──────────────────────────────────────────────────────

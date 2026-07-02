@@ -76,6 +76,41 @@ export class Storage {
     return fs.readFileSync(vp);
   }
 
+  /**
+   * Opens a lazy read stream over a stored version. Used by the ZIP export
+   * endpoints so the archiver pulls content file-by-file instead of the route
+   * buffering every file up front (which could hold tens of thousands of
+   * Buffers in memory on a large-vault export).
+   */
+  openVersionStream(filePath: string, mtime: number): fs.ReadStream | null {
+    const vp = this.versionPath(filePath, mtime);
+    if (!fs.existsSync(vp)) return null;
+    return fs.createReadStream(vp);
+  }
+
+  /**
+   * Reads only the first `length` bytes of a stored version — enough to check
+   * the E2EE magic header without loading the whole file.
+   */
+  readVersionPrefix(filePath: string, mtime: number, length: number): Buffer | null {
+    const vp = this.versionPath(filePath, mtime);
+    if (!fs.existsSync(vp)) return null;
+    const fd = fs.openSync(vp, "r");
+    try {
+      const buf = Buffer.alloc(length);
+      const n = fs.readSync(fd, buf, 0, length, 0);
+      return buf.subarray(0, n);
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+
+  /** The mtime of the newest stored version, or null when none exist. */
+  latestVersionMtime(filePath: string): number | null {
+    const versions = this.listVersionMtimes(filePath);
+    return versions.length > 0 ? versions[0]! : null;
+  }
+
   // ─── Version management ──────────────────────────────────────────────────
 
   /**
