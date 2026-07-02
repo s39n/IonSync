@@ -419,7 +419,9 @@
     .activity-kind.delete     { background: rgba(255,95,95,.15); color: var(--red); }
     .activity-kind.rename     { background: rgba(255,179,71,.15); color: var(--yellow); }
     .activity-path { flex: 1; font-family: var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .activity-time { color: var(--muted); white-space: nowrap; flex-shrink: 0; }
+    .activity-detail { flex: 1; font-family: var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .activity-device { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; flex-shrink: 0; }
+    .activity-time { color: var(--muted); white-space: nowrap; flex-shrink: 0; margin-left: auto; }
 
     /* ── Conflict compare overlay ────────────────────────────────────────────── */
     #compare-overlay {
@@ -606,7 +608,7 @@
         <div class="toolbar">
           <h2 style="margin:0">Files</h2>
           <div class="spacer"></div>
-          <input class="search-bar" id="file-search" type="text" placeholder="Search paths…" oninput="renderFileTree()">
+          <input class="search-bar" id="file-search" type="text" placeholder="Search paths…" oninput="debouncedRenderFileTree()">
           <button class="btn" onclick="loadFiles()">↻ Refresh</button>
         </div>
 
@@ -721,7 +723,7 @@
             </div>
             <input id="db-search" type="search" placeholder="Search paths…"
               style="padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg3);color:var(--text);font-size:12px;width:200px"
-              oninput="dbRenderFiles()">
+              oninput="debouncedDbRenderFiles()">
             <button class="btn" onclick="dbLoadFiles()">↻ Refresh</button>
             <button class="btn danger" id="purge-all-btn" style="display:none;font-size:11px" onclick="dbPurgeAllDeleted(this)" title="Remove all deleted records from the database so the server forgets them entirely">Purge All</button>
           </div>
@@ -1013,8 +1015,12 @@ async function refreshAll() {
     if (document.getElementById('panel-files').classList.contains('active')) {
       await loadFiles();
     }
-    // Refresh storage chart when database panel is active
-    if (document.getElementById('panel-database').classList.contains('active')) {
+    // Refresh stats + storage chart when the Database panel is active.
+    // (This previously referenced 'panel-database', which doesn't exist — the
+    // resulting TypeError was caught by the catch below and flipped the header
+    // status to "Unreachable" on every 5-second poll.)
+    if (document.getElementById('panel-dbmgr').classList.contains('active')) {
+      dbLoadStats();
       loadStorageChart();
     }
   } catch {
@@ -1142,19 +1148,19 @@ function dbRenderFiles() {
         : `<span class="badge-pill" style="font-size:10px;background:var(--green,#22c55e);color:#000">active</span>`;
 
     const actions = isDeleted
-      ? `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbRestoreFile('${escHtml(f.path)}',this)">Restore</button>
-         <button class="btn danger" style="font-size:11px;padding:3px 8px" onclick="dbPurgeFile('${escHtml(f.path)}',this)" title="Erase this deleted record entirely so the server forgets it">Purge</button>`
+      ? `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbRestoreFile('${jsArg(f.path)}',this)">Restore</button>
+         <button class="btn danger" style="font-size:11px;padding:3px 8px" onclick="dbPurgeFile('${jsArg(f.path)}',this)" title="Erase this deleted record entirely so the server forgets it">Purge</button>`
       : isConflict
-        ? `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="compareConflict('${escHtml(f.path)}')">Compare</button>
-           <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openHistory('${escHtml(f.path)}')">Versions</button>
-           <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openPreview('${escHtml(f.path)}')">Preview</button>`
-        : `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbEditMeta('${escHtml(f.path)}',${f.mtime},this)">Edit</button>
-           <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openHistory('${escHtml(f.path)}')">Versions</button>
-           <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openPreview('${escHtml(f.path)}')">Preview</button>`;
+        ? `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="compareConflict('${jsArg(f.path)}')">Compare</button>
+           <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openHistory('${jsArg(f.path)}')">Versions</button>
+           <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openPreview('${jsArg(f.path)}')">Preview</button>`
+        : `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbEditMeta('${jsArg(f.path)}',${f.mtime},this)">Edit</button>
+           <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openHistory('${jsArg(f.path)}')">Versions</button>
+           <button class="btn" style="font-size:11px;padding:3px 8px" onclick="openPreview('${jsArg(f.path)}')">Preview</button>`;
 
     const name = f.path.split('/').pop();
     return `<div style="display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--border);font-size:12px">
-      <input type="checkbox" class="db-file-checkbox" data-path="${escHtml(f.path)}" ${dbSelected.has(f.path) ? 'checked' : ''} onchange="dbToggleFile('${escHtml(f.path)}', this.checked)" style="flex-shrink:0">
+      <input type="checkbox" class="db-file-checkbox" data-path="${escHtml(f.path)}" ${dbSelected.has(f.path) ? 'checked' : ''} onchange="dbToggleFile('${jsArg(f.path)}', this.checked)" style="flex-shrink:0">
       <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(f.path)}">
         <span style="font-weight:500">${escHtml(name)}</span>
         <span style="color:var(--muted);font-size:10px;display:block">${escHtml(f.path)}</span>
@@ -1265,10 +1271,10 @@ async function dbLoadDevices() {
         ? `<span class="badge-pill" style="background:var(--green,#22c55e);color:#000;font-size:10px">online</span>`
         : `<span class="badge-pill" style="font-size:10px">offline</span>`;
       return `<div style="display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--border);font-size:12px">
-        <span style="flex:1;cursor:pointer" onclick="renameDevice('${escHtml(d.id)}','${escHtml(d.name||'')}',this)" title="Click to rename">${deviceLabel(d.id, d.name)}</span>
+        <span style="flex:1;cursor:pointer" onclick="renameDevice('${jsArg(d.id)}','${jsArg(d.name||'')}',this)" title="Click to rename">${deviceLabel(d.id, d.name)}</span>
         ${pill}
         <span style="color:var(--muted);white-space:nowrap">last: ${fmtDate(d.lastOnline)}</span>
-        <button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbRemoveDevice('${escHtml(d.id)}',this)">Remove</button>
+        <button class="btn" style="font-size:11px;padding:3px 8px" onclick="dbRemoveDevice('${jsArg(d.id)}',this)">Remove</button>
       </div>`;
     }).join('');
 
@@ -1435,8 +1441,19 @@ function shortId(id) {
 }
 
 function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
+
+// For values interpolated into single-quoted strings inside inline event
+// handlers (onclick="fn('…')"). escHtml alone is NOT enough there: the browser
+// decodes HTML entities in the attribute before the JS parser runs, so a file
+// named  x'+alert(1)+'.md  would break out of the string and execute in the
+// admin dashboard (vault file names sync in from any connected device).
+// Backslash-escape the JS string first, then entity-encode for the attribute.
+function escJs(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\r/g, '\\r').replace(/\n/g, '\\n');
+}
+function jsArg(s) { return escHtml(escJs(s)); }
 
 function deviceLabel(deviceId, deviceName) {
   if (!deviceId) return '—';
@@ -1460,12 +1477,12 @@ function renderPeers() {
   }
   tbody.innerHTML = S.peers.map(p => `
     <tr>
-      <td style="cursor:pointer" onclick="renameDevice('${escHtml(p.deviceId)}','${escHtml(p.deviceName||'')}',this)" title="Click to rename">${deviceLabel(p.deviceId, p.deviceName)}</td>
+      <td style="cursor:pointer" onclick="renameDevice('${jsArg(p.deviceId)}','${jsArg(p.deviceName||'')}',this)" title="Click to rename">${deviceLabel(p.deviceId, p.deviceName)}</td>
       <td>${p.autoSync ? '<span class="badge-pill green">On</span>' : '<span class="badge-pill muted">Off</span>'}</td>
       <td>${p.pendingUploads > 0 ? `<span class="badge-pill red">${p.pendingUploads}</span>` : '<span class="text-muted">0</span>'}</td>
       <td style="display:flex;gap:6px">
-        <button class="btn" onclick="peerAction('trigger-sync','${escHtml(p.id)}',this)">Sync</button>
-        <button class="btn danger" onclick="peerAction('disconnect','${escHtml(p.id)}',this)">Disconnect</button>
+        <button class="btn" onclick="peerAction('trigger-sync','${jsArg(p.id)}',this)">Sync</button>
+        <button class="btn danger" onclick="peerAction('disconnect','${jsArg(p.id)}',this)">Disconnect</button>
       </td>
     </tr>
   `).join('');
@@ -1479,7 +1496,7 @@ function renderDevices() {
   }
   tbody.innerHTML = S.devices.map(d => `
     <tr>
-      <td style="cursor:pointer" onclick="renameDevice('${escHtml(d.id)}','${escHtml(d.name||'')}',this)" title="Click to rename">${deviceLabel(d.id, d.name)}</td>
+      <td style="cursor:pointer" onclick="renameDevice('${jsArg(d.id)}','${jsArg(d.name||'')}',this)" title="Click to rename">${deviceLabel(d.id, d.name)}</td>
       <td>${escHtml(fmtDate(d.lastOnline))}</td>
       <td>${d.connected ? '<span class="badge-pill green">Connected</span>' : '<span class="badge-pill muted">Offline</span>'}</td>
     </tr>
@@ -1542,37 +1559,42 @@ function renderTreeNode(node, depth) {
     const folderFiles = getAllFilesInFolder(child);
     const allChecked = folderFiles.length > 0 && folderFiles.every(p => filesSelected.has(p));
     html += `<div class="tree-row folder${allChecked ? ' selected' : ''}" style="padding-left:${pad}px">` +
-      `<input type="checkbox" class="tree-cb files-tree-cb" data-type="folder" data-path="${escHtml(fpath)}" ${allChecked ? 'checked' : ''} onclick="event.stopPropagation();filesToggleFolder('${escHtml(fpath)}',this.checked)">` +
-      `<span class="tree-toggle" onclick="toggleFolder('${escHtml(fpath)}')">` +
+      `<input type="checkbox" class="tree-cb files-tree-cb" data-type="folder" data-path="${escHtml(fpath)}" ${allChecked ? 'checked' : ''} onclick="event.stopPropagation();filesToggleFolder('${jsArg(fpath)}',this.checked)">` +
+      `<span class="tree-toggle" onclick="toggleFolder('${jsArg(fpath)}')">` +
       `<span class="tree-chevron ${isOpen ? 'open' : ''}">▶</span>` +
       `<span class="tree-icon">📁</span>` +
       `<span class="tree-name">${escHtml(name)}</span>` +
       `<span class="tree-meta">${count} file${count !== 1 ? 's' : ''}</span>` +
       `</span>` +
       `<div class="tree-actions">` +
-      `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="openFolderRename('${escHtml(fpath)}')">Rename</button>` +
-      `<button class="btn danger" style="font-size:11px;padding:3px 8px" onclick="deleteFolder('${escHtml(fpath)}',this)">Delete</button>` +
+      `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="openFolderRename('${jsArg(fpath)}')">Rename</button>` +
+      `<button class="btn danger" style="font-size:11px;padding:3px 8px" onclick="deleteFolder('${jsArg(fpath)}',this)">Delete</button>` +
       `</div>` +
       `</div>` +
-      `<div class="tree-children ${isOpen ? 'open' : ''}" data-folder="${escHtml(fpath)}">` +
-      renderTreeNode(child, depth + 1) +
-      `</div>`;
+      // Only materialise children of EXPANDED folders. Rendering the whole
+      // tree and hiding closed branches with CSS put every row in the DOM —
+      // 50k+ nodes on a large vault, which froze the Files panel.
+      (isOpen
+        ? `<div class="tree-children open" data-folder="${escHtml(fpath)}">` +
+          renderTreeNode(child, depth + 1) +
+          `</div>`
+        : '');
   }
 
   for (const f of files) {
     const icon = getFileIcon(f._name);
     const checked = filesSelected.has(f.path);
     html += `<div class="tree-row file${checked ? ' selected' : ''}" style="padding-left:${pad + 16}px">` +
-      `<input type="checkbox" class="tree-cb files-tree-cb" data-type="file" data-path="${escHtml(f.path)}" ${checked ? 'checked' : ''} onclick="event.stopPropagation();filesToggleFile('${escHtml(f.path)}',this.checked)">` +
+      `<input type="checkbox" class="tree-cb files-tree-cb" data-type="file" data-path="${escHtml(f.path)}" ${checked ? 'checked' : ''} onclick="event.stopPropagation();filesToggleFile('${jsArg(f.path)}',this.checked)">` +
       `<span class="tree-chevron"></span>` +
       `<span class="tree-icon">${icon}</span>` +
       `<span class="tree-name">${escHtml(f._name)}</span>` +
       `<span class="tree-meta">${fmtSize(f.size)}</span>` +
       `<span class="tree-meta">${escHtml(fmtDate(f.mtime))}</span>` +
       `<div class="tree-actions">` +
-      `<button class="btn" onclick="openPreview('${escHtml(f.path)}')">Preview</button>` +
-      `<button class="btn" onclick="openHistory('${escHtml(f.path)}')">History</button>` +
-      `<button class="btn danger" onclick="deleteFile('${escHtml(f.path)}',this)">Delete</button>` +
+      `<button class="btn" onclick="openPreview('${jsArg(f.path)}')">Preview</button>` +
+      `<button class="btn" onclick="openHistory('${jsArg(f.path)}')">History</button>` +
+      `<button class="btn danger" onclick="deleteFile('${jsArg(f.path)}',this)">Delete</button>` +
       `</div>` +
       `</div>`;
   }
@@ -1600,8 +1622,10 @@ function renderFileTree() {
   document.getElementById('files-stats').textContent =
     `${filtered.length === allFiles.length ? filtered.length : filtered.length + ' of ' + allFiles.length} files · ${fmtSize(totalSize)} total`;
 
-  // When searching, auto-expand everything so matches are visible
-  if (q) {
+  // When searching, auto-expand so matches are visible — but only for result
+  // sets small enough to render comfortably. Expanding every ancestor of 20k
+  // matches would put every row in the DOM at once.
+  if (q && filtered.length <= 500) {
     for (const f of filtered) {
       const parts = f.path.split('/');
       parts.pop();
@@ -1611,6 +1635,8 @@ function renderFileTree() {
         openFolders.add(cur);
       }
     }
+  } else if (q) {
+    document.getElementById('files-stats').textContent += ' — refine the search to auto-expand matches';
   }
 
   el.innerHTML = renderTreeNode(buildFileTree(filtered), 0);
@@ -1618,6 +1644,19 @@ function renderFileTree() {
 
 // Alias for legacy call sites
 function renderFiles() { renderFileTree(); }
+
+// Typing in the search boxes re-rendered the whole tree/list on every
+// keystroke — noticeable jank from ~5k files up. Debounce a beat instead.
+let _ftDebounce = null;
+function debouncedRenderFileTree() {
+  clearTimeout(_ftDebounce);
+  _ftDebounce = setTimeout(renderFileTree, 200);
+}
+let _dbDebounce = null;
+function debouncedDbRenderFiles() {
+  clearTimeout(_dbDebounce);
+  _dbDebounce = setTimeout(dbRenderFiles, 200);
+}
 
 function renderLogs(text) {
   const el = document.getElementById('log-output');
@@ -1650,12 +1689,12 @@ function updateOverview() {
   }
   tbody.innerHTML = S.peers.map(p => `
     <tr>
-      <td style="cursor:pointer" onclick="renameDevice('${escHtml(p.deviceId)}','${escHtml(p.deviceName||'')}',this)" title="Click to rename">${deviceLabel(p.deviceId, p.deviceName)}</td>
+      <td style="cursor:pointer" onclick="renameDevice('${jsArg(p.deviceId)}','${jsArg(p.deviceName||'')}',this)" title="Click to rename">${deviceLabel(p.deviceId, p.deviceName)}</td>
       <td>${p.autoSync ? '<span class="badge-pill green">On</span>' : '<span class="badge-pill muted">Off</span>'}</td>
       <td>${p.pendingUploads > 0 ? `<span class="badge-pill red">${p.pendingUploads}</span>` : '0'}</td>
       <td style="display:flex;gap:6px">
-        <button class="btn" onclick="peerAction('trigger-sync','${escHtml(p.id)}',this)">Sync</button>
-        <button class="btn danger" onclick="peerAction('disconnect','${escHtml(p.id)}',this)">Disconnect</button>
+        <button class="btn" onclick="peerAction('trigger-sync','${jsArg(p.id)}',this)">Sync</button>
+        <button class="btn danger" onclick="peerAction('disconnect','${jsArg(p.id)}',this)">Disconnect</button>
       </td>
     </tr>
   `).join('');
@@ -1683,7 +1722,7 @@ function showPanel(name) {
   if (name === 'security') loadTotpStatus();
   // Load live data for overview and database panels
   if (name === 'overview') loadActivity();
-  if (name === 'database') loadStorageChart();
+  if (name === 'dbmgr') { dbLoadStats(); loadStorageChart(); }
 }
 
 // ── Toast ──────────────────────────────────────────────────────────────────
@@ -1886,7 +1925,7 @@ function dbEditMeta(filePath, currentMtime, _btn) {
       <p style="color:var(--muted);font-size:11px;margin:-10px 0 16px">Changing mtime affects conflict resolution — last-write-wins uses this value.</p>
       <div style="display:flex;gap:8px;justify-content:flex-end">
         <button class="btn" onclick="this.closest('[data-meta-overlay]').remove()">Cancel</button>
-        <button class="btn primary" onclick="dbSaveMeta('${escHtml(filePath)}',this)">Save</button>
+        <button class="btn primary" onclick="dbSaveMeta('${jsArg(filePath)}',this)">Save</button>
       </div>
     </div>`;
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
@@ -2446,8 +2485,8 @@ async function loadVersionHistory(filePath) {
         </span>
         <span class="version-sha" title="${escHtml(v.sha1 || '')}">${escHtml(sha)}…</span>
         <span class="version-size">${fmtSize(v.size)}</span>
-        <button class="btn" style="font-size:11px;padding:3px 9px" onclick="previewVersion('${escHtml(filePath)}', ${v.mtime})">View</button>
-        ${!isLatest ? `<button class="btn" style="font-size:11px;padding:3px 9px;margin-left:4px" onclick="previewVersionDiff('${escHtml(filePath)}', ${versions[0].mtime}, ${v.mtime})">Diff</button>` : '<span style="display:inline-block;width:65px"></span>'}
+        <button class="btn" style="font-size:11px;padding:3px 9px" onclick="previewVersion('${jsArg(filePath)}', ${v.mtime})">View</button>
+        ${!isLatest ? `<button class="btn" style="font-size:11px;padding:3px 9px;margin-left:4px" onclick="previewVersionDiff('${jsArg(filePath)}', ${versions[0].mtime}, ${v.mtime})">Diff</button>` : '<span style="display:inline-block;width:65px"></span>'}
       </div>`;
     }).join('');
 
@@ -2593,9 +2632,9 @@ async function loadActivity() {
       const device = ev.deviceId ? `<span class="activity-device">${escHtml(ev.deviceId.substring(0,8))}…</span>` : '';
       const detail = ev.detail ? `<span class="activity-detail">${escHtml(ev.detail)}</span>` : '';
       return `<div class="activity-row">
-        <span class="activity-ts">${fmtDate(ev.ts)}</span>
         <span class="activity-kind ${kindCls}">${kindLabel}</span>
-        ${path}${device}${detail}
+        ${path}${detail}${device}
+        <span class="activity-time">${fmtDate(ev.ts)}</span>
       </div>`;
     }).join('');
   } catch (e) {
@@ -2623,7 +2662,7 @@ async function loadStorageChart() {
         <div class="chart-bar-wrap">
           <div class="chart-bar" style="width:${pct}%"></div>
         </div>
-        <span class="chart-bytes">${fmtSize(bytes)}</span>
+        <span class="chart-size">${fmtSize(bytes)}</span>
       </div>`;
     }).join('');
   } catch (e) {
@@ -2703,7 +2742,7 @@ async function dbDeleteSelected() {
   dbUpdateBulkBar();
   toast(failed > 0 ? `Deleted ${count - failed}, ${failed} failed` : `Deleted ${count} file${count !== 1 ? 's' : ''}`,
         failed > 0 ? 'error' : 'success');
-  await loadDbFiles();
+  await dbLoadFiles();
 }
 
 // ── Files panel bulk-select ────────────────────────────────────────────────
@@ -2827,7 +2866,8 @@ async function submitFolderRename(fromPath, toPath) {
       return;
     }
     const data = await r.json();
-    toast(`Renamed ${data.count} file record${data.count !== 1 ? 's' : ''} — peers disconnected for re-sync`, 'success');
+    const n = data.files ?? 0;
+    toast(`Renamed ${n} file record${n !== 1 ? 's' : ''} — peers disconnected for re-sync`, 'success');
     await refreshAll();
   } catch (e) {
     toast('Rename failed: ' + e.message, 'error');
