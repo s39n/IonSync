@@ -60,6 +60,29 @@ export function isHiddenOrConfigPath(p: string): boolean {
   return p.startsWith(".") || p.includes("/.");
 }
 
+/**
+ * True when an accepted upload is a byte-meaningless resend of the current
+ * head: same sha1, same active state — nothing any peer needs to hear about.
+ * Storing it would append a duplicate version row, move the head mtime/seq,
+ * and broadcast the note straight back to the device that's actively editing
+ * it — echo amplification (the July 2026 conflict-copy storm).
+ *
+ * One exception: an E2EE upload over a plaintext-stored head is the encryption
+ * *upgrade* path (plugin re-uploads the same plaintext sha as ciphertext) and
+ * must be stored. Conversely a plaintext resend over a ciphertext head is
+ * skipped — which also prevents accidental encryption downgrades.
+ */
+function isNoopResend(ctx: SyncContext, file: FileEntry, isE2EE: boolean): boolean {
+  if (file.action !== "active" || file.fileType !== "file" || !file.sha1) return false;
+  const head = ctx.db.getFile(file.path);
+  if (!head || head.action !== "active" || head.sha1 !== file.sha1) return false;
+  if (isE2EE) {
+    const headBuf = ctx.storage.readLatest(file.path);
+    if (!headBuf || !isE2eeEncrypted(headBuf)) return false; // plaintext→ciphertext upgrade: store it
+  }
+  return true;
+}
+
 /** Builds "notes/foo (Conflicted Copy 2026-06-11T19-30-05 abc12345).md" — same
  *  shape the plugin uses locally, plus a short device id so the origin is clear.
  *  `n` disambiguates repeated conflicts within the same second. */
@@ -132,6 +155,14 @@ export function handleFileUpload(
     }
     if (!isRejected && decision === "structural_conflict") {
       applyStructuralConflict(ctx, peer, file, buf, content);
+      msg.content = "";
+      advanceUploadQueue(peer, file.path);
+      return;
+    }
+    // No-op resend of the current head: drop it before it touches the DB or
+    // any peer. See isNoopResend — this is the echo-amplification cut.
+    if (!isRejected && decision === "accept" && isNoopResend(ctx, file, isE2EE)) {
+      logInfo(ctx, `[file_data] no-op resend of ${file.path} (sha unchanged) — dropped, no broadcast`);
       msg.content = "";
       advanceUploadQueue(peer, file.path);
       return;

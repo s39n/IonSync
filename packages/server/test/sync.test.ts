@@ -522,6 +522,81 @@ describe("config/hidden path conflicts (no copies, LWW)", () => {
   });
 });
 
+describe("no-op resend suppression (echo storm)", () => {
+  const PATH = "notes/echo.md";
+  const V1 = { sha1: "7bd81a159ea42d0f32dc1bcac2b3756123a985c7", b64: Buffer.from("v one").toString("base64") };
+  const V2 = { sha1: "c4fe9a596a0f41e1a3afde544869302fc0e5a947", b64: Buffer.from("v two").toString("base64") };
+
+  function entry(sha1: string, mtime: number): FileEntry {
+    return { path: PATH, sha1, mtime, action: "active", fileType: "file" };
+  }
+  async function settle(client: { send(m: unknown): void; nextMsg<T>(p?: (m: unknown) => boolean): Promise<T> }) {
+    client.send({ type: "file_history", path: PATH });
+    await client.nextMsg((m) => (m as { type: string }).type === "file_history_response");
+  }
+
+  it("resend of the current head adds no version, moves no mtime, broadcasts nothing", async () => {
+    const srv = await startTestServer();
+    const client1 = connectClient(srv.port);
+    await waitForOpen(client1);
+    await client1.auth("device-a");
+
+    client1.send({ type: "file_data", mode: "apply", file: entry(V1.sha1, 1000), content: V1.b64 });
+    await settle(client1);
+    assert.equal(srv.ctx.db.getFile(PATH)?.mtime, 1000);
+
+    const client2 = connectClient(srv.port);
+    await waitForOpen(client2);
+    await client2.auth("device-b");
+
+    // Echo: same sha, fresh mtime (what a peer's escaped vault event produces).
+    client1.send({ type: "file_data", mode: "apply", file: entry(V1.sha1, 2000), content: V1.b64, baseSha1: V1.sha1 });
+    await settle(client1);
+
+    // Head untouched: mtime NOT advanced, no duplicate version row.
+    assert.equal(srv.ctx.db.getFile(PATH)?.mtime, 1000);
+    client1.send({ type: "file_history", path: PATH });
+    const hist = await client1.nextMsg<{ type: string; versions: unknown[] }>(
+      (m) => (m as { type: string }).type === "file_history_response"
+    );
+    assert.equal(hist.versions.length, 1);
+
+    // No broadcast for the echo: the FIRST push client2 sees must be the real
+    // V2 change sent afterwards, not the V1 resend.
+    client1.send({ type: "file_data", mode: "apply", file: entry(V2.sha1, 3000), content: V2.b64, baseSha1: V1.sha1 });
+    const push = await client2.nextMsg<{ type: string; file: FileEntry }>(
+      (m) => (m as { type: string }).type === "file_push" && (m as { file: FileEntry }).file.path === PATH
+    );
+    assert.equal(push.file.sha1, V2.sha1);
+
+    client1.close();
+    client2.close();
+    await srv.stop();
+  });
+
+  it("E2EE upgrade (same plaintext sha, ciphertext body) is still stored", async () => {
+    const srv = await startTestServer();
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    client.send({ type: "file_data", mode: "apply", file: entry(V1.sha1, 1000), content: V1.b64 });
+    await settle(client);
+
+    // Same plaintext sha1, but the body now carries the E2EE magic header —
+    // the plugin's plaintext→ciphertext upgrade path. Must NOT be dropped.
+    const cipher = Buffer.from("IONENCv2" + "fake-iv-and-ct").toString("base64");
+    client.send({ type: "file_data", mode: "apply", file: entry(V1.sha1, 2000), content: cipher, baseSha1: V1.sha1 });
+    await settle(client);
+
+    const latest = srv.ctx.storage.readLatest(PATH);
+    assert.ok(latest && latest.subarray(0, 7).toString() === "IONENCv", "ciphertext should be stored");
+
+    client.close();
+    await srv.stop();
+  });
+});
+
 describe("dashboard admin actions", () => {
   function dashHeaders(): Record<string, string> {
     const token = createHash("sha256").update(TEST_PASSWORD + "-dashboard").digest("hex");

@@ -73,7 +73,24 @@ export class XSync {
   // a create/modify event for one of these paths we suppress it — otherwise the
   // plugin would re-upload the file it just received, which can race with edits
   // on other vaults and produce spurious "Conflicted Copy" files there.
-  private _applyingPaths = new Set<string>();
+  //
+  // REFCOUNT, not a Set. While another device types, pushes for the SAME path
+  // stream in every ~0.75s and applies overlap. A Set collapses two pending
+  // writes into one entry: the first vault event consumes it and the second
+  // escapes the guard as a "real" edit, re-uploading just-applied content with
+  // a fresh mtime — the echo that fed the July 2026 conflict-copy storm. Each
+  // write increments; each suppressed create/modify event decrements.
+  private _applyingPaths = new Map<string, number>();
+
+  private _applyingAdd(path: string): void {
+    this._applyingPaths.set(path, (this._applyingPaths.get(path) ?? 0) + 1);
+  }
+
+  private _applyingRemove(path: string): void {
+    const n = this._applyingPaths.get(path) ?? 0;
+    if (n <= 1) this._applyingPaths.delete(path);
+    else this._applyingPaths.set(path, n - 1);
+  }
 
   // Tracks the timestamp when we last wrote a file via _applyServerFile.
   // Used to suppress platform-generated delete events (iOS iCloud eviction,
@@ -402,6 +419,22 @@ export class XSync {
 
       const localMeta = this.storage.readMetadata(file.path);
 
+      // Echo guard: the incoming sha1 is exactly what we last synced for this
+      // path — the push carries nothing we don't already have (our own upload
+      // reflected back through a peer's resend, or a head re-push after a
+      // stale-config reject). While the user is typing, the local file is
+      // always ahead of its metadata, so applying an echo would overwrite new
+      // keystrokes with older content AND mint a spurious conflicted copy —
+      // one per echo (the July 2026 storm). Skip it entirely: if the local
+      // file has moved on, its own debounced upload is already queued.
+      if (
+        file.action === "active" && file.fileType === "file" &&
+        localStat && localStat.type === "file" &&
+        localMeta && file.sha1 && localMeta.sha1 === file.sha1
+      ) {
+        return;
+      }
+
       if (file.action !== "deleted" && file.fileType === "file" && localStat && localStat.type === "file") {
         if (!localMeta || localStat.mtime > localMeta.mtime) {
           const isBinary = Utils.isBinary(file.path);
@@ -431,6 +464,15 @@ export class XSync {
             this.plugin.log(`[Conflict] ${file.path} modified offline. Backing up.`);
             await this._createConflictedCopy(file.path, capturedContent ?? undefined);
           }
+
+          if (isSame) {
+            // The local file already holds exactly this content — only the
+            // metadata needs to catch up. Skip the disk write: rewriting
+            // identical bytes churns the mtime and fires a vault event that
+            // can echo the file straight back to the server.
+            await this.storage.writeMetadata(file);
+            return;
+          }
         }
       }
 
@@ -446,7 +488,7 @@ export class XSync {
         // fires from storage.delete() is suppressed in _processLocalEvent.
         // Without this, the deletion would be re-queued in the delete queue,
         // then re-sent to the server, then re-pushed back — an infinite loop.
-        this._applyingPaths.add(file.path);
+        this._applyingAdd(file.path);
         await this.storage.delete(file.path, file);
         this.addActivity("delete", file.path);
       } else if (file.fileType === "folder") {
@@ -459,7 +501,7 @@ export class XSync {
         //      the server as action:"deleted", incorrectly marking the file deleted.
         const parts = file.path.split("/");
         for (let i = 1; i <= parts.length; i++) {
-          this._applyingPaths.add(parts.slice(0, i).join("/"));
+          this._applyingAdd(parts.slice(0, i).join("/"));
         }
         await this.storage.makeFolder(file.path, file);
       } else {
@@ -481,15 +523,16 @@ export class XSync {
             console.log(`[IonSync] Applying file ${file.path}, attempt ${attempt + 1}`);
             // Register before writing so the vault event is caught by the guard
             // in _processLocalEvent and suppressed (prevents spurious re-uploads).
-            this._applyingPaths.add(file.path);
+            this._applyingAdd(file.path);
             if (Utils.isBinary(file.path)) await this.storage.writeBinary(file.path, content, file);
             else await this.storage.write(file.path, content, file, /* withShadow */ false);
             writeErr = null;
             break;
           } catch (e) {
             console.warn(`[IonSync] Failed write for ${file.path} on attempt ${attempt + 1}:`, e);
-            // Write failed — no vault event will fire, so clean up the guard entry.
-            this._applyingPaths.delete(file.path);
+            // Write failed — no vault event will fire, so release this write's
+            // refcount (an overlapping apply may still own one).
+            this._applyingRemove(file.path);
             writeErr = e;
             // On first failure ensure parent dirs exist then retry.
             if (attempt === 0) {
@@ -500,7 +543,7 @@ export class XSync {
           }
         }
         if (writeErr) {
-          this._applyingPaths.delete(file.path); // final cleanup if both attempts failed
+          this._applyingRemove(file.path); // final cleanup if both attempts failed
           throw writeErr;
         }
 
@@ -875,7 +918,7 @@ export class XSync {
     //  - delete: NOT consumed — keep the entry so a subsequent create event on
     //    the same path (folder recreation after ENOTDIR collision) is also suppressed.
     if (this._applyingPaths.has(file.path)) {
-      if (action === "create" || action === "modify") this._applyingPaths.delete(file.path);
+      if (action === "create" || action === "modify") this._applyingRemove(file.path);
       return;
     }
 
