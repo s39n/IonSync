@@ -10,6 +10,7 @@ WORKDIR /build
 COPY package.json package-lock.json ./
 COPY packages/protocol/package.json ./packages/protocol/
 COPY packages/server/package.json   ./packages/server/
+COPY packages/plugin/package.json   ./packages/plugin/
 
 RUN npm ci
 
@@ -17,10 +18,16 @@ RUN npm ci
 COPY tsconfig.base.json ./
 COPY packages/protocol/  ./packages/protocol/
 COPY packages/server/    ./packages/server/
+COPY packages/plugin/    ./packages/plugin/
 
-# Compile protocol, then server
+# Compile protocol, then server, then the plugin bundle. The plugin build's
+# post-build step copies main.js/styles.css/manifest.json/build_info.json into
+# packages/server/client/ — that is what powers device auto-update, so the
+# plugin MUST be built here rather than relying on artifacts from the host
+# working tree (which .dockerignore excludes).
 RUN npm run build -w packages/protocol
 RUN npm run build -w packages/server
+RUN npm run build -w packages/plugin
 
 # Drop dev dependencies before we copy node_modules to the runtime stage
 RUN npm prune --omit=dev

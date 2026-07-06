@@ -1,10 +1,10 @@
 node_modules
 packages/*/node_modules
 packages/*/dist
-packages/server/client/main.js
-packages/server/client/styles.css
-packages/server/client/manifest.json
-packages/server/client/build_info.json
+# NOTE: do NOT ignore packages/server/client/* or packages/plugin here — the
+# image builds the plugin itself and ships the bundle in client/ for
+# auto-update. (These were once ignored, which silently disabled auto-update
+# in every Docker deployment.)
 **/*.test.ts
 **/.DS_Store
 .git
