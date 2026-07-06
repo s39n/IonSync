@@ -263,8 +263,23 @@ export class Storage {
 
   async updatePlugin(files: { name: string; content: string }[]): Promise<void> {
     for (const f of files) {
-      const data = atob(f.content);
-      await this.fsInternal.write("../" + f.name, data);
+      // Skip pathed names: the server duplicates each file under
+      // "ion-sync/<name>" purely so pre-fix clients (whose updatePlugin wrote
+      // to "../<name>", i.e. the plugins/ folder, and therefore could never
+      // apply an update) resolve them into the correct folder. A fixed client
+      // must ignore those duplicates — and this also rejects any path
+      // traversal in server-supplied names.
+      if (f.name.includes("/") || f.name.includes("\\")) continue;
+      // Decode base64 → UTF-8 properly. A bare atob() yields one char per
+      // BYTE (Latin-1); writing that re-encodes each byte-char as UTF-8 and
+      // corrupts every multi-byte character in the bundle.
+      const bytes = Uint8Array.from(atob(f.content), (c) => c.charCodeAt(0));
+      const data = new TextDecoder("utf-8").decode(bytes);
+      // fsInternal is rooted at the plugin dir itself — write the file name
+      // directly. (The old "../" prefix landed files in .obsidian/plugins/,
+      // which is why auto-update looped forever: the real main.js never
+      // changed.)
+      await this.fsInternal.write(f.name, data);
     }
   }
 

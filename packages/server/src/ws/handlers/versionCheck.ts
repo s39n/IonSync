@@ -69,12 +69,22 @@ export function handleVersionCheck(
     return;
   }
 
-  // Read and encode plugin files
+  // Read and encode plugin files.
+  //
+  // MIGRATION SHIM for clients built before 2026-07-06: their updatePlugin
+  // wrote each file to "../<name>" relative to the plugin dir — i.e. into
+  // .obsidian/plugins/ — so no update could ever apply (endless reload loop).
+  // Sending each file a second time under "ion-sync/<name>" makes those
+  // clients resolve "../ion-sync/<name>" to the CORRECT plugin folder, so
+  // one update cycle heals them. Fixed clients skip any name containing a
+  // slash. Remove the shim once every device is on a post-fix build.
   const files: Record<string, string> = {};
   for (const filename of PLUGIN_FILES) {
     const fp = path.join(ctx.clientDir, filename);
     if (fs.existsSync(fp)) {
-      files[filename] = fs.readFileSync(fp).toString("base64");
+      const b64 = fs.readFileSync(fp).toString("base64");
+      files[filename] = b64;
+      files[`ion-sync/${filename}`] = b64;
     }
   }
 
