@@ -47,12 +47,18 @@ const postBuildPlugin = {
       versions[VERSION] = manifest.minAppVersion;
       fs.writeFileSync("./versions.json", JSON.stringify(versions, null, "\t"));
 
-      // Write build_info.json (used by server version_check handler)
-      fs.writeFileSync(BUILD_DIR + "build_info.json", JSON.stringify({ version: VERSION, build: BUILD }));
+      // Write build_info.json (used by server version_check handler).
+      // `build` MUST be a string: the plugin sends it as a string in
+      // version_check and the server compares with !== — a numeric value here
+      // would make every connect look like an update (reload loop).
+      fs.writeFileSync(BUILD_DIR + "build_info.json", JSON.stringify({ version: VERSION, build: String(BUILD) }));
 
-      // Copy to server/client/ so the server can distribute the plugin for auto-update
+      // Copy to server/client/ so the server can distribute the plugin for
+      // auto-update. build_info.json MUST be in this list — without it the
+      // server's version_check finds no build info and answers
+      // needsUpdate:false forever, silently disabling auto-update.
       if (fs.existsSync(SERVER_CLIENT_DIR)) {
-        for (const file of ["main.js", "styles.css", "manifest.json"]) {
+        for (const file of ["main.js", "styles.css", "manifest.json", "build_info.json"]) {
           if (fs.existsSync(BUILD_DIR + file)) {
             fs.copyFileSync(BUILD_DIR + file, SERVER_CLIENT_DIR + file);
           }

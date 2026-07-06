@@ -57,8 +57,12 @@ export function handleVersionCheck(
     return;
   }
 
+  // Normalize both sides to strings: older build_info.json files stored the
+  // build stamp as a number while the plugin sends a string — a strict
+  // comparison across types would report "update available" on every connect
+  // and put the plugin in a reload loop.
   const needsUpdate =
-    msg.version !== serverBuild.version || msg.build !== serverBuild.build;
+    msg.version !== serverBuild.version || String(msg.build) !== String(serverBuild.build);
 
   if (!needsUpdate) {
     peer.send({ type: "version_check_response", needsUpdate: false, caps: SERVER_CAPS });
