@@ -671,3 +671,30 @@ describe("dashboard admin actions", () => {
     await srv.stop();
   });
 });
+
+describe("conflictCopyPath naming", () => {
+  it("strips existing Conflicted Copy suffixes so names never stack", async () => {
+    const { conflictCopyPath, stripConflictSuffixes } = await import("../src/ws/handlers/fileData.js");
+    const once = conflictCopyPath("notes/foo.md", "deadbeef-0000");
+    assert.match(once, /^notes\/foo \(Conflicted Copy [^()]+ deadbeef\)\.md$/);
+    // Minting a copy OF a copy must not add a second suffix.
+    const twice = conflictCopyPath(once, "deadbeef-0000");
+    assert.match(twice, /^notes\/foo \(Conflicted Copy [^()]+ deadbeef\)\.md$/);
+    assert.equal((twice.match(/Conflicted Copy/g) ?? []).length, 1);
+    // Even a production-style pile-up collapses to one suffix.
+    const piled = "a/skeleton-init-systemd (Conflicted Copy 2026-06-16T01-02-03 aaaa1111) (Conflicted Copy 2026-06-21T01-02-03 bbbb2222) (Conflicted Copy 2026-07-08T01-02-03 cccc3333).md";
+    assert.equal(stripConflictSuffixes(piled.slice(0, piled.lastIndexOf("."))), "a/skeleton-init-systemd");
+    const cleaned = conflictCopyPath(piled, "deadbeef-0000");
+    assert.equal((cleaned.match(/Conflicted Copy/g) ?? []).length, 1);
+    assert.ok(cleaned.startsWith("a/skeleton-init-systemd (Conflicted Copy "));
+  });
+
+  it("caps the final path component length", async () => {
+    const { conflictCopyPath } = await import("../src/ws/handlers/fileData.js");
+    const long = "dir/" + "x".repeat(400) + ".md";
+    const out = conflictCopyPath(long, "deadbeef-0000");
+    const base = out.slice(out.lastIndexOf("/") + 1);
+    assert.ok(base.length <= 200, `basename too long: ${base.length}`);
+    assert.match(base, /\(Conflicted Copy .*\)\.md$/);
+  });
+});

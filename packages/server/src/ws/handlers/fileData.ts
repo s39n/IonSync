@@ -83,6 +83,18 @@ function isNoopResend(ctx: SyncContext, file: FileEntry, isE2EE: boolean): boole
   return true;
 }
 
+/** Strips every existing " (Conflicted Copy …)" suffix from a name stem so a
+ *  conflict on a conflict copy renames back to the ORIGINAL note — suffixes
+ *  must never stack (stacked names grew past the filesystem's 255-char
+ *  component limit in production, July 2026, making the file unwritable). */
+export function stripConflictSuffixes(stem: string): string {
+  return stem.replace(/ \(Conflicted Copy [^()/]*\)/g, "");
+}
+
+/** Longest allowed final path component (bytes are what most filesystems cap,
+ *  but chars is a safe conservative proxy; leave headroom under 255). */
+const MAX_BASENAME = 200;
+
 /** Builds "notes/foo (Conflicted Copy 2026-06-11T19-30-05 abc12345).md" — same
  *  shape the plugin uses locally, plus a short device id so the origin is clear.
  *  `n` disambiguates repeated conflicts within the same second. */
@@ -94,10 +106,16 @@ export function conflictCopyPath(originalPath: string, deviceId: string | undefi
   const lastSlash = originalPath.lastIndexOf("/");
   const lastDot = originalPath.lastIndexOf(".");
   const hasExt = lastDot > lastSlash + 1;
-  const pathNoExt = hasExt ? originalPath.slice(0, lastDot) : originalPath;
+  const pathNoExt = stripConflictSuffixes(hasExt ? originalPath.slice(0, lastDot) : originalPath);
   const ext = hasExt ? originalPath.slice(lastDot) : "";
   const dev = deviceId ? ` ${deviceId.slice(0, 8)}` : "";
-  return `${pathNoExt} (Conflicted Copy ${ts}${dev})${ext}`;
+  const suffix = ` (Conflicted Copy ${ts}${dev})${ext}`;
+  // Hard backstop: truncate the stem so the final path component fits.
+  const dir = pathNoExt.slice(0, lastSlash + 1);
+  let stem = pathNoExt.slice(lastSlash + 1);
+  const maxStem = MAX_BASENAME - suffix.length;
+  if (stem.length > maxStem) stem = stem.slice(0, Math.max(1, maxStem));
+  return `${dir}${stem}${suffix}`;
 }
 
 /**

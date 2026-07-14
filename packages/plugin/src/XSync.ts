@@ -586,9 +586,20 @@ export class XSync {
     const lastSlash = originalPath.lastIndexOf("/");
     const lastDot = originalPath.lastIndexOf(".");
     const hasExt = lastDot > lastSlash + 1;
-    const pathNoExt = hasExt ? originalPath.slice(0, lastDot) : originalPath;
+    // Strip any existing "(Conflicted Copy …)" suffixes so a conflict on a
+    // conflict copy names back to the original — suffixes must never stack
+    // (stacked names exceeded the filesystem name limit in production, July 2026).
+    const pathNoExt = (hasExt ? originalPath.slice(0, lastDot) : originalPath)
+      .replace(/ \(Conflicted Copy [^()/]*\)/g, "");
     const ext = hasExt ? originalPath.slice(lastDot) : "";
-    const newPath = `${pathNoExt} (Conflicted Copy ${ts})${ext}`;
+    const suffix = ` (Conflicted Copy ${ts})${ext}`;
+    // Backstop: keep the final path component under ~200 chars.
+    const slash = pathNoExt.lastIndexOf("/");
+    const dir = pathNoExt.slice(0, slash + 1);
+    let stem = pathNoExt.slice(slash + 1);
+    const maxStem = 200 - suffix.length;
+    if (stem.length > maxStem) stem = stem.slice(0, Math.max(1, maxStem));
+    const newPath = `${dir}${stem}${suffix}`;
 
     if (Utils.isBinary(originalPath)) {
       const buf = capturedContent instanceof ArrayBuffer
