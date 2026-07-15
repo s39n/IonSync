@@ -160,8 +160,17 @@ export async function encryptToBase64(
   out.set(new Uint8Array(ciphertext), E2EE_MAGIC.length + IV_BYTES);
 
   // Use btoa (native WebAPI) -- Buffer is not available on Android WebView.
+  // Chunk via String.fromCharCode.apply rather than a per-byte `+=` rope: the
+  // per-byte loop is ~10× slower and holds several MB of transient string on
+  // large files. Chunk stays under the engine's argument-count ceiling.
   let binary = "";
-  for (let i = 0; i < out.length; i++) binary += String.fromCharCode(out[i]!);
+  const CHUNK = 0x8000; // 32 KiB
+  for (let i = 0; i < out.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(
+      null,
+      out.subarray(i, i + CHUNK) as unknown as number[]
+    );
+  }
   return btoa(binary);
 }
 

@@ -13,6 +13,23 @@ function bufToHex(buf: Uint8Array): string {
   return s;
 }
 
+// ---------- Chunked byte->binary-string (for base64) ----------
+// String.fromCharCode.apply over subarrays instead of a per-byte `+=` loop.
+// The per-byte loop builds a rope one character at a time — O(n) with a huge
+// constant and 3–4× transient memory on large files (measured ~10× slower at
+// 5 MB). Chunk size stays under the JS engine's argument-count ceiling.
+const B64_CHUNK = 0x8000; // 32 KiB
+function bytesToBinaryString(data: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < data.length; i += B64_CHUNK) {
+    binary += String.fromCharCode.apply(
+      null,
+      data.subarray(i, i + B64_CHUNK) as unknown as number[]
+    );
+  }
+  return binary;
+}
+
 // ---------- Binary extension set ----------
 const BINARY_EXTS = new Set([
   "3dm","3ds","3g2","3gp","7z","a","aac","adp","afdesign","afphoto","afpub","ai","aif","aiff",
@@ -63,11 +80,7 @@ class Utils {
     if (typeof data === "string") {
       return btoa(unescape(encodeURIComponent(data)));
     }
-    let binary = "";
-    for (let i = 0; i < data.byteLength; i++) {
-      binary += String.fromCharCode(data[i]!);
-    }
-    return btoa(binary);
+    return btoa(bytesToBinaryString(data));
   }
 
   /** Converts a base64 string to a Uint8Array */
