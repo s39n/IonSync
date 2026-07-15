@@ -132,9 +132,14 @@ export function handleFileUpload(
   let savedSize: number | undefined;
   const decision = decideUpload(ctx, msg);
 
-  // Persist content for active files (not folders, not deleted)
-  if (file.action === "active" && file.fileType === "file" && content) {
-    const buf = Buffer.from(content, "base64");
+  // Persist content for active files (not folders, not deleted).
+  // Binary-frame uploads arrive as raw bytes (msg.contentBytes) — no base64
+  // decode needed; legacy uploads still carry base64 in `content`.
+  const hasBytes = msg.contentBytes !== undefined && msg.contentBytes.length > 0;
+  if (file.action === "active" && file.fileType === "file" && (content || hasBytes)) {
+    const buf = hasBytes
+      ? Buffer.from(msg.contentBytes!.buffer, msg.contentBytes!.byteOffset, msg.contentBytes!.byteLength)
+      : Buffer.from(content, "base64");
 
     // Detect E2EE: the plugin prepends an 8-byte magic header ("IONENCv<N>")
     // to every encrypted payload.  When present the SHA1 in the file entry
@@ -160,20 +165,20 @@ export function handleFileUpload(
     // 3. Save healthy files — a conflicting upload is diverted to a
     //    "(Conflicted Copy …)" file instead of overwriting the server head.
     if (!isRejected && decision === "conflict") {
-      applyConflict(ctx, peer, file, buf, content);
-      msg.content = "";
+      applyConflict(ctx, peer, file, buf);
+      clearUploadContent(msg);
       advanceUploadQueue(peer, file.path);
       return;
     }
     if (!isRejected && decision === "reject_stale") {
       rejectStaleUpload(ctx, peer, file);
-      msg.content = "";
+      clearUploadContent(msg);
       advanceUploadQueue(peer, file.path);
       return;
     }
     if (!isRejected && decision === "structural_conflict") {
-      applyStructuralConflict(ctx, peer, file, buf, content);
-      msg.content = "";
+      applyStructuralConflict(ctx, peer, file, buf);
+      clearUploadContent(msg);
       advanceUploadQueue(peer, file.path);
       return;
     }
@@ -181,7 +186,7 @@ export function handleFileUpload(
     // any peer. See isNoopResend — this is the echo-amplification cut.
     if (!isRejected && decision === "accept" && isNoopResend(ctx, file, isE2EE)) {
       logInfo(ctx, `[file_data] no-op resend of ${file.path} (sha unchanged) — dropped, no broadcast`);
-      msg.content = "";
+      clearUploadContent(msg);
       advanceUploadQueue(peer, file.path);
       return;
     }
@@ -191,13 +196,13 @@ export function handleFileUpload(
     }
 
     // Help the GC clear the buffer promptly
-    msg.content = "";
+    clearUploadContent(msg);
   }
 
   // Conflict on an upload that carried no content (rare: unreadable file).
   // Keep the server head and just tell the client — nothing to copy.
   if (!isRejected && decision === "conflict") {
-    applyConflict(ctx, peer, file, null, "");
+    applyConflict(ctx, peer, file, null);
     advanceUploadQueue(peer, file.path);
     return;
   }
@@ -207,7 +212,7 @@ export function handleFileUpload(
     return;
   }
   if (!isRejected && decision === "structural_conflict") {
-    applyStructuralConflict(ctx, peer, file, null, "");
+    applyStructuralConflict(ctx, peer, file, null);
     advanceUploadQueue(peer, file.path);
     return;
   }
@@ -256,8 +261,7 @@ function applyConflict(
   ctx: SyncContext,
   peer: SyncPeer,
   file: FileEntry,
-  buf: Buffer | null,
-  rawContent: string
+  buf: Buffer | null
 ): void {
   if (buf) {
     const copyEntry: FileEntry = {
@@ -270,7 +274,8 @@ function applyConflict(
     ctx.storage.write(copyEntry.path, copyEntry.mtime, buf);
     ctx.db.upsertFile(copyEntry, buf.length);
     // Uploader receives the copy directly; broadcastToPeers covers everyone else.
-    peer.send({ type: "file_push", file: copyEntry, content: rawContent });
+    // Pass raw bytes — peer.send frames them (binary or base64) per peer caps.
+    peer.send({ type: "file_push", file: copyEntry, content: "", contentBytes: buf });
     broadcastToPeers(ctx, peer, copyEntry);
     logWarn(ctx, `[Conflict] ${peer.deviceId} uploaded ${file.path} from a stale base — stored as ${copyEntry.path}`);
     pushActivity(ctx, { kind: "upload", deviceId: peer.deviceId ?? undefined, path: copyEntry.path });
@@ -295,8 +300,7 @@ function applyStructuralConflict(
   ctx: SyncContext,
   peer: SyncPeer,
   file: FileEntry,
-  buf: Buffer | null,
-  rawContent: string
+  buf: Buffer | null
 ): void {
   const renamedTo = ctx.db.getRenameTarget(file.path);
   if (!renamedTo) {
@@ -330,7 +334,7 @@ function applyStructuralConflict(
     };
     ctx.storage.write(copyEntry.path, copyEntry.mtime, buf);
     ctx.db.upsertFile(copyEntry, buf.length);
-    peer.send({ type: "file_push", file: copyEntry, content: rawContent });
+    peer.send({ type: "file_push", file: copyEntry, content: "", contentBytes: buf });
     broadcastToPeers(ctx, peer, copyEntry);
     logWarn(ctx, `[Structural] ${peer.deviceId} edited ${file.path} which was renamed to ${renamedTo} — stored edit as ${copyEntry.path}`);
     pushActivity(ctx, { kind: "upload", deviceId: peer.deviceId ?? undefined, path: copyEntry.path });
@@ -355,7 +359,7 @@ function pushRenameConvergence(ctx: SyncContext, peer: SyncPeer, fromPath: strin
   const target = ctx.db.getFile(toPath);
   if (target && target.action === "active" && target.fileType === "file") {
     const headBuf = ctx.storage.readLatest(toPath);
-    peer.send({ type: "file_push", file: target, content: headBuf ? headBuf.toString("base64") : "" });
+    peer.send({ type: "file_push", file: target, content: "", ...(headBuf ? { contentBytes: headBuf } : {}) });
   }
 }
 
@@ -374,8 +378,15 @@ function pushHeadToUploader(ctx: SyncContext, peer: SyncPeer, path: string): voi
   const serverFile = ctx.db.getFile(path);
   if (serverFile && serverFile.action === "active" && serverFile.fileType === "file") {
     const headBuf = ctx.storage.readLatest(serverFile.path);
-    peer.send({ type: "file_push", file: serverFile, content: headBuf ? headBuf.toString("base64") : "" });
+    peer.send({ type: "file_push", file: serverFile, content: "", ...(headBuf ? { contentBytes: headBuf } : {}) });
   }
+}
+
+/** Release upload payload references (base64 string + raw byte view) so the GC
+ *  can reclaim them promptly after the upload is handled. */
+function clearUploadContent(msg: FileDataUploadMsg): void {
+  msg.content = "";
+  delete msg.contentBytes;
 }
 
 /**

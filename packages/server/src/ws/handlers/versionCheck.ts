@@ -41,14 +41,19 @@ function getBuildInfo(clientDir: string): BuildInfo | null {
 const PLUGIN_FILES = ["main.js", "styles.css", "manifest.json"] as const;
 
 /** Capability tokens this server understands. Lets new plugins feature-detect
- *  (e.g. atomic `file_rename`) without a version-number handshake. */
-const SERVER_CAPS = ["file_rename"];
+ *  (e.g. atomic `file_rename`, binary content frames) without a version-number
+ *  handshake. */
+const SERVER_CAPS = ["file_rename", "binary_frames"];
 
 export function handleVersionCheck(
   ctx: SyncContext,
   peer: SyncPeer,
   msg: VersionCheckMsg
 ): void {
+  // Record what the client supports so peer.send can pick binary vs JSON framing
+  // per-peer. Absent on old clients → stays [] → legacy base64-in-JSON.
+  peer.caps = msg.caps ?? [];
+
   const serverBuild = getBuildInfo(ctx.clientDir);
 
   if (!serverBuild) {

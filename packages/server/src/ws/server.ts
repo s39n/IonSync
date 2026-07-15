@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { v4 as uuidv4 } from "uuid";
 import type { ClientMsg } from "@ionsync/protocol";
+import { decodeFrame } from "@ionsync/protocol";
 import type { SyncContext } from "../context.js";
 import { pushActivity } from "../context.js";
 import { createPeer } from "./peer.js";
@@ -69,10 +70,13 @@ export function attachWebSocketServer(
     }, 5_000);
 
     // ✅ Changed to async to support reading the current file for Delta Patching
-    ws.on("message", async (raw: Buffer) => {
+    ws.on("message", async (raw: Buffer, isBinary: boolean) => {
       let msg: ClientMsg;
       try {
-        msg = JSON.parse(raw.toString()) as ClientMsg;
+        // Binary frame → decode the [len][header][bytes] envelope (content
+        // arrives as msg.contentBytes). Text frame → JSON as before. ws hands
+        // us a Buffer either way, so the isBinary flag is what disambiguates.
+        msg = decodeFrame(isBinary ? new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength) : raw.toString()) as ClientMsg;
       } catch {
         return;
       }

@@ -1,5 +1,6 @@
 import type WebSocket from "ws";
 import type { ServerMsg } from "@ionsync/protocol";
+import { encodeFrame, BINARY_FRAMES_CAP } from "@ionsync/protocol";
 
 export interface SyncPeer {
   /** Unique ID assigned at connection time (UUID). */
@@ -34,6 +35,10 @@ export interface SyncPeer {
   autoSync: boolean;
   /** Nonce sent during challenge — kept for token validation. */
   nonce: string;
+  /** Capability tokens the client advertised in version_check (e.g.
+   *  "binary_frames"). Empty until version_check; gates binary framing for this
+   *  peer so an old client keeps getting base64-in-JSON. */
+  caps: string[];
   send(msg: ServerMsg): void;
   disconnect(reason?: string): void;
 }
@@ -50,10 +55,15 @@ export function createPeer(id: string, nonce: string, ws: WebSocket): SyncPeer {
     syncSessionActive: false,
     syncMore: false,
     autoSync: true,
+    caps: [],
 
     send(msg) {
       if (ws.readyState === ws.OPEN) {
-        ws.send(JSON.stringify(msg));
+        // encodeFrame emits a binary frame for content-bearing messages when
+        // this peer negotiated "binary_frames"; otherwise a JSON string
+        // (base64ing any raw bytes back into `content`). ws sends a
+        // Uint8Array as a binary frame and a string as a text frame.
+        ws.send(encodeFrame(msg, this.caps.includes(BINARY_FRAMES_CAP)));
       }
     },
 

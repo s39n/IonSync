@@ -41,6 +41,13 @@ export interface VersionCheckMsg {
   type: "version_check";
   version: string;
   build: string;
+  /**
+   * Capability tokens the *client* supports (e.g. "binary_frames"). Lets the
+   * server feature-detect the client symmetrically to how the client reads the
+   * server's `caps`. Absent on older clients → server assumes none and uses the
+   * legacy base64-in-JSON wire for that peer.
+   */
+  caps?: string[];
 }
 
 export interface SyncMsg {
@@ -69,6 +76,12 @@ export interface FileDataUploadMsg {
   file: FileEntry;
   /** base64-encoded file content; empty string for folders or deleted files */
   content: string;
+  /**
+   * Raw file bytes, present only on the binary-frame path (negotiated via the
+   * "binary_frames" cap). When set, `content` is empty and the codec carries
+   * these bytes out-of-band. Never JSON-serialized. See protocol/wire.ts.
+   */
+  contentBytes?: Uint8Array;
   /**
    * sha1 of the version this edit was based on — i.e. the sha1 the client last
    * synced for this path (from its stored metadata). Lets the server detect
@@ -200,6 +213,12 @@ export interface FilePushMsg {
   file: FileEntry;
   content: string;
   /**
+   * Raw file bytes, present only on the binary-frame path (negotiated via the
+   * "binary_frames" cap). When set, `content` is empty and the codec carries
+   * these bytes out-of-band. Never JSON-serialized. See protocol/wire.ts.
+   */
+  contentBytes?: Uint8Array;
+  /**
    * The server sequence number at which this change was recorded. Present on
    * cursor-sync pushes and live broadcasts (phase 1). Clients should advance
    * their stored cursor to the highest `seq` they have applied, so a live push
@@ -298,3 +317,6 @@ export function compareFiles(
   if (client.sha1 === server.sha1 && client.action === server.action) return null;
   return client.mtime > server.mtime ? "client_newer" : "server_newer";
 }
+
+// ─── Binary-frame wire codec ────────────────────────────────────────────────
+export { encodeFrame, decodeFrame, canBinaryFrame, BINARY_FRAMES_CAP } from "./wire.js";

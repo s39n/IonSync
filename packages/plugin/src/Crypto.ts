@@ -139,12 +139,13 @@ export async function deriveKey(
 
 /**
  * Encrypts raw plaintext bytes.
- * Returns a base64 string encoding: MAGIC[8] + IV[12] + ciphertext[N].
+ * Returns the raw blob bytes: MAGIC[8] + IV[12] + ciphertext[N].
+ * Preferred on the binary-frame path — no base64 pass at all.
  */
-export async function encryptToBase64(
+export async function encryptToBytes(
   key: CryptoKey,
   plaintext: BufferSource
-): Promise<string> {
+): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
   const ciphertext = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv },
@@ -158,6 +159,20 @@ export async function encryptToBase64(
   out.set(E2EE_MAGIC, 0);
   out.set(iv, E2EE_MAGIC.length);
   out.set(new Uint8Array(ciphertext), E2EE_MAGIC.length + IV_BYTES);
+  return out;
+}
+
+/**
+ * Encrypts raw plaintext bytes.
+ * Returns a base64 string encoding: MAGIC[8] + IV[12] + ciphertext[N].
+ * Retained for the legacy base64-in-JSON wire (old server without the
+ * "binary_frames" cap).
+ */
+export async function encryptToBase64(
+  key: CryptoKey,
+  plaintext: BufferSource
+): Promise<string> {
+  const out = await encryptToBytes(key, plaintext);
 
   // Use btoa (native WebAPI) -- Buffer is not available on Android WebView.
   // Chunk via String.fromCharCode.apply rather than a per-byte `+=` rope: the

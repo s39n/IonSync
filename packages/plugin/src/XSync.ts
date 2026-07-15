@@ -8,7 +8,7 @@ import { ExclusionFilter } from "./ExclusionFilter.js";
 import Utils from "./Utils.js";
 import type { IonSyncPlugin } from "./main.js";
 import { diff_match_patch } from "diff-match-patch";
-import { deriveKey, encryptToBase64, decryptFromBase64, isEncryptedBase64 } from "./Crypto.js";
+import { deriveKey, encryptToBytes, decryptFromBase64, isEncryptedBase64 } from "./Crypto.js";
 
 interface DeleteQueueEntry {
   metadata: Partial<FileEntry>;
@@ -301,7 +301,7 @@ export class XSync {
         const prior = this._appliedSeq.get(msg.file.path);
         const stale = typeof msg.seq === "number" && prior !== undefined && msg.seq < prior;
         if (!stale) {
-          await this._applyServerFile(msg.file, msg.content);
+          await this._applyServerFile(msg.file, msg.content, (msg as { contentBytes?: Uint8Array }).contentBytes);
           // Only record seq for LIVE pushes (the ones that can jump ahead). Ordered
           // session pushes never overtake each other, so tracking them would just
           // bloat the map to vault size during a bootstrap — wasteful on low RAM.
@@ -364,10 +364,19 @@ export class XSync {
     }
   }
 
-  private async _applyServerFile(file: FileEntry, content: string): Promise<void> {
+  private async _applyServerFile(file: FileEntry, content: string, contentBytes?: Uint8Array): Promise<void> {
     // Emergency guard: drop developer folders
     if (file.path.includes("node_modules/") || file.path.includes(".git/")) return;
     if (this.exclusionFilter?.isExcluded(file.path)) return;
+
+    // Binary-frame push: content arrived as raw bytes. Normalize to the base64
+    // string the rest of this method (E2EE detection, conflict-copy capture,
+    // storage.write) already expects. This still avoids the server-side base64
+    // encode and the +33% wire; pushing bytes deeper into storage.write is a
+    // possible future optimization.
+    if (contentBytes && contentBytes.length > 0) {
+      content = Utils.toBase64(contentBytes);
+    }
 
     // When true, re-upload the file encrypted after writing so the server's
     // stored copy is upgraded from plaintext to ciphertext.
@@ -844,6 +853,10 @@ export class XSync {
     if (!entry) return;
 
     let content = "";
+    // Raw bytes for a full-file (apply) upload — sent as a binary frame when the
+    // server supports it, else base64ed into `content` by encodeFrame. `content`
+    // is only used directly for delta patches (mode:"patch"), which stay text.
+    let contentBytes: Uint8Array | undefined;
     let mode: "apply" | "patch" = "apply";
     let liveSha1 = entry.sha1;
 
@@ -854,9 +867,9 @@ export class XSync {
         const buf = await this.storage.readBinary(path);
         if (buf) {
           liveSha1 = (await Utils.getSHABinary(buf)) ?? "";
-          content = e2eeKey
-            ? await encryptToBase64(e2eeKey, buf)
-            : Utils.toBase64(new Uint8Array(buf));
+          contentBytes = e2eeKey
+            ? await encryptToBytes(e2eeKey, buf)
+            : new Uint8Array(buf);
         }
       } else {
         const currentText = await this.storage.read(path);
@@ -865,7 +878,7 @@ export class XSync {
 
           if (e2eeKey) {
             // E2EE: always send full ciphertext — patches are meaningless on ciphertext
-            content = await encryptToBase64(e2eeKey, new TextEncoder().encode(currentText));
+            contentBytes = await encryptToBytes(e2eeKey, new TextEncoder().encode(currentText));
           } else {
             // Delta sync: send a patch when it's smaller than the full file
             const shadowText = await this.storage.readShadow(path);
@@ -880,10 +893,10 @@ export class XSync {
                 content = patchText;
                 this.plugin.log(`[Delta] Sending patch for ${path}`);
               } else {
-                content = Utils.toBase64(currentText);
+                contentBytes = new TextEncoder().encode(currentText);
               }
             } else {
-              content = Utils.toBase64(currentText);
+              contentBytes = new TextEncoder().encode(currentText);
             }
             await this.storage.writeShadow(path, currentText);
           }
@@ -893,7 +906,7 @@ export class XSync {
 
     entry.sha1 = liveSha1;
     // baseSha1 = the sha we last synced for this path (see _sendFileEvent).
-    this.ws.send({ type: "file_data", mode: mode as any, file: entry, content, ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}) });
+    this.ws.send({ type: "file_data", mode: mode as any, file: entry, content, ...(contentBytes ? { contentBytes } : {}), ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}) });
     this.addActivity("up", path);
     this.syncUpCount++;
     await this.storage.writeMetadata(entry);
@@ -1060,6 +1073,9 @@ export class XSync {
     const isBinary = Utils.isBinary(file.path);
     let sha1: string | null = "";
     let content = "";
+    // Raw bytes for a full-file (apply) upload; `content` holds only a delta
+    // patch (mode:"patch", which stays text). See _uploadFile for the rationale.
+    let contentBytes: Uint8Array | undefined;
     let mode: "apply" | "patch" = "apply";
 
     const e2eeKey = await this._getEncryptionKey();
@@ -1068,9 +1084,9 @@ export class XSync {
       const buf = await this.storage.readBinary(file.path);
       if (buf) {
         sha1 = await Utils.getSHABinary(buf);
-        content = e2eeKey
-          ? await encryptToBase64(e2eeKey, buf)
-          : Utils.toBase64(new Uint8Array(buf));
+        contentBytes = e2eeKey
+          ? await encryptToBytes(e2eeKey, buf)
+          : new Uint8Array(buf);
       }
     } else {
       const currentText = await this.storage.read(file.path);
@@ -1079,7 +1095,7 @@ export class XSync {
 
         if (e2eeKey) {
           // E2EE: full ciphertext only — no delta patching on encrypted data
-          content = await encryptToBase64(e2eeKey, new TextEncoder().encode(currentText));
+          contentBytes = await encryptToBytes(e2eeKey, new TextEncoder().encode(currentText));
         } else {
           const shadowText = await this.storage.readShadow(file.path);
           if (shadowText !== null && shadowText !== currentText) {
@@ -1093,10 +1109,10 @@ export class XSync {
               content = patchText;
               this.plugin.log(`[Delta] Sending patch for ${file.path}`);
             } else {
-              content = Utils.toBase64(currentText);
+              contentBytes = new TextEncoder().encode(currentText);
             }
           } else {
-            content = Utils.toBase64(currentText);
+            contentBytes = new TextEncoder().encode(currentText);
           }
           await this.storage.writeShadow(file.path, currentText);
         }
@@ -1117,7 +1133,7 @@ export class XSync {
     const entry: FileEntry = { path: file.path, sha1: sha1 ?? "", mtime: stat.mtime, action: "active", fileType: "file" };
     // baseSha1 = the sha we last synced for this path. The server uses it to
     // detect concurrent edits (stale base) without trusting device clocks.
-    this.ws.send({ type: "file_data", mode: mode as any, file: entry, content, ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}) });
+    this.ws.send({ type: "file_data", mode: mode as any, file: entry, content, ...(contentBytes ? { contentBytes } : {}), ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}) });
     await this.storage.writeMetadata(entry);
     this.addActivity("up", file.path);
   }

@@ -173,26 +173,26 @@ export function drainPushQueue(ctx: SyncContext, peer: SyncPeer): void {
     if (peer.ws.bufferedAmount > 10 * 1024 * 1024) break;
 
     const file = peer.pushQueue.shift()!;
-    let content = "";
+    let buf: Buffer | null = null;
     if (file.action === "active" && file.fileType === "file") {
-      const buf = ctx.storage.readLatest(file.path);
-      content = buf ? buf.toString("base64") : "";
+      buf = ctx.storage.readLatest(file.path);
     }
     // Cursor-sync pushes carry their seq so the client can advance its cursor.
     // `session:true` marks them as part of the ordered cursor stream (set when
     // cursorTarget is present) so the client checkpoints only from this stream,
     // not from interleaved live broadcasts. Legacy `sync` pushes have neither.
+    // peer.send frames the raw bytes as a binary or base64 message per this
+    // peer's negotiated caps.
     const seq = (file as FileEntry & { seq?: number }).seq;
     const inSession = peer.cursorTarget !== undefined;
-    peer.ws.send(
-      JSON.stringify({
-        type: "file_push" as const,
-        file,
-        content,
-        ...(seq !== undefined ? { seq } : {}),
-        ...(inSession ? { session: true } : {}),
-      })
-    );
+    peer.send({
+      type: "file_push",
+      file,
+      content: "",
+      ...(buf ? { contentBytes: buf } : {}),
+      ...(seq !== undefined ? { seq } : {}),
+      ...(inSession ? { session: true } : {}),
+    });
     sent++;
   }
 
@@ -247,8 +247,9 @@ export function broadcastToPeers(ctx: SyncContext, sourcePeer: SyncPeer | null, 
   // 2. Bail early if no targets (saves a disk read)
   if (targets.length === 0) return;
 
-  // 3. Read and stringify only ONCE
-  let content = "";
+  // 3. Read the bytes ONCE. peer.send re-frames per peer (binary vs base64),
+  //    but the disk read and any base64 work happen at most once per wire form.
+  let buf: Buffer | null = null;
   if (file.action === "active" && file.fileType === "file") {
     // ✅ 1. Check size before reading
     const sizeBytes = ctx.storage.getSizeLatest(file.path) ?? 0;
@@ -256,13 +257,11 @@ export function broadcastToPeers(ctx: SyncContext, sourcePeer: SyncPeer | null, 
 
     if (sizeBytes > limitBytes) {
       console.warn(`[Sync] Skipping push for ${file.path} (${(sizeBytes / 1024 / 1024).toFixed(2)}MB). Exceeds ${ctx.config.maxFileSizeMb}MB limit.`);
-      // We still send the file metadata, but we omit the content so the client 
+      // We still send the file metadata, but we omit the content so the client
       // knows the file exists but doesn't crash the server downloading it.
-      content = ""; 
+      buf = null;
     } else {
-      // Safe to read
-      const buf = ctx.storage.readLatest(file.path);
-      content = buf ? buf.toString("base64") : "";
+      buf = ctx.storage.readLatest(file.path);
     }
   }
 
@@ -270,14 +269,17 @@ export function broadcastToPeers(ctx: SyncContext, sourcePeer: SyncPeer | null, 
   // push (cursor sync, phase 2) — otherwise the change is only picked up via the
   // (idempotent) re-pull on the next reconnect.
   const seq = ctx.db.getFileSeq(file.path);
-  const payload = JSON.stringify({ type: "file_push" as const, file, content, ...(seq ? { seq } : {}) });
 
-  // 4. Broadcast raw string directly
   if (file.action === "deleted") {
     logWarn(ctx, `[Broadcast] DELETE for ${file.path} → ${targets.length} peer(s): ${targets.map(p => p.deviceId).join(", ")}`);
   }
-  // 4. Broadcast raw string directly
   for (const peer of targets) {
-    peer.ws.send(payload);
+    peer.send({
+      type: "file_push",
+      file,
+      content: "",
+      ...(buf ? { contentBytes: buf } : {}),
+      ...(seq ? { seq } : {}),
+    });
   }
 }

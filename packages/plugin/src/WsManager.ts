@@ -3,6 +3,7 @@ import type {
   ClientMsg,
   VersionCheckResponseMsg,
 } from "@ionsync/protocol";
+import { encodeFrame, decodeFrame, BINARY_FRAMES_CAP } from "@ionsync/protocol";
 import { Platform } from "obsidian";
 import type { IonSyncPlugin, PluginSettings } from "./main.js";
 
@@ -122,7 +123,11 @@ export class WsManager {
   send(msg: ClientMsg): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.log("Sending:", msg.type);
-    this.ws.send(JSON.stringify(msg));
+    // encodeFrame emits a binary frame for a content-bearing upload when the
+    // server advertised "binary_frames"; otherwise a JSON string (base64ing any
+    // raw bytes back into `content`). Falls back automatically against an old
+    // server (serverCaps empty).
+    this.ws.send(encodeFrame(msg, this.serverCaps.includes(BINARY_FRAMES_CAP)));
   }
 
   disconnect(): void {
@@ -167,15 +172,23 @@ export class WsManager {
       return;
     }
 
+    // Binary frames (file_push content) arrive as ArrayBuffer, not Blob, so we
+    // can decode them synchronously without an async FileReader step.
+    this.ws.binaryType = "arraybuffer";
+
     this.ws.onopen = () => {
       this.log("WebSocket opened");
       this.reconnectDelay = 1_000;
     };
 
-    this.ws.onmessage = (ev: MessageEvent<string>) => {
+    this.ws.onmessage = (ev: MessageEvent) => {
       let msg: ServerMsg;
-      try { msg = JSON.parse(ev.data) as ServerMsg; }
-      catch (e) { console.error("[WsManager] bad JSON:", e); return; }
+      try {
+        // String → JSON control message / legacy base64 content.
+        // ArrayBuffer → binary envelope; decodeFrame attaches msg.contentBytes.
+        const data = typeof ev.data === "string" ? ev.data : new Uint8Array(ev.data as ArrayBuffer);
+        msg = decodeFrame(data) as ServerMsg;
+      } catch (e) { console.error("[WsManager] bad frame:", e); return; }
       this.log("Received:", msg.type);
       this._handleMessage(msg).catch((e) => console.error("[WsManager] message handler error:", e));
     };
@@ -200,7 +213,10 @@ export class WsManager {
         await this._handleChallenge(msg.nonce);
         break;
       case "auth_ok":
-        this.send({ type: "version_check", version: VERSION, build: BUILD_STR });
+        // Advertise binary_frames so the server can push file content as binary
+        // frames to us. The server gates on this per-peer; an old server ignores
+        // the field and we fall back to base64 (serverCaps stays empty).
+        this.send({ type: "version_check", version: VERSION, build: BUILD_STR, caps: [BINARY_FRAMES_CAP] });
         break;
       case "auth_error":
         console.error("[WsManager] Authentication failed");
