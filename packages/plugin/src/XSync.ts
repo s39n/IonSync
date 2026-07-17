@@ -1,4 +1,5 @@
 import type { FileEntry, ServerMsg } from "@ionsync/protocol";
+import { collectFolderChildren } from "@ionsync/protocol";
 import type { TAbstractFile } from "obsidian";
 import { WsManager, type UpdateInfo } from "./WsManager.js";
 import { Storage } from "./Storage.js";
@@ -1018,6 +1019,44 @@ export class XSync {
           this.plugin.log(`[IonSync] Grace-window: dropping delete for recently-applied file ${file.path} (${Date.now() - appliedAt}ms after write)`);
           return;
         }
+      }
+
+      // Folder-delete cascade. When a folder is removed Obsidian does not
+      // reliably fire an individual "delete" event for each nested file, and the
+      // apply side ignores folder-type deletes (see _applyServerFile). Without
+      // cascading, the folder's children stay "active" on the server and get
+      // re-pushed to every other device — the folder never disappears elsewhere.
+      // So we sweep stored metadata for children under "<path>/" and queue a
+      // per-file delete for each. The trailing "/" guard means a plain file
+      // delete (no children) yields nothing here and falls through to the
+      // single-file logic below. _processDeleteQueue re-stats every path before
+      // sending, so any child still on disk (partial/transient delete) is dropped.
+      const childPaths = collectFolderChildren(file.path, this.storage.getAllMetadata());
+      if (childPaths.length > 0) {
+        let queued = 0;
+        for (const childPath of childPaths) {
+          if (this.exclusionFilter?.isExcluded(childPath)) continue;
+          const childMeta = this.storage.readMetadata(childPath);
+          if (!childMeta) continue;
+          // Same grace-window protection as single-file deletes: don't propagate
+          // a delete for a child we wrote in the last 60s (mobile eviction guard).
+          const childAppliedAt = this._recentlyApplied.get(childPath);
+          if (childAppliedAt !== undefined) {
+            this._recentlyApplied.delete(childPath); // one-shot
+            if (Date.now() - childAppliedAt < 60_000) continue;
+          }
+          this.deleteQueue[childPath] = {
+            metadata: { action: "deleted", sha1: childMeta.sha1 ?? "", mtime: Date.now(), fileType: "file" },
+            timestamp: Date.now(),
+          };
+          queued++;
+        }
+        if (queued > 0) {
+          this.plugin.log(`[IonSync] Folder delete ${file.path}: cascading ${queued} child delete(s)`);
+          await this.storage.saveDeleteQueue(this.deleteQueue);
+          if (this.ws.isConnected) await this._processDeleteQueue();
+        }
+        return;
       }
 
       let existsStat = null;

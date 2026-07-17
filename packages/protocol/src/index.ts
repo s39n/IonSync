@@ -318,5 +318,31 @@ export function compareFiles(
   return client.mtime > server.mtime ? "client_newer" : "server_newer";
 }
 
+/**
+ * Return the paths of every currently-active file recorded under `folderPath`.
+ *
+ * Used to cascade a folder deletion into per-file deletes: Obsidian does not
+ * reliably emit an individual "delete" vault event for each nested file when a
+ * folder is removed, and the sync protocol only propagates per-file deletes
+ * (folder-type deletes are ignored on apply). Without this, a deleted folder's
+ * children stay "active" on the server and are re-pushed to every other device.
+ *
+ * The trailing "/" on the prefix is essential: it ensures a plain file delete
+ * (e.g. "notes/foo.md") never matches sibling paths, so callers can safely run
+ * this on every delete event — only real folders yield children. Already-deleted
+ * entries are skipped so a re-delete is a no-op.
+ */
+export function collectFolderChildren(
+  folderPath: string,
+  files: Record<string, FileEntry>
+): string[] {
+  const prefix = folderPath + "/";
+  const out: string[] = [];
+  for (const p of Object.keys(files)) {
+    if (p.startsWith(prefix) && files[p]?.action !== "deleted") out.push(p);
+  }
+  return out;
+}
+
 // ─── Binary-frame wire codec ────────────────────────────────────────────────
 export { encodeFrame, decodeFrame, canBinaryFrame, BINARY_FRAMES_CAP } from "./wire.js";
