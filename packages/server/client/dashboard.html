@@ -1399,24 +1399,37 @@ async function deleteFile(path, btn) {
 }
 
 async function deleteFolder(folderPath, btn) {
-  const toDelete = allFiles.filter(f => f.path.startsWith(folderPath + '/'));
-  if (!toDelete.length) { toast('No files in folder', 'error'); return; }
+  // Arm step: confirm using the server's authoritative count so the whole
+  // subtree is covered — not just the files currently loaded into this view.
   if (!btn.dataset.armed) {
+    let count = allFiles.filter(f => f.path === folderPath || f.path.startsWith(folderPath + '/')).length;
+    try {
+      const r = await api('/api/folder-file-count?prefix=' + encodeURIComponent(folderPath));
+      count = (await r.json()).count;
+    } catch {}
+    if (!count) { toast('No files in folder', 'error'); return; }
     btn.dataset.armed = '1';
-    btn.textContent = `Delete ${toDelete.length} file${toDelete.length !== 1 ? 's' : ''}?`;
+    btn.textContent = `Delete ${count} file${count !== 1 ? 's' : ''}?`;
     setTimeout(() => { if (btn.dataset.armed) { delete btn.dataset.armed; btn.textContent = 'Delete'; } }, 4000);
     return;
   }
+  // Fire step: one server-side request deletes the entire subtree and broadcasts
+  // each deletion to connected peers, so large folders no longer fan out into
+  // thousands of individual DELETE round-trips (which could partially fail).
   delete btn.dataset.armed;
   btn.disabled = true; btn.textContent = '…';
-  let failed = 0;
-  for (const f of toDelete) {
-    try {
-      await api(`/api/delete-file/${encodeURIComponent(f.path)}`, { method: 'DELETE' });
-    } catch { failed++; }
+  try {
+    const r = await api('/api/delete-folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefix: folderPath }),
+    });
+    const { deleted } = await r.json();
+    toast(`Deleted ${deleted} file${deleted !== 1 ? 's' : ''}`, 'success');
+  } catch (e) {
+    toast('Delete failed: ' + e.message, 'error');
   }
-  if (failed) toast(`Deleted ${toDelete.length - failed}, ${failed} failed`, 'error');
-  else toast(`Deleted ${toDelete.length} file${toDelete.length !== 1 ? 's' : ''}`, 'success');
+  btn.disabled = false; btn.textContent = 'Delete';
   await loadFiles();
 }
 

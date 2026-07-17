@@ -670,6 +670,63 @@ describe("dashboard admin actions", () => {
     watcher.close();
     await srv.stop();
   });
+
+  it("delete-folder marks every file under a prefix deleted and broadcasts each, leaving siblings untouched", async () => {
+    const srv = await startTestServer();
+    const uploader = connectClient(srv.port);
+    await waitForOpen(uploader);
+    await uploader.auth("device-a");
+
+    // Two files inside "Projects", one sibling outside it.
+    const files = [
+      { path: "Projects/a.md", sha1: "ba2af8b699b34a4d9255297507b3786a35000229", content: "Zm9uZQ==" },
+      { path: "Projects/sub/b.md", sha1: "322dd25e567dce1fe1ed7ac498d278b895b089ba", content: "ZnR3bw==" },
+      { path: "Other/c.md", sha1: "45e18dad51fd9e8869897fba48fa93d118e5e404", content: "b3V0c2lkZQ==" },
+    ];
+    for (const f of files) {
+      uploader.send({
+        type: "file_data", mode: "apply",
+        file: { path: f.path, sha1: f.sha1, mtime: 1000, action: "active", fileType: "file" },
+        content: f.content,
+      });
+    }
+    // Round-trip a history request so all three uploads are committed.
+    uploader.send({ type: "file_history", path: "Other/c.md" });
+    await uploader.nextMsg((m) => (m as { type: string }).type === "file_history_response");
+    for (const f of files) assert.equal(srv.ctx.db.getFile(f.path)?.action, "active");
+
+    const watcher = connectClient(srv.port);
+    await waitForOpen(watcher);
+    await watcher.auth("device-b");
+
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/delete-folder`, {
+      method: "POST",
+      headers: { ...dashHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ prefix: "Projects" }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true, prefix: "Projects", deleted: 2 });
+
+    // Both in-folder files broadcast as deletions...
+    const deletedPaths = new Set<string>();
+    for (let i = 0; i < 2; i++) {
+      const push = await watcher.nextMsg<{ type: string; file: FileEntry }>(
+        (m) => (m as { type: string }).type === "file_push" &&
+               (m as { file: FileEntry }).file.action === "deleted"
+      );
+      deletedPaths.add(push.file.path);
+    }
+    assert.deepEqual([...deletedPaths].sort(), ["Projects/a.md", "Projects/sub/b.md"]);
+
+    assert.equal(srv.ctx.db.getFile("Projects/a.md")?.action, "deleted");
+    assert.equal(srv.ctx.db.getFile("Projects/sub/b.md")?.action, "deleted");
+    // The sibling outside the prefix is untouched.
+    assert.equal(srv.ctx.db.getFile("Other/c.md")?.action, "active");
+
+    uploader.close();
+    watcher.close();
+    await srv.stop();
+  });
 });
 
 describe("conflictCopyPath naming", () => {

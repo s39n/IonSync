@@ -5,6 +5,7 @@ import { timingSafeEqual, randomBytes } from "node:crypto";
 import archiver from "archiver";
 import { ConnectionRateLimiter } from "../ws/rateLimit.js";
 import type { SyncContext } from "../context.js";
+import type { FileEntry } from "@ionsync/protocol";
 import { sha256 } from "../crypto.js";
 import { isE2eeEncrypted, makeE2eeDecryptor } from "../e2ee.js";
 import { broadcastToPeers } from "../ws/handlers/sync.js";
@@ -390,6 +391,56 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     broadcastToPeers(ctx, null, deletedEntry);
 
     res.json({ ok: true });
+  });
+
+  // ── Bulk delete every active file under a folder prefix ──────────────────
+  // Motivation: deleting a folder in Obsidian does not reliably propagate a
+  // delete for each nested file, so folders can end up stranded (still active)
+  // on the server and re-pushed to every device. This lets an operator clear a
+  // whole subtree in one action. Each matched file goes through the SAME path
+  // as the single-file delete above (mark deleted, drop versions, broadcast),
+  // so connected peers converge immediately.
+
+  /** Normalise a folder prefix and reject traversal. Returns null on invalid. */
+  function normalizePrefix(raw: string): string | null {
+    const trimmed = raw.trim().replace(/\/+$/, ""); // strip trailing slashes
+    if (!trimmed) return null;
+    const normalized = path.normalize(trimmed);
+    if (normalized.startsWith("..") || path.isAbsolute(normalized)) return null;
+    return trimmed;
+  }
+
+  /** Active files whose path is exactly the prefix or sits under "<prefix>/". */
+  function activeFilesUnder(prefix: string): FileEntry[] {
+    const dir = prefix + "/";
+    return ctx.db
+      .getFilesByAction("active")
+      .filter((f) => f.path === prefix || f.path.startsWith(dir));
+  }
+
+  // Preview: how many files (and total bytes) a folder delete would affect.
+  router.get("/api/folder-file-count", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const prefix = normalizePrefix(String(req.query.prefix ?? ""));
+    if (prefix === null) { res.status(400).json({ error: "Invalid prefix" }); return; }
+    const matches = activeFilesUnder(prefix);
+    const bytes = matches.reduce((sum, f) => sum + (ctx.storage.getSizeLatest(f.path) ?? 0), 0);
+    res.json({ prefix, count: matches.length, bytes });
+  });
+
+  router.post("/api/delete-folder", express.json(), (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const prefix = normalizePrefix(String((req.body as { prefix?: unknown })?.prefix ?? ""));
+    if (prefix === null) { res.status(400).json({ error: "Invalid prefix" }); return; }
+
+    const matches = activeFilesUnder(prefix);
+    for (const file of matches) {
+      const deletedEntry = { ...file, action: "deleted" as const, mtime: Date.now() };
+      ctx.db.upsertFile(deletedEntry);
+      ctx.storage.deleteAllVersions(file.path);
+      broadcastToPeers(ctx, null, deletedEntry);
+    }
+    res.json({ ok: true, prefix, deleted: matches.length });
   });
 
   // ── Update file metadata (mtime only, no new version row) ────────────────
