@@ -727,6 +727,52 @@ describe("dashboard admin actions", () => {
     watcher.close();
     await srv.stop();
   });
+
+  it("SSE /api/events streams a change frame when server state changes", async () => {
+    const srv = await startTestServer();
+    const ac = new AbortController();
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/events`, {
+      headers: dashHeaders(),
+      signal: ac.signal,
+    });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/event-stream/);
+
+    const reader = res.body!.getReader();
+    const dec = new TextDecoder();
+
+    // Trigger a change: a real upload funnels through pushActivity → emitSse.
+    const uploader = connectClient(srv.port);
+    await waitForOpen(uploader);
+    await uploader.auth("device-a");
+    uploader.send({
+      type: "file_data",
+      mode: "apply",
+      file: { path: "notes/sse.md", sha1: "7bd81a159ea42d0f32dc1bcac2b3756123a985c7", mtime: 1000, action: "active", fileType: "file" },
+      content: Buffer.from("v one").toString("base64"),
+    });
+
+    // Read the stream until the coalesced `change` frame arrives (or time out).
+    let buf = "";
+    const deadline = Date.now() + 6000;
+    while (!buf.includes("event: change") && Date.now() < deadline) {
+      const chunk = await Promise.race([
+        reader.read(),
+        new Promise<{ value: undefined; done: boolean }>((r) =>
+          setTimeout(() => r({ value: undefined, done: false }), 1000)
+        ),
+      ]);
+      if (chunk.value) buf += dec.decode(chunk.value, { stream: true });
+      if (chunk.done) break;
+    }
+    assert.match(buf, /event: change/);
+    assert.match(buf, /"kinds"/);
+
+    ac.abort();
+    await reader.cancel().catch(() => {});
+    uploader.close();
+    await srv.stop();
+  });
 });
 
 describe("conflictCopyPath naming", () => {

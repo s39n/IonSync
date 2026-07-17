@@ -216,6 +216,36 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     res.type("text/plain").send(ctx.logBuffer.join("\n") || "No logs yet");
   });
 
+  // ── Live event stream (Server-Sent Events) ───────────────────────────────
+  // The dashboard opens this once and refreshes the moment the server signals a
+  // change, instead of polling on a fixed timer. Auth is the same dash_token
+  // cookie (EventSource sends cookies on same-origin). The CSP already permits
+  // connect-src 'self', so no page-level change is needed.
+  router.get("/api/events", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    // Disable proxy buffering (nginx) so events are delivered immediately.
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+    // retry: reconnect backoff hint; ": connected" is a comment that opens the
+    // stream so the browser fires `onopen` right away.
+    res.write("retry: 3000\n\n: connected\n\n");
+
+    ctx.sse.clients.add(res);
+    // Heartbeat comment keeps intermediaries from closing an idle connection.
+    const heartbeat = setInterval(() => {
+      try { res.write(": ping\n\n"); } catch { /* cleaned up on close */ }
+    }, 25_000);
+    (heartbeat as { unref?: () => void }).unref?.();
+    req.on("close", () => {
+      clearInterval(heartbeat);
+      ctx.sse.clients.delete(res);
+    });
+  });
+
   // ── Devices ───────────────────────────────────────────────────────────────
 
   router.get("/api/devices", (req, res) => {
@@ -389,6 +419,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     // every dashboard sync attempt. sourcePeer is null: this delete has no
     // originating WS connection to exclude from the broadcast.
     broadcastToPeers(ctx, null, deletedEntry);
+    pushActivity(ctx, { kind: "delete", path: filePath });
 
     res.json({ ok: true });
   });
@@ -439,6 +470,9 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
       ctx.db.upsertFile(deletedEntry);
       ctx.storage.deleteAllVersions(file.path);
       broadcastToPeers(ctx, null, deletedEntry);
+    }
+    if (matches.length > 0) {
+      pushActivity(ctx, { kind: "delete", detail: `${prefix}/ (${matches.length} files)` });
     }
     res.json({ ok: true, prefix, deleted: matches.length });
   });

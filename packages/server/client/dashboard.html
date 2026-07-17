@@ -1005,7 +1005,28 @@ async function tryRestoreSession() {
 // ── Polling ────────────────────────────────────────────────────────────────
 function startPolling() {
   refreshAll();
-  pollTimer = setInterval(refreshAll, 5000);
+  // SSE now drives live updates. Keep a slow fallback poll as a safety net for
+  // a missed event, a dropped stream, or auth expiry (the poll's api() catches
+  // 401 and reloads). 30s instead of 5s — quiet and non-disruptive.
+  pollTimer = setInterval(refreshAll, 30000);
+  startEvents();
+}
+
+// Live push channel. One EventSource; the server sends a `change` frame the
+// instant server state changes, and we run a debounced refreshAll(). The
+// selection-preserving, signature-guarded renders make each update seamless.
+let _sse = null, _sseDebounce = null;
+function startEvents() {
+  if (_sse || typeof EventSource === 'undefined') return;
+  try {
+    _sse = new EventSource('/api/events');
+    _sse.addEventListener('change', () => {
+      clearTimeout(_sseDebounce);
+      _sseDebounce = setTimeout(refreshAll, 150);
+    });
+    // EventSource auto-reconnects using the server's retry hint; the fallback
+    // poll covers any gap in the meantime.
+  } catch {}
 }
 
 async function refreshAll() {
