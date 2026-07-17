@@ -1052,12 +1052,34 @@ async function loadDevices() {
   updateOverview();
 }
 
+// Cheap order-sensitive hash of the file list (server returns it sorted by
+// path). Lets an auto-refresh skip the DOM rebuild when nothing actually
+// changed — far cheaper than re-rendering, and it leaves selection, scroll and
+// focus untouched on every quiet poll.
+function fileListSig(list) {
+  let h = (5381 ^ list.length) >>> 0;
+  for (const f of list) {
+    const s = f.path + ' ' + f.mtime + ' ' + f.size + ' ' + f.action;
+    for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  }
+  return h;
+}
+let _filesSig = null;
+
 async function loadFiles() {
   const r = await api('/api/files');
-  allFiles = await r.json();
-  filesSelected.clear();
+  const next = await r.json();
+  const sig = fileListSig(next);
+  allFiles = next;
+  // Reconcile the selection instead of wiping it: keep every picked path that
+  // still exists, drop only those the server no longer has. A quiet poll (the
+  // common case) leaves the selection completely intact.
+  const present = new Set(allFiles.map(f => f.path));
+  for (const p of [...filesSelected]) if (!present.has(p)) filesSelected.delete(p);
   filesUpdateBulkBar();
-  renderFiles();
+  // Only touch the tree DOM when the data genuinely changed. This is what makes
+  // the refresh feel seamless — an unchanged 5s poll is now a no-op.
+  if (sig !== _filesSig) { _filesSig = sig; renderFiles(); }
 }
 
 async function loadLogs() {
