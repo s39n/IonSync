@@ -1,6 +1,6 @@
 import type { FileEntry, ServerMsg } from "@ionsync/protocol";
 import { collectFolderChildren } from "@ionsync/protocol";
-import type { TAbstractFile } from "obsidian";
+import { Platform, type TAbstractFile } from "obsidian";
 import { WsManager, type UpdateInfo } from "./WsManager.js";
 import { Storage } from "./Storage.js";
 import { XNotify, NotifyType, STATUS_WARN } from "./XNotify.js";
@@ -169,10 +169,22 @@ export class XSync {
     // that discarded them — and then cleared the pending queue, silently
     // losing edits. The queue is now only cleared when an upload really went
     // out over the authenticated WS; anything unsent is retried next sync.)
+    // Single owner of the hidden-side sequencing: flush any debounced pending
+    // upload over the WS while it's still open, THEN (mobile only) disconnect.
+    // These must run strictly in that order — previously the disconnect lived
+    // in WsManager's own visibilitychange listener, racing this one with no
+    // guarantee the flush finished first, which silently dropped whatever edit
+    // was mid-debounce when the app backgrounded. Awaiting executeAll() here
+    // before calling ws.disconnect() closes that race entirely. See the
+    // comment on WsManager's constructor for the other half of this.
     this.eventRefs["visibility-change"] = () => {
-      if (document.visibilityState === "hidden" && this.ws.isConnected) {
-        this.xTimeouts.executeAll();
-      }
+      if (document.visibilityState !== "hidden") return;
+      void (async () => {
+        if (this.ws.isConnected) {
+          await this.xTimeouts.executeAll();
+        }
+        if (Platform.isMobile) this.ws.disconnect();
+      })();
     };
     document.addEventListener("visibilitychange", this.eventRefs["visibility-change"]);
 
@@ -1276,7 +1288,12 @@ export class XSync {
 
 
   private async _onFocusChanged(): Promise<void> {
-    this.xTimeouts.executeAll();
+    // Must be awaited: executeAll() now actually sends the debounced edit
+    // (previously it only cancelled the timer, silently dropping whatever was
+    // mid-debounce every time the user switched notes — the most common way a
+    // local edit fell out of sync until a later incoming push exposed the
+    // divergence as a spurious conflict).
+    await this.xTimeouts.executeAll();
     await this._checkConfigFiles();
   }
 
@@ -1311,41 +1328,50 @@ export class XSync {
   private async _checkConfigFiles(): Promise<void> {
     if (!this.ws.isConnected || !this.plugin.settings.autoSync || this.isSyncing) return;
     const configDir = this.plugin.app.vault.configDir;
-    // Seed with the well-known singleton config files.
-    const targets: string[] = [
-      `${configDir}/app.json`,
-      `${configDir}/appearance.json`,
-      `${configDir}/hotkeys.json`,
-      `${configDir}/community-plugins.json`,
-      `${configDir}/core-plugins.json`,
-      `${configDir}/core-plugins-migration.json`,
-    ].filter(p => !this.exclusionFilter?.isExcluded(p));
+    // Only ever probe files we've SEEN in a directory listing — never stat a
+    // path blindly. The DataAdapter contract says stat() returns null for a
+    // missing path, but the remote-fs "web" build (served over HTTP) instead
+    // returns a 404: that both throws (aborting this poll) and floods the
+    // console every 5s. Discovering targets from list() means we request only
+    // files that exist, so there are no 404s and one bad file can't kill the loop.
+    const targets: string[] = [];
 
-    // Vault events don't fire for .obsidian/ changes, so we must poll.
-    // Add every .json sitting directly in .obsidian/ (core plugin settings
-    // like daily-notes.json, templates.json, etc.) then each plugin's data.json.
+    // Vault events don't fire for config-dir changes, so we poll. Pick up every
+    // .json sitting directly in the config dir — app.json, appearance.json,
+    // hotkeys.json, community-plugins.json, and core-plugin settings like
+    // daily-notes.json. Absent singletons simply won't be listed (no 404).
     try {
       const listing = await this.plugin.app.vault.adapter.list(configDir);
       for (const f of listing.files) {
-        if (f.endsWith(".json") && !targets.includes(f) && !this.exclusionFilter?.isExcluded(f))
-          targets.push(f);
+        if (f.endsWith(".json") && !this.exclusionFilter?.isExcluded(f)) targets.push(f);
       }
     } catch { /* configDir unreadable — skip */ }
 
+    // Each installed plugin's data.json — but ONLY when it actually exists.
+    // Most plugins have no saved settings, so blindly statting "<plugin>/data.json"
+    // 404'd for the majority every poll; confirm via the folder's own listing.
     if (this.plugin.settings.syncInstalledCommunityPlugins) {
       try {
         const pluginsDir = `${configDir}/plugins`;
-        const listing = await this.plugin.app.vault.adapter.list(pluginsDir);
-        for (const folder of listing.folders) {
+        const { folders } = await this.plugin.app.vault.adapter.list(pluginsDir);
+        for (const folder of folders) {
           const dataPath = `${folder}/data.json`;
-          if (!this.exclusionFilter?.isExcluded(dataPath)) targets.push(dataPath);
+          if (this.exclusionFilter?.isExcluded(dataPath)) continue;
+          try {
+            const inner = await this.plugin.app.vault.adapter.list(folder);
+            if (inner.files.some(f => f === dataPath || f.toLowerCase().endsWith("/data.json"))) {
+              targets.push(dataPath);
+            }
+          } catch { /* plugin folder vanished mid-poll — skip */ }
         }
       } catch { /* plugins dir unreadable — skip */ }
     }
 
     for (const path of targets) {
-      const stat = await this.plugin.app.vault.adapter.stat(path);
-      if (stat) await this._sendFileEvent({ path } as TAbstractFile, false);
+      try {
+        const stat = await this.plugin.app.vault.adapter.stat(path);
+        if (stat) await this._sendFileEvent({ path } as TAbstractFile, false);
+      } catch { /* adapter hiccup / file removed mid-poll — skip, keep polling */ }
     }
     this.xNotify.updatePendingCount(Object.keys(this.unsentSessionEvents).length);
   }
