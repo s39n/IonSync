@@ -801,3 +801,25 @@ describe("conflictCopyPath naming", () => {
     assert.match(base, /\(Conflicted Copy .*\)\.md$/);
   });
 });
+
+describe("hidden/config path detection (incl. 8.3 short-name twin)", () => {
+  it("treats OBSIDI~1 (the .obsidian 8.3 alias) as config, so it never mints a conflict copy", async () => {
+    const { isHiddenOrConfigPath, isShortNameConfigDir } = await import("../src/ws/handlers/fileData.js");
+
+    // Real dotted config — unchanged behaviour.
+    assert.equal(isHiddenOrConfigPath(".obsidian/app.json"), true);
+    assert.equal(isHiddenOrConfigPath("notes/.hidden/x.md"), true);
+
+    // The corrupted short-name twin, top-level and nested under a short-name tree.
+    assert.equal(isShortNameConfigDir("OBSIDI~1/plugins/tasknotes/data.json"), true);
+    assert.equal(isHiddenOrConfigPath("OBSIDI~1/plugins/tasknotes/data.json"), true);
+    assert.equal(isHiddenOrConfigPath("Efforts/ACTIVE~1/x/OBSIDI~1/plugins/ink/data.json"), true);
+    assert.equal(isHiddenOrConfigPath("obsidi~2/plugins/foo.json"), true); // case + index tolerant
+
+    // Ordinary content must stay non-config (still eligible for real conflicts).
+    assert.equal(isHiddenOrConfigPath("Atlas/Bible/Genesis.md"), false);
+    assert.equal(isShortNameConfigDir("Atlas/Bible/Genesis.md"), false);
+    // A filename that merely contains a tilde is not a config dir.
+    assert.equal(isShortNameConfigDir("notes/my~1note.md"), false);
+  });
+});

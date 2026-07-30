@@ -55,9 +55,24 @@ function decideUpload(
   return file.mtime >= serverFile.mtime ? "accept" : "conflict";
 }
 
-/** True for paths with a dot-segment: ".obsidian/app.json", "foo/.hidden/x". */
+/**
+ * True for paths the sync treats as hidden/config (LWW, never a conflict copy).
+ *
+ * Matches any dot-segment (".obsidian/app.json", "foo/.hidden/x") AND the DOS
+ * 8.3 short-name twin of the config folder: "OBSIDI~1". A recovery/restore tool
+ * that walked the disk via short paths can create a literal "OBSIDI~1" folder
+ * beside ".obsidian"; it has no dot segment, so without this it dodged the
+ * carve-out and its plugin data.json files minted a conflict copy on every flap
+ * (observed in production — thousands of junk copies). Treat it as config so it
+ * resolves by last-write-wins instead.
+ */
 export function isHiddenOrConfigPath(p: string): boolean {
-  return p.startsWith(".") || p.includes("/.");
+  return p.startsWith(".") || p.includes("/.") || isShortNameConfigDir(p);
+}
+
+/** True if any path segment is the 8.3 short-name alias of ".obsidian". */
+export function isShortNameConfigDir(p: string): boolean {
+  return /(^|\/)OBSIDI~\d+(\/|$)/i.test(p);
 }
 
 /**

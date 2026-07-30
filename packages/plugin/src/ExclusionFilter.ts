@@ -28,6 +28,15 @@ export class ExclusionFilter {
     // 1. IMMUTABLE RULE: Never sync workspace files (prevents infinite loops)
     if (this.dangerousFiles.has(path)) return true;
 
+    // 1b. IMMUTABLE RULE: Never sync the DOS 8.3 short-name twin of the config
+    //     folder. A recovery/restore tool that walked the disk via short paths
+    //     can leave a literal "OBSIDI~1" folder beside ".obsidian"; it has no
+    //     dot segment so it dodges every config/hidden rule below, and its
+    //     plugin data.json files flap endlessly, minting conflict copies. Match
+    //     the alias anywhere in the path (it also appears nested under corrupted
+    //     short-name trees) and never upload or apply it.
+    if (this.isShortNameConfig(path)) return true;
+
     // 2. IMMUTABLE RULE: Never sync IonSync's own plugin directory.
     //    It contains device-specific settings (deviceId, password, metadata)
     //    that must not bleed across devices regardless of any toggle.
@@ -69,6 +78,7 @@ export class ExclusionFilter {
     return false;
   }
 
+  private isShortNameConfig(p: string) { return /(^|\/)OBSIDI~\d+(\/|$)/i.test(p); }
   private isTrashPath(p: string) { return p === ".trash" || p.startsWith(".trash/"); }
   private isHiddenPath(p: string) {
     return p.startsWith(".") || p.includes("/.");
