@@ -158,6 +158,24 @@ export class XSync {
       await this.plugin.saveSettings();
     }
 
+    // Inverse guard (critical): bootstrap was marked complete AND we hold a
+    // non-zero cursor, but local sync metadata is GONE (metadata.json reset,
+    // corrupted, or orphaned as a conflicted-copy). Cursor sync would then ask
+    // "catch me up since <cursor>" and the server would send only newer changes
+    // — leaving the device permanently missing every file at seq <= cursor while
+    // it happily reports "fully synced". Without any metadata we cannot trust the
+    // cursor, so force a full bootstrap from seq 0 (the server replays everything).
+    if (this.plugin.settings.bootstrapComplete && this._lastSyncedSeq > 0 && !this.storage.hasAnyMetadata()) {
+      this.plugin.log(
+        `[IonSync] Cursor is ${this._lastSyncedSeq} but local metadata is empty — forcing full re-bootstrap from seq 0`
+      );
+      this._lastSyncedSeq = 0;
+      this.plugin.settings.lastSyncedSeq = 0;
+      this.plugin.settings.bootstrapComplete = false;
+      this.plugin.settings.lastSyncedEndpoint = "";
+      await this.plugin.saveSettings();
+    }
+
     this._registerVaultEvent("create");
     this._registerVaultEvent("modify");
     this._registerVaultEvent("delete");
