@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { collectFolderChildren } from "@ionsync/protocol";
+import { collectFolderChildren, cascadeDeleteExceedsSafetyCap, CASCADE_HARD_CAP } from "@ionsync/protocol";
 import type { FileEntry } from "@ionsync/protocol";
 
 function file(path: string, action: "active" | "deleted" = "active"): FileEntry {
@@ -45,4 +45,19 @@ test("collectFolderChildren does not match sibling paths that share a prefix", (
 
 test("collectFolderChildren returns empty for a folder with no tracked files", () => {
   assert.deepEqual(collectFolderChildren("Empty", { "Other/a.md": file("Other/a.md") }), []);
+});
+
+test("cascade safety cap blocks implausibly large folder deletes but allows normal ones", () => {
+  // Normal folder deletes pass through.
+  assert.equal(cascadeDeleteExceedsSafetyCap(10, 20000), false);
+  assert.equal(cascadeDeleteExceedsSafetyCap(300, 20000), false);
+  // Over the absolute hard cap is blocked.
+  assert.equal(cascadeDeleteExceedsSafetyCap(CASCADE_HARD_CAP + 1, 1_000_000), true);
+  // Over a third of the whole vault is blocked even under the hard cap.
+  assert.equal(cascadeDeleteExceedsSafetyCap(40, 100), true);
+  assert.equal(cascadeDeleteExceedsSafetyCap(33, 100), false); // exactly a third: allowed
+  // The production incident (~14k deletes in a ~22k vault) would be blocked.
+  assert.equal(cascadeDeleteExceedsSafetyCap(14000, 22000), true);
+  // No vault size known yet (fresh): only the hard cap applies.
+  assert.equal(cascadeDeleteExceedsSafetyCap(200, 0), false);
 });

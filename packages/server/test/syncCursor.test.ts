@@ -192,4 +192,67 @@ describe("sync_cursor", () => {
     client.close();
     await srv.stop();
   });
+
+  // Follow the sync_done{more} handshake to completion, like a real client.
+  async function bootstrapAll(client: TestClient, since: number): Promise<{ pushes: PushMsg[]; finalCursor: number }> {
+    const pushes: PushMsg[] = [];
+    let cursor = since;
+    for (;;) {
+      client.send({ type: "sync_cursor", since: cursor });
+      const { pushes: batch, done } = await drain(client);
+      pushes.push(...batch);
+      cursor = done.cursor ?? cursor;
+      if (!done.more) return { pushes, finalCursor: cursor };
+    }
+  }
+
+  it("a bootstrap larger than one batch delivers EVERY file across batches, ending exactly at the server cursor", async () => {
+    const srv = await startTestServer();
+    const N = 600; // > MAX_BATCH_COUNT (250) → at least 3 batches
+    for (let i = 0; i < N; i++) seed(srv, entry(`notes/file-${String(i).padStart(4, "0")}.md`, 1000 + i), `body-${i}`);
+    const current = srv.ctx.db.getCurrentSeq();
+
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    const { pushes, finalCursor } = await bootstrapAll(client, 0);
+    const paths = new Set(pushes.map((p) => p.file.path));
+    // Regression guard for the silent-incomplete-sync bug: a mid-batch must not
+    // finalize early and strand files above the cursor.
+    assert.equal(pushes.length, N, "every file delivered exactly once across batches");
+    assert.equal(paths.size, N, "no duplicates");
+    assert.ok(paths.has("notes/file-0599.md"), "the last file (highest seq) is delivered, not stranded");
+    assert.equal(finalCursor, current, "final cursor equals the server's current seq — truly caught up");
+
+    client.close();
+    await srv.stop();
+  });
+
+  it("resuming from a mid-bootstrap cursor delivers exactly the remaining files (no gap, no repeat)", async () => {
+    const srv = await startTestServer();
+    const N = 600;
+    for (let i = 0; i < N; i++) seed(srv, entry(`n/${String(i).padStart(4, "0")}.md`, 1000 + i), `b${i}`);
+    const current = srv.ctx.db.getCurrentSeq();
+
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    // Take just the first batch, then resume from its cursor (simulates a stall
+    // + watchdog/reconnect resume).
+    client.send({ type: "sync_cursor", since: 0 });
+    const first = await drain(client);
+    assert.equal(first.done.more, true, "first batch reports more remain");
+    const mid = first.done.cursor!;
+
+    const rest = await bootstrapAll(client, mid);
+    const all = [...first.pushes, ...rest.pushes];
+    assert.equal(all.length, N, "first batch + resume together cover every file once");
+    assert.equal(new Set(all.map((p) => p.file.path)).size, N, "resume neither skips nor repeats");
+    assert.equal(rest.finalCursor, current, "resume ends caught up at the server cursor");
+
+    client.close();
+    await srv.stop();
+  });
 });

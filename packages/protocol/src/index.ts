@@ -344,5 +344,26 @@ export function collectFolderChildren(
   return out;
 }
 
+/** Absolute ceiling on how many deletes a single folder-delete event may cascade. */
+export const CASCADE_HARD_CAP = 1000;
+/** ...or this fraction of the whole vault, whichever is smaller. */
+export const CASCADE_VAULT_FRACTION = 0.33;
+
+/**
+ * True when cascading a folder delete would remove an implausibly large number
+ * of files — over the hard cap OR over a third of the entire vault. A single
+ * folder-delete event must never be able to wipe a knowledge base: a spurious or
+ * mistaken removal (or a Windows 8.3 short-name path collision) once cascaded
+ * ~14k deletes across every device. When this returns true the caller refuses to
+ * propagate the deletion automatically and warns the user; the other devices and
+ * the server keep the files, so nothing is lost. Real bulk deletes go in smaller
+ * batches or through the dashboard's explicit folder-delete.
+ */
+export function cascadeDeleteExceedsSafetyCap(childCount: number, vaultSize: number): boolean {
+  if (childCount > CASCADE_HARD_CAP) return true;
+  if (vaultSize > 0 && childCount > vaultSize * CASCADE_VAULT_FRACTION) return true;
+  return false;
+}
+
 // ─── Binary-frame wire codec ────────────────────────────────────────────────
 export { encodeFrame, decodeFrame, canBinaryFrame, BINARY_FRAMES_CAP } from "./wire.js";

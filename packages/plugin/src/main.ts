@@ -82,6 +82,15 @@ export interface PluginSettings {
    * as first-sync (keeping the delete-queue safety guard) until it finishes.
    */
   bootstrapComplete: boolean;
+  /**
+   * True while a bootstrap is underway but has NOT yet finished (set when a
+   * first-sync starts, cleared on sync_done). Persisted so that if the app is
+   * closed or the sync stalls mid-bootstrap, the next load knows the metadata on
+   * disk is PARTIAL and must not be mistaken for a completed sync. Without this,
+   * "has metadata → assume complete" silently leaves a device permanently
+   * missing files while reporting "fully synced".
+   */
+  bootstrapInProgress: boolean;
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
@@ -117,6 +126,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
   lastSyncedSeq: 0,
   lastSyncedEndpoint: "",
   bootstrapComplete: false,
+  bootstrapInProgress: false,
 };
 
 // ---------- Plugin ----------

@@ -61,18 +61,29 @@ export class WsManager {
   private get settings(): PluginSettings { return this.plugin.settings; }
 
   constructor(private plugin: IonSyncPlugin) {
-    // On mobile, disconnect when the app goes to the background and reconnect
-    // when it comes back to the foreground. This avoids drained battery from a
-    // stale socket and prevents the OS from killing the socket underneath us.
+    // On mobile, reconnect promptly when the app comes back to the foreground
+    // (rather than waiting out the exponential backoff from whatever drop
+    // happened while backgrounded). This avoids drained battery from a stale
+    // socket and prevents the OS from killing it underneath us.
     //
-    // On desktop we intentionally skip this — minimising/alt-tabbing fires
-    // visibilitychange too, which would cause a reconnect (and two notifications)
-    // every time the user switches windows. The server's ping/pong keepalive and
-    // the existing onclose handler already manage genuine connection drops there.
+    // The background→disconnect side deliberately does NOT live here. It used
+    // to: this listener called disconnect() directly on `document.hidden`, in
+    // parallel with XSync's own visibilitychange listener whose job is to flush
+    // any debounced pending upload before the socket closes. Both listeners fire
+    // on the same event, and there is no ordering guarantee that makes the flush
+    // finish before this one's disconnect() runs — so the pending edit's
+    // ws.send() could easily lose the race against the socket closing,
+    // discarding it. XSync.load() now owns the entire hidden-side sequence
+    // (await flush, then disconnect) so the two can never race. See XSync.ts.
+    //
+    // On desktop we intentionally skip the reconnect-on-visible behavior too —
+    // minimising/alt-tabbing fires visibilitychange too, which would cause a
+    // reconnect (and two notifications) every time the user switches windows.
+    // The server's ping/pong keepalive and the existing onclose handler already
+    // manage genuine connection drops there.
     if (Platform.isMobile && typeof document !== "undefined") {
       this.mobileVisibilityListener = () => {
-        if (document.hidden) this.disconnect();
-        else this.scheduleReconnect(0);
+        if (!document.hidden) this.scheduleReconnect(0);
       };
       document.addEventListener("visibilitychange", this.mobileVisibilityListener);
     }
@@ -155,6 +166,16 @@ export class WsManager {
 
   private _openSocket(): void {
     if (!this.isEnabled) return;
+    // Guard against opening a second socket on top of one that's already
+    // connecting/open. This became reachable once the background disconnect
+    // moved to XSync (see the comment in the constructor): a quick
+    // background→foreground flicker can fire the foreground reconnect while
+    // XSync's flush-then-disconnect is still awaiting the flush, so the old
+    // socket may still be alive when this runs.
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      this.log("Skipping reconnect — a socket is already open/connecting");
+      return;
+    }
     const host = this.settings.host.replace(/\/+$/, ""); // strip any trailing slashes
     const { port } = this.settings;
     const scheme = this.settings.tls ? "wss" : "ws";

@@ -1,5 +1,5 @@
 import type { FileEntry, ServerMsg } from "@ionsync/protocol";
-import { collectFolderChildren } from "@ionsync/protocol";
+import { collectFolderChildren, cascadeDeleteExceedsSafetyCap } from "@ionsync/protocol";
 import { Platform, type TAbstractFile } from "obsidian";
 import { WsManager, type UpdateInfo } from "./WsManager.js";
 import { Storage } from "./Storage.js";
@@ -40,6 +40,10 @@ export class XSync {
   private syncApplyCount = 0;
 
   private configCheckInterval: number | null = null;
+  private _syncWatchdog: number | null = null;
+  /** Wall-clock of the last sync progress (a batch applied or sync_done). The
+   *  watchdog uses it to detect a stalled bootstrap that stopped advancing. */
+  private _lastSyncProgress = 0;
   private wakeLock: WakeLockSentinel | null = null;
 
   private inited = false;
@@ -150,10 +154,18 @@ export class XSync {
     this.deleteQueue = await this.storage.loadDeleteQueue();
     this._lastSyncedSeq = this.plugin.settings.lastSyncedSeq ?? 0;
     this._needsFullReconcile = true; // first sync after load does the offline scan
-    // Existing installs that already synced (have metadata) predate the
-    // bootstrapComplete flag — mark them complete so they aren't treated as a
-    // fresh first-sync (which would wipe their delete queue).
-    if (!this.plugin.settings.bootstrapComplete && this.storage.hasAnyMetadata()) {
+    // Legacy pre-flag installs that already synced (have metadata AND were NOT
+    // mid-bootstrap) predate bootstrapComplete — mark them complete so they
+    // aren't treated as a fresh first-sync (which would wipe their delete queue).
+    // A PARTIAL bootstrap (bootstrapInProgress) must NOT be promoted: its
+    // metadata is incomplete, and promoting it is exactly the silent
+    // incomplete-sync bug — a stalled bootstrap looked "fully synced" on reload
+    // and permanently under-fetched from its half-way cursor.
+    if (
+      !this.plugin.settings.bootstrapComplete &&
+      !this.plugin.settings.bootstrapInProgress &&
+      this.storage.hasAnyMetadata()
+    ) {
       this.plugin.settings.bootstrapComplete = true;
       await this.plugin.saveSettings();
     }
@@ -211,6 +223,7 @@ export class XSync {
     this.eventRefs["layout-change"] = this.plugin.app.workspace.on("layout-change", onFocus);
 
     this.configCheckInterval = window.setInterval(() => { void this._checkConfigFiles(); }, 5_000);
+    this._syncWatchdog = window.setInterval(() => this._checkSyncStall(), 15_000);
 
     this.ws.on((event) => {
       switch (event.type) {
@@ -239,6 +252,10 @@ export class XSync {
     if (this.configCheckInterval !== null) {
       window.clearInterval(this.configCheckInterval);
       this.configCheckInterval = null;
+    }
+    if (this._syncWatchdog !== null) {
+      window.clearInterval(this._syncWatchdog);
+      this._syncWatchdog = null;
     }
     if (this._cursorCheckpointTimer !== null) {
       window.clearTimeout(this._cursorCheckpointTimer);
@@ -326,6 +343,7 @@ export class XSync {
         }
         break;
       case "file_push": {
+        this._lastSyncProgress = Date.now(); // feed the stall watchdog
         // Skip applying a push that is older than what we already applied for
         // this path — happens when a live edit jumped ahead of the bootstrap
         // stream and an older session push for the same file arrives later.
@@ -366,6 +384,7 @@ export class XSync {
         void this.sync();
         break;
       case "sync_done":
+        this._lastSyncProgress = Date.now(); // feed the stall watchdog
         if (typeof msg.cursor === "number" && msg.cursor > this._lastSyncedSeq) {
           this._lastSyncedSeq = msg.cursor;
         }
@@ -673,7 +692,15 @@ export class XSync {
     this._isFirstSync = !this.plugin.settings.bootstrapComplete;
     if (this._isFirstSync) {
       this.plugin.log("[IonSync] First sync (bootstrap incomplete) — delete queue drain deferred until sync_done");
+      // Persist that a bootstrap is underway so an interrupted one is remembered
+      // as PARTIAL on the next load (see the promotion guard in enabled()).
+      if (!this.plugin.settings.bootstrapInProgress) {
+        this.plugin.settings.bootstrapInProgress = true;
+        await this.plugin.saveSettings();
+      }
     }
+    // Seed the watchdog clock so it doesn't trip before the first batch lands.
+    this._lastSyncProgress = Date.now();
 
     try {
       for (const [, ev] of Object.entries(this.unsentSessionEvents)) {
@@ -731,6 +758,7 @@ export class XSync {
     this.plugin.settings.lastSyncedSeq = this._lastSyncedSeq;
     this.plugin.settings.lastSyncedEndpoint = this._endpointKey();
     this.plugin.settings.bootstrapComplete = true;
+    this.plugin.settings.bootstrapInProgress = false; // bootstrap truly finished
     await this.plugin.saveSettings();
 
     // UPLOAD direction: now that server changes are applied and metadata reflects
@@ -1061,7 +1089,25 @@ export class XSync {
       // delete (no children) yields nothing here and falls through to the
       // single-file logic below. _processDeleteQueue re-stats every path before
       // sending, so any child still on disk (partial/transient delete) is dropped.
-      const childPaths = collectFolderChildren(file.path, this.storage.getAllMetadata());
+      const allMeta = this.storage.getAllMetadata();
+      const childPaths = collectFolderChildren(file.path, allMeta);
+      // SAFETY CAP: never let one folder-delete event wipe the knowledge base.
+      // A spurious/mistaken folder removal (or a short-name path collision) once
+      // cascaded ~14k deletes across every device. If a folder delete would
+      // cascade an implausibly large number of files, refuse to propagate it and
+      // tell the user — the server and other devices keep the files intact.
+      if (cascadeDeleteExceedsSafetyCap(childPaths.length, Object.keys(allMeta).length)) {
+        this.plugin.log(
+          `[IonSync] SAFETY: folder delete of "${file.path}" would cascade ${childPaths.length} deletes ` +
+          `(vault=${Object.keys(allMeta).length}) — NOT propagated. Delete in smaller batches or use the ` +
+          `dashboard folder-delete to confirm a large removal.`
+        );
+        this.xNotify.showNotification(
+          STATUS_WARN,
+          `Blocked a ${childPaths.length}-file folder delete from syncing (safety cap) — see logs.`
+        );
+        return;
+      }
       if (childPaths.length > 0) {
         let queued = 0;
         for (const childPath of childPaths) {
@@ -1208,6 +1254,29 @@ export class XSync {
   }
 
   // ── Utility ──────────────────────────────────────────────────────────────
+
+  /**
+   * Stall watchdog. A cursor bootstrap advances by re-requesting the next batch
+   * after each sync_done{more}. If that chain ever breaks — a dropped follow-up
+   * send, a hung apply, a socket blip that isn't a clean disconnect — isSyncing
+   * stays true forever, and sync() (guarded by isSyncing) can never restart it,
+   * so the device sits on "Syncing" while permanently incomplete. This detects
+   * no progress for 45s while connected, then resets and resumes from the last
+   * checkpointed cursor. Progress (_lastSyncProgress) is stamped on every applied
+   * batch and on sync_done, so a slow-but-advancing sync never trips it.
+   */
+  private _checkSyncStall(): void {
+    if (!this.isSyncing || !this.ws.isConnected) return;
+    if (Date.now() - this._lastSyncProgress < 45_000) return;
+    this.plugin.log(
+      `[IonSync] Sync watchdog: no progress for 45s — resetting and resuming from seq ${this._lastSyncedSeq}`
+    );
+    this.isSyncing = false;
+    this._inCursorSession = false;
+    this.messageQueue = [];
+    this._lastSyncProgress = Date.now();
+    void this.sync();
+  }
 
   private async _onConnected(): Promise<void> {
     this.xNotify.notifyStatus(NotifyType.CONNECTED);
