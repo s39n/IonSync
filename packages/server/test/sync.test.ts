@@ -775,6 +775,52 @@ describe("dashboard admin actions", () => {
   });
 });
 
+describe("empty conflicting uploads never mint a copy", () => {
+  it("an E2EE-empty upload that conflicts keeps the head and creates NO conflict copy", async () => {
+    const srv = await startTestServer();
+    const PATH = "notes/real.md";
+    // Seed a real head with content (and a version row).
+    srv.ctx.db.upsertFile({ path: PATH, sha1: "headsha0000000000000000000000000000abcd", mtime: 5000, action: "active", fileType: "file" });
+    srv.ctx.storage.write(PATH, 5000, Buffer.from("real content here"));
+
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth("device-a");
+
+    // Encrypted-empty blob: "IONENCv1" magic (8) + 28 bytes = 36 total = empty plaintext.
+    const emptyE2ee = Buffer.concat([Buffer.from("IONENCv1"), Buffer.alloc(28)]);
+    client.send({
+      type: "file_data",
+      mode: "apply",
+      // older mtime + a baseSha1 unknown to history → decideUpload returns "conflict"
+      file: { path: PATH, sha1: "uploadsha000000000000000000000000000beef", mtime: 1000, action: "active", fileType: "file" },
+      content: emptyE2ee.toString("base64"),
+      baseSha1: "0000000000000000000000000000000000000000",
+    });
+
+    const res = await client.nextMsg<{ type: string; result?: string }>(
+      (m) => (m as { type: string }).type === "file_event_result"
+    );
+    assert.equal(res.result, "conflict", "empty upload from a stale base is a conflict");
+    // The key assertion: NO empty "(Conflicted Copy)" stub was created.
+    const copies = srv.ctx.db.getAllFiles().filter((f) => /Conflicted Copy/.test(f.path));
+    assert.equal(copies.length, 0, "an empty conflicting upload must not mint a copy");
+    // The real head is untouched.
+    assert.equal(srv.ctx.storage.readLatest(PATH)?.toString(), "real content here");
+
+    client.close();
+    await srv.stop();
+  });
+
+  it("isEmptyUpload recognises empty plaintext and empty E2EE, not real content", async () => {
+    const { isEmptyUpload } = await import("../src/ws/handlers/fileData.js");
+    assert.equal(isEmptyUpload(Buffer.alloc(0)), true);                                  // 0-byte plain
+    assert.equal(isEmptyUpload(Buffer.from("hello")), false);                            // plain content
+    assert.equal(isEmptyUpload(Buffer.concat([Buffer.from("IONENCv1"), Buffer.alloc(28)])), true);  // 36B E2EE = empty
+    assert.equal(isEmptyUpload(Buffer.concat([Buffer.from("IONENCv1"), Buffer.alloc(200)])), false); // real E2EE
+  });
+});
+
 describe("conflictCopyPath naming", () => {
   it("strips existing Conflicted Copy suffixes so names never stack", async () => {
     const { conflictCopyPath, stripConflictSuffixes } = await import("../src/ws/handlers/fileData.js");

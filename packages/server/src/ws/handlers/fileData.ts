@@ -76,6 +76,22 @@ export function isShortNameConfigDir(p: string): boolean {
 }
 
 /**
+ * True when an uploaded buffer carries no real content. Plain files: zero bytes.
+ * E2EE files: the ciphertext of empty plaintext is exactly MAGIC(8) + IV(12) +
+ * GCM tag(16) = 36 bytes, so an encrypted blob of 36 bytes or fewer is empty.
+ *
+ * Used so a CONFLICTING upload with no content is never stored as an empty
+ * "(Conflicted Copy …)" stub: there is nothing to preserve, and a damaged or
+ * freshly-restored device that re-uploads empty/truncated files would otherwise
+ * litter every device with empty copies (observed after a backup restore). The
+ * server head (which has the real content) is kept and re-pushed instead.
+ */
+export function isEmptyUpload(buf: Buffer): boolean {
+  if (isE2eeEncrypted(buf)) return buf.length <= 36;
+  return buf.length === 0;
+}
+
+/**
  * True when an accepted upload is a byte-meaningless resend of the current
  * head: same sha1, same active state — nothing any peer needs to hear about.
  * Storing it would append a duplicate version row, move the head mtime/seq,
@@ -278,7 +294,7 @@ function applyConflict(
   file: FileEntry,
   buf: Buffer | null
 ): void {
-  if (buf) {
+  if (buf && !isEmptyUpload(buf)) {
     const copyEntry: FileEntry = {
       path: conflictCopyPath(file.path, peer.deviceId),
       sha1: file.sha1,
@@ -295,7 +311,10 @@ function applyConflict(
     logWarn(ctx, `[Conflict] ${peer.deviceId} uploaded ${file.path} from a stale base — stored as ${copyEntry.path}`);
     pushActivity(ctx, { kind: "upload", deviceId: peer.deviceId ?? undefined, path: copyEntry.path });
   } else {
-    logWarn(ctx, `[Conflict] ${peer.deviceId} uploaded ${file.path} from a stale base with no content — server head kept`);
+    // No content, or an EMPTY conflicting upload (a damaged/restored device
+    // re-uploading a truncated file). Nothing worth preserving — keep the server
+    // head and re-push it; do NOT mint an empty "(Conflicted Copy)" stub.
+    logWarn(ctx, `[Conflict] ${peer.deviceId} uploaded ${file.path} from a stale base with ${buf ? "empty" : "no"} content — server head kept, no copy`);
   }
 
   peer.send({ type: "file_event_result", path: file.path, result: "conflict" });
