@@ -59,6 +59,28 @@ export class SyncDB {
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma("foreign_keys = ON");
     runMigrations(this.db);
+    this.repairSeqCounter();
+  }
+
+  /**
+   * Realign the monotonic `sync_seq` counter after a DB restore/rebuild that left
+   * it BELOW `MAX(seq)` on the files table. If the counter is behind, `allocateSeq`
+   * would re-issue seqs already stamped on rows (breaking cursor delivery), and
+   * `getCurrentSeq` would report a value below existing rows — making healthy
+   * clients look "ahead of the server" and triggering a destructive from-0 replay.
+   * Never lowers the counter. (Audit §3.5.)
+   */
+  repairSeqCounter(): void {
+    const max = this.db
+      .prepare<[], { m: number }>("SELECT COALESCE(MAX(seq), 0) AS m FROM files")
+      .get()!.m;
+    if (max > this.getCurrentSeq()) {
+      this.db
+        .prepare<[string]>(
+          "INSERT INTO settings (key, value) VALUES ('sync_seq', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        )
+        .run(String(max));
+    }
   }
 
   // --- Sequence cursor (sync redesign phase 0) ------------------------------
@@ -105,11 +127,16 @@ export class SyncDB {
    * capped at `limit`. The basis of cursor-based delta sync: a client passes the
    * highest seq it has seen and receives only what changed since.
    */
-  getChangesSince(sinceSeq: number, limit: number): FileChange[] {
+  getChangesSince(sinceSeq: number, limit: number, includeDeletes = true): FileChange[] {
+    // When includeDeletes is false, tombstones are filtered in SQL so the LIMIT
+    // (and therefore the caller's `more` detection) counts only active rows. The
+    // cursor still advances past the skipped tombstones — a from-0 bootstrap ends
+    // caught up to the server counter and never re-fetches them.
+    const sql = includeDeletes
+      ? "SELECT * FROM files WHERE seq > ? ORDER BY seq ASC LIMIT ?"
+      : "SELECT * FROM files WHERE seq > ? AND action = 'active' ORDER BY seq ASC LIMIT ?";
     return this.db
-      .prepare<[number, number], DbFileRow>(
-        "SELECT * FROM files WHERE seq > ? ORDER BY seq ASC LIMIT ?"
-      )
+      .prepare<[number, number], DbFileRow>(sql)
       .all(sinceSeq, limit)
       .map((r) => ({ ...rowToFileEntry(r), seq: r.seq }));
   }

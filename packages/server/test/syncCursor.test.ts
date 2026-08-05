@@ -122,6 +122,33 @@ describe("sync_cursor", () => {
     await srv.stop();
   });
 
+  it("a from-0 bootstrap NEVER delivers tombstones (2026-08 mass-delete regression)", async () => {
+    // A DB restore/rebuild that rolled the seq counter back makes a healthy
+    // client's cursor exceed the server's — the handler forces since=0. If that
+    // replay carried the server's tombstones, they would mass-delete the client's
+    // still-good vault. Bootstrap must stream active files only.
+    const srv = await startTestServer();
+    seed(srv, entry("keep.md", 1000), "alive");
+    seed(srv, entry("gone.md", 1001), "doomed");
+    srv.ctx.db.upsertFile(entry("gone.md", 1500, { action: "deleted" })); // tombstone
+    const current = srv.ctx.db.getCurrentSeq();
+
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    // Both a plain since:0 and a stale-high cursor (forced to 0) must be clean.
+    client.send({ type: "sync_cursor", since: current + 9999 });
+    const { pushes, done } = await drain(client);
+
+    assert.deepEqual(pushes.map((p) => p.file.path), ["keep.md"], "only the active file — no tombstone");
+    assert.ok(pushes.every((p) => p.file.action === "active"), "no deletion is ever replayed on bootstrap");
+    assert.equal(done.cursor, current, "still ends caught up at the server counter");
+
+    client.close();
+    await srv.stop();
+  });
+
   it("delivers a large bootstrap in bounded batches (more flag)", async () => {
     const srv = await startTestServer();
     const N = 260; // > BATCH (250)

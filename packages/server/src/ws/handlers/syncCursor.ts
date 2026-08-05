@@ -49,10 +49,19 @@ export function handleSyncCursor(ctx: SyncContext, peer: SyncPeer, msg: SyncCurs
     since = 0;
   }
 
+  // A from-0 bootstrap must NEVER carry deletions. If a client's cursor outran
+  // the server (a DB restore/rebuild rolled the counter back, so `since` was
+  // forced to 0 above), replaying the server's diminished state as tombstones
+  // would mass-delete a healthy vault — the 2026-08 incident. A genuinely fresh
+  // client has an empty vault, so tombstones are no-ops for it anyway. Real
+  // deletes still propagate via live vault events and via since>0 deltas; the
+  // resurrection bias here matches the audit's safe-by-default stance (S4/S5).
+  const includeDeletes = since > 0;
+
   // Deliver ONE bounded batch — capped by count AND total content bytes. The
   // client applies it then requests the next (driven by sync_done.more), so only
   // one bounded chunk of file content is ever in flight.
-  const candidates = ctx.db.getChangesSince(since, MAX_BATCH_COUNT);
+  const candidates = ctx.db.getChangesSince(since, MAX_BATCH_COUNT, includeDeletes);
   let bytes = 0;
   let taken = 0;
   for (const c of candidates) {
