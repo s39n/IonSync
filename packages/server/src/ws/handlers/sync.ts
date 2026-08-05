@@ -1,6 +1,7 @@
 import type { SyncMsg, FileEntry } from "@ionsync/protocol";
 import { compareFiles } from "@ionsync/protocol";
 import type { SyncContext } from "../../context.js";
+import { pushActivity, emitSse } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 import { isHiddenOrConfigPath } from "./fileData.js";
 
@@ -194,7 +195,17 @@ export function drainPushQueue(ctx: SyncContext, peer: SyncPeer): void {
       ...(inSession ? { session: true } : {}),
     });
     sent++;
+    // Advance dashboard progress telemetry for the cursor bootstrap view.
+    if (inSession) {
+      peer.syncPushed++;
+      if (seq !== undefined && seq > peer.syncCursor) peer.syncCursor = seq;
+    }
   }
+
+  // Nudge any open dashboard so the live progress bar advances during a bulk
+  // bootstrap — those pushes emit no activity events of their own. emitSse
+  // coalesces to ~1 flush/400ms, so this is cheap even at 20k files.
+  if (sent > 0 && peer.cursorTarget !== undefined) emitSse(ctx, "sync");
 
   // Yield between batches so uploads from other peers and HTTP requests
   // get CPU time, then continue draining.
@@ -221,6 +232,11 @@ export function checkSyncDone(peer: SyncPeer): void {
     const more = peer.syncMore;
     delete peer.cursorTarget;
     peer.syncMore = false;
+    // Dashboard telemetry: the peer stays "syncing" only while more batches
+    // remain; when the stream is fully drained it's caught up. Report cursor at
+    // the target so the progress bar lands cleanly at 100%.
+    peer.syncActive = more;
+    if (cursor !== undefined) peer.syncCursor = cursor;
     peer.send(
       cursor !== undefined
         ? more
@@ -228,6 +244,9 @@ export function checkSyncDone(peer: SyncPeer): void {
           : { type: "sync_done", cursor }
         : { type: "sync_done" }
     );
+    // The "syncing → done" transition reaches open dashboards via the SSE nudge
+    // emitted from drainPushQueue's final batch (checkSyncDone runs in the same
+    // tick), so no extra emit is needed here.
   }
 }
 
@@ -280,6 +299,17 @@ export function broadcastToPeers(ctx: SyncContext, sourcePeer: SyncPeer | null, 
       content: "",
       ...(buf ? { contentBytes: buf } : {}),
       ...(seq ? { seq } : {}),
+    });
+  }
+
+  // Surface live fan-out in the dashboard activity feed. Only real content
+  // pushes are logged here (deletes are logged at their source), and one event
+  // per file — not per target — so a broadcast to many devices stays one line.
+  if (file.action === "active") {
+    pushActivity(ctx, {
+      kind: "push",
+      path: file.path,
+      detail: targets.length > 1 ? `→ ${targets.length} devices` : undefined,
     });
   }
 }

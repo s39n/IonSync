@@ -424,6 +424,11 @@
     .activity-kind.disconnect { background: rgba(255,95,95,.15); color: var(--red); }
     .activity-kind.delete     { background: rgba(255,95,95,.15); color: var(--red); }
     .activity-kind.rename     { background: rgba(255,179,71,.15); color: var(--yellow); }
+    /* Live sync-progress bar in the Peers table */
+    .sync-prog { display: flex; align-items: center; gap: 8px; min-width: 150px; }
+    .sync-bar { flex: 1; height: 8px; background: rgba(255,255,255,.09); border-radius: 4px; overflow: hidden; }
+    .sync-bar-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width .3s ease; }
+    .sync-prog-meta { font-size: 11px; color: var(--muted); white-space: nowrap; }
     .activity-path { flex: 1; font-family: var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .activity-detail { flex: 1; font-family: var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .activity-device { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; flex-shrink: 0; }
@@ -586,7 +591,7 @@
         </div>
         <div class="card">
           <table>
-            <thead><tr><th>Device</th><th>Auto-sync</th><th>Pending Uploads</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Device</th><th>Auto-sync</th><th>Pending Uploads</th><th>Sync</th><th>Actions</th></tr></thead>
             <tbody id="peers-body"></tbody>
           </table>
         </div>
@@ -1524,6 +1529,23 @@ function deviceLabel(deviceId, deviceName) {
   return `<span class="mono" title="${escHtml(deviceId)}">${escHtml(short)}</span>`;
 }
 
+// Live sync-state cell for a peer. Shows a progress bar while a cursor bootstrap
+// streams (cursor / target seq), or a "Synced" pill when caught up.
+function syncCell(p) {
+  if (p && p.syncing) {
+    const target = p.syncTarget || 0;
+    const pct = target > 0
+      ? Math.min(100, Math.max(2, Math.round((p.syncCursor / target) * 100)))
+      : 5;
+    const pushed = p.syncPushed || 0;
+    return `<div class="sync-prog" title="cursor ${p.syncCursor} / ${target}">
+      <div class="sync-bar"><div class="sync-bar-fill" style="width:${pct}%"></div></div>
+      <span class="sync-prog-meta">${pct}% · ${pushed} file${pushed === 1 ? '' : 's'}</span>
+    </div>`;
+  }
+  return '<span class="badge-pill green" title="Caught up to the server">Synced</span>';
+}
+
 function renderPeers() {
   const badge = document.getElementById('peers-badge');
   badge.textContent = S.peers.length;
@@ -1531,7 +1553,7 @@ function renderPeers() {
 
   const tbody = document.getElementById('peers-body');
   if (!S.peers.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty">No active peers</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">No active peers</td></tr>';
     return;
   }
   tbody.innerHTML = S.peers.map(p => `
@@ -1539,6 +1561,7 @@ function renderPeers() {
       <td style="cursor:pointer" data-action="rename-device" data-id="${escHtml(p.deviceId)}" data-name="${escHtml(p.deviceName||'')}" title="Click to rename">${deviceLabel(p.deviceId, p.deviceName)}</td>
       <td>${p.autoSync ? '<span class="badge-pill green">On</span>' : '<span class="badge-pill muted">Off</span>'}</td>
       <td>${p.pendingUploads > 0 ? `<span class="badge-pill red">${p.pendingUploads}</span>` : '<span class="text-muted">0</span>'}</td>
+      <td>${syncCell(p)}</td>
       <td style="display:flex;gap:6px">
         <button class="btn" data-action="peer-action" data-peer-action="trigger-sync" data-peer="${escHtml(p.id)}">Sync</button>
         <button class="btn danger" data-action="peer-action" data-peer-action="disconnect" data-peer="${escHtml(p.id)}">Disconnect</button>

@@ -56,6 +56,14 @@ export function handleSyncCursor(ctx: SyncContext, peer: SyncPeer, msg: SyncCurs
   }
   const current = ctx.db.getCurrentSeq();
 
+  // Dashboard progress telemetry: mark this peer as actively syncing and record
+  // the target it's catching up to. A from-0 request starts a fresh bootstrap,
+  // so reset the streamed-file counter; a resumed batch (since>0) keeps counting.
+  peer.syncActive = true;
+  peer.syncTargetSeq = current;
+  peer.syncCursor = since;
+  if (since === 0) peer.syncPushed = 0;
+
   // A genuine from-0 bootstrap must NEVER carry deletions: a client re-bootstrapping
   // with files on disk but empty metadata would otherwise have the server's
   // tombstones replayed as mass deletes over a healthy vault (the 2026-08 delete

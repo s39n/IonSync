@@ -281,6 +281,9 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
 
   router.get("/api/peers", (req, res) => {
     if (!checkAuth(req, res)) return;
+    // Snapshot the server's current seq once; the dashboard uses it as the
+    // denominator for each syncing peer's progress bar (cursor / serverSeq).
+    const serverSeq = ctx.db.getCurrentSeq();
     const peers = Array.from(ctx.peers.values())
       .filter((p) => p.authed)
       .map((p) => ({
@@ -289,6 +292,12 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
         deviceName: p.deviceId ? ctx.db.getDeviceName(p.deviceId) : null,
         autoSync: p.autoSync,
         pendingUploads: p.pendingUploads.size,
+        // Live sync-progress telemetry for the dashboard bootstrap view.
+        syncing: p.syncActive,
+        syncCursor: p.syncCursor,
+        syncTarget: p.syncTargetSeq || serverSeq,
+        syncPushed: p.syncPushed,
+        serverSeq,
       }));
     res.json(peers);
   });

@@ -33,6 +33,17 @@ export interface SyncPeer {
   syncClientMap?: Map<string, import("@ionsync/protocol").FileEntry>;
   /** Whether auto-sync (live broadcast from other peers) is enabled. */
   autoSync: boolean;
+  /**
+   * Live sync-progress telemetry for the dashboard (cursor bootstrap view).
+   * `syncActive` is true while a cursor session is streaming; `syncCursor` is
+   * the highest seq delivered so far; `syncTargetSeq` is the server counter the
+   * session is catching up to; `syncPushed` counts files streamed this session.
+   * Percent = syncCursor / syncTargetSeq. Purely observational — never gates sync.
+   */
+  syncActive: boolean;
+  syncCursor: number;
+  syncTargetSeq: number;
+  syncPushed: number;
   /** Nonce sent during challenge — kept for token validation. */
   nonce: string;
   /** Capability tokens the client advertised in version_check (e.g.
@@ -55,6 +66,10 @@ export function createPeer(id: string, nonce: string, ws: WebSocket): SyncPeer {
     syncSessionActive: false,
     syncMore: false,
     autoSync: true,
+    syncActive: false,
+    syncCursor: 0,
+    syncTargetSeq: 0,
+    syncPushed: 0,
     caps: [],
 
     send(msg) {
