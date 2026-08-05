@@ -39,23 +39,29 @@ export function handleSyncCursor(ctx: SyncContext, peer: SyncPeer, msg: SyncCurs
   peer.pushQueue = [];
   delete peer.syncClientMap;
 
+  const since = Number.isFinite(msg.since) ? Math.max(0, Math.floor(msg.since)) : 0;
+
+  // Cursor ahead of the server → the counter rolled back (DB restore/rebuild lost
+  // the tail). The OLD behavior forced since=0, but a client's cursor only moves
+  // FORWARD, so it could never checkpoint the resulting low seqs — it re-requested
+  // the same first batch forever (the 2026-08 all-night livelock). Instead, ADOPT
+  // the client's watermark as the counter: it proves those seqs were already
+  // issued, so future edits must sort above it (fixing the under-fetch this guard
+  // was originally for), and a normal delta from `since` returns nothing so the
+  // loop ends immediately. The client holds the tail the server lost; it flows
+  // back via reconcile uploads, not a destructive replay.
+  if (since > ctx.db.getCurrentSeq()) {
+    ctx.db.bumpSeqTo(since);
+    pushLog(ctx, `[CursorSync] ${peer.deviceId} cursor ${since} > server — counter rolled back; adopted watermark ${since}`);
+  }
   const current = ctx.db.getCurrentSeq();
 
-  // Validate `since`. A cursor ahead of the server (e.g. after a DB restore
-  // rolled the counter back) would under-fetch, so force a full bootstrap.
-  let since = Number.isFinite(msg.since) ? Math.max(0, Math.floor(msg.since)) : 0;
-  if (since > current) {
-    pushLog(ctx, `[CursorSync] ${peer.deviceId} cursor ${since} > server ${current} — forcing bootstrap`);
-    since = 0;
-  }
-
-  // A from-0 bootstrap must NEVER carry deletions. If a client's cursor outran
-  // the server (a DB restore/rebuild rolled the counter back, so `since` was
-  // forced to 0 above), replaying the server's diminished state as tombstones
-  // would mass-delete a healthy vault — the 2026-08 incident. A genuinely fresh
-  // client has an empty vault, so tombstones are no-ops for it anyway. Real
-  // deletes still propagate via live vault events and via since>0 deltas; the
-  // resurrection bias here matches the audit's safe-by-default stance (S4/S5).
+  // A genuine from-0 bootstrap must NEVER carry deletions: a client re-bootstrapping
+  // with files on disk but empty metadata would otherwise have the server's
+  // tombstones replayed as mass deletes over a healthy vault (the 2026-08 delete
+  // incident, and the reseed procedure relies on this). A truly fresh client has an
+  // empty vault so tombstones are no-ops anyway. Real deletes still propagate via
+  // live vault events and since>0 deltas — the audit's safe-by-default stance (S4/S5).
   const includeDeletes = since > 0;
 
   // Deliver ONE bounded batch — capped by count AND total content bytes. The

@@ -123,9 +123,8 @@ describe("sync_cursor", () => {
   });
 
   it("a from-0 bootstrap NEVER delivers tombstones (2026-08 mass-delete regression)", async () => {
-    // A DB restore/rebuild that rolled the seq counter back makes a healthy
-    // client's cursor exceed the server's — the handler forces since=0. If that
-    // replay carried the server's tombstones, they would mass-delete the client's
+    // A client re-bootstrapping (files on disk, metadata cleared) sends since:0. If
+    // that replay carried the server's tombstones, they would mass-delete its
     // still-good vault. Bootstrap must stream active files only.
     const srv = await startTestServer();
     seed(srv, entry("keep.md", 1000), "alive");
@@ -137,13 +136,39 @@ describe("sync_cursor", () => {
     await waitForOpen(client);
     await client.auth();
 
-    // Both a plain since:0 and a stale-high cursor (forced to 0) must be clean.
-    client.send({ type: "sync_cursor", since: current + 9999 });
+    client.send({ type: "sync_cursor", since: 0 });
     const { pushes, done } = await drain(client);
 
     assert.deepEqual(pushes.map((p) => p.file.path), ["keep.md"], "only the active file — no tombstone");
     assert.ok(pushes.every((p) => p.file.action === "active"), "no deletion is ever replayed on bootstrap");
-    assert.equal(done.cursor, current, "still ends caught up at the server counter");
+    assert.equal(done.cursor, current, "ends caught up at the server counter");
+
+    client.close();
+    await srv.stop();
+  });
+
+  it("a cursor ahead of the server adopts the client watermark (2026-08 livelock fix)", async () => {
+    // The rebuild lost the tail, so a healthy client's saved cursor exceeds the
+    // server's counter. The old code forced since=0 and streamed low seqs the
+    // client could never checkpoint (its cursor only moves forward) → it re-asked
+    // for the same first batch forever. Now the server adopts the client's
+    // watermark, returns nothing, and the client is instantly caught up.
+    const srv = await startTestServer();
+    seed(srv, entry("a.md", 1000), "alpha");
+    const current = srv.ctx.db.getCurrentSeq();
+    const ahead = current + 9999;
+
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    client.send({ type: "sync_cursor", since: ahead });
+    const { pushes, done } = await drain(client);
+
+    assert.equal(pushes.length, 0, "no from-0 replay — the client already holds everything up to its watermark");
+    assert.ok(!done.more, "loop ends immediately — no more batches");
+    assert.equal(done.cursor, ahead, "server reports the adopted watermark, so the client's cursor stops moving");
+    assert.equal(srv.ctx.db.getCurrentSeq(), ahead, "server counter raised to the client watermark — future edits sort above it");
 
     client.close();
     await srv.stop();
@@ -196,25 +221,6 @@ describe("sync_cursor", () => {
     const b2 = await drain(client);
     assert.equal(b2.pushes.length, 2, "remaining large files arrive in the next batch");
     assert.ok(!b2.done.more, "no more after the final batch");
-
-    client.close();
-    await srv.stop();
-  });
-
-  it("a cursor ahead of the server forces a full bootstrap", async () => {
-    const srv = await startTestServer();
-    seed(srv, entry("a.md", 1000), "alpha");
-    const current = srv.ctx.db.getCurrentSeq();
-
-    const client = connectClient(srv.port);
-    await waitForOpen(client);
-    await client.auth();
-
-    client.send({ type: "sync_cursor", since: current + 9999 });
-    const { pushes, done } = await drain(client);
-
-    assert.deepEqual(pushes.map((p) => p.file.path), ["a.md"], "re-delivers everything from seq 0");
-    assert.equal(done.cursor, current, "reports the real current counter, not the stale-high since");
 
     client.close();
     await srv.stop();

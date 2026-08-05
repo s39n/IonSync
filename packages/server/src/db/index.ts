@@ -63,24 +63,35 @@ export class SyncDB {
   }
 
   /**
-   * Realign the monotonic `sync_seq` counter after a DB restore/rebuild that left
-   * it BELOW `MAX(seq)` on the files table. If the counter is behind, `allocateSeq`
-   * would re-issue seqs already stamped on rows (breaking cursor delivery), and
-   * `getCurrentSeq` would report a value below existing rows — making healthy
-   * clients look "ahead of the server" and triggering a destructive from-0 replay.
-   * Never lowers the counter. (Audit §3.5.)
+   * Raise the monotonic `sync_seq` counter to at least `n`. Never lowers it.
+   * Used both to realign after a restore (n = MAX(seq)) and at runtime when a
+   * client's cursor proves the counter rolled back below a value we already
+   * issued (n = the client's watermark). Keeping the counter monotonic is what
+   * stops re-issued seqs from colliding with rows a client already has.
+   */
+  bumpSeqTo(n: number): void {
+    if (!Number.isFinite(n)) return;
+    const floor = Math.floor(n);
+    if (floor > this.getCurrentSeq()) {
+      this.db
+        .prepare<[string]>(
+          "INSERT INTO settings (key, value) VALUES ('sync_seq', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        )
+        .run(String(floor));
+    }
+  }
+
+  /**
+   * Realign `sync_seq` to `MAX(seq)` after a DB restore/rebuild that left the
+   * counter behind the rows. A behind counter makes `allocateSeq` re-issue seqs
+   * already on rows and makes healthy clients look "ahead of the server". Runtime
+   * client-watermark rollbacks are handled in the cursor handler. (Audit §3.5.)
    */
   repairSeqCounter(): void {
     const max = this.db
       .prepare<[], { m: number }>("SELECT COALESCE(MAX(seq), 0) AS m FROM files")
       .get()!.m;
-    if (max > this.getCurrentSeq()) {
-      this.db
-        .prepare<[string]>(
-          "INSERT INTO settings (key, value) VALUES ('sync_seq', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
-        )
-        .run(String(max));
-    }
+    this.bumpSeqTo(max);
   }
 
   // --- Sequence cursor (sync redesign phase 0) ------------------------------
