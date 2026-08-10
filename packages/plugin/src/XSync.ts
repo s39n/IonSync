@@ -876,11 +876,16 @@ export class XSync {
     this._verifying = false;
     if (!manifest) return;
 
+    // ONLY repair files that are genuinely ABSENT from disk — the silent
+    // under-fetch this audit exists for. Do NOT treat a sha1 difference as
+    // "needs repair": that's content drift (frontmatter timestamps, plugin
+    // rewrites, or a real concurrent edit), and blindly pulling the server's
+    // copy down would clobber a newer or git-restored local version. Drift is
+    // normal-sync's job (mtime / baseSha1 conflict resolution), not this pass.
     const missing: string[] = [];
-    for (const [path, sha1] of manifest) {
+    for (const [path] of manifest) {
       if (this.exclusionFilter?.isExcluded(path)) continue;
-      const local = this.storage.tree[path];
-      if (!local || (sha1 && local.sha1 && local.sha1 !== sha1)) missing.push(path);
+      if (!this.storage.tree[path]) missing.push(path);
     }
     // Free the snapshot; it can be large on a big vault.
     this.storage.tree = {};
