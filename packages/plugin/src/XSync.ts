@@ -82,9 +82,20 @@ export class XSync {
   // `_verifying` guards against overlapping passes.
   private _verifyManifest: Map<string, string> | null = null;
   private _verifying = false;
+  // Immutable snapshot of local paths captured when the audit STARTS, so a
+  // concurrent computeTree/sync clearing the shared tree can't make the diff
+  // see an empty vault (which would flag everything "missing" — the 2026-08
+  // false alarm). Diff against this, never the live tree.
+  private _verifyLocalPaths: Set<string> | null = null;
   // Run the audit once per app load, right after the first sync settles. A fresh
   // XSync is built on every plugin load, so this naturally resets each launch.
   private _verifyPendingThisLoad = true;
+  // Hard ceiling on files a single audit may auto-repair. A legitimate
+  // under-fetch is small; hundreds/thousands "missing" means the LOCAL index is
+  // wrong (empty metadata, cleared tree, path mismatch), NOT that the server is
+  // right — auto-pulling then would clobber good local files. Over this, refuse
+  // to repair and surface it instead. This cap is what makes the audit safe.
+  private static readonly VERIFY_REPAIR_CAP = 300;
 
   // Paths we are actively writing via _applyServerFile.  When the vault fires
   // a create/modify event for one of these paths we suppress it — otherwise the
@@ -856,11 +867,23 @@ export class XSync {
     try {
       // Fresh disk truth for the diff (reuses the same walk as reconcile).
       await this.storage.computeTree();
+      // Snapshot NOW, while we know the tree is fully populated. If the scan
+      // produced implausibly few files, abort — comparing against a broken/empty
+      // local index would flag the whole vault "missing" and pull it all down.
+      const paths = Object.keys(this.storage.tree);
+      if (paths.length === 0) {
+        this.plugin.log("[IonSync] verify: local scan empty — skipping audit");
+        this._verifying = false;
+        this._verifyManifest = null;
+        return;
+      }
+      this._verifyLocalPaths = new Set(paths);
       this.ws.send({ type: "verify_request" });
     } catch (e) {
       this.plugin.log(`[IonSync] verify: failed to start (${e})`);
       this._verifying = false;
       this._verifyManifest = null;
+      this._verifyLocalPaths = null;
     }
   }
 
@@ -872,31 +895,40 @@ export class XSync {
    */
   private async _finishVerify(): Promise<void> {
     const manifest = this._verifyManifest;
+    const localPaths = this._verifyLocalPaths;
     this._verifyManifest = null;
+    this._verifyLocalPaths = null;
     this._verifying = false;
-    if (!manifest) return;
+    if (!manifest || !localPaths) return;
 
-    // ONLY repair files that are genuinely ABSENT from disk — the silent
-    // under-fetch this audit exists for. Do NOT treat a sha1 difference as
-    // "needs repair": that's content drift (frontmatter timestamps, plugin
-    // rewrites, or a real concurrent edit), and blindly pulling the server's
-    // copy down would clobber a newer or git-restored local version. Drift is
-    // normal-sync's job (mtime / baseSha1 conflict resolution), not this pass.
+    // ONLY repair files genuinely ABSENT from disk (the silent under-fetch this
+    // exists for), compared against the immutable start-of-audit snapshot. A
+    // sha1 difference is drift (timestamps, plugin rewrites, a real edit) and is
+    // normal-sync's job — never a blind download that could clobber a newer or
+    // git-restored local file.
     const missing: string[] = [];
     for (const [path] of manifest) {
       if (this.exclusionFilter?.isExcluded(path)) continue;
-      if (!this.storage.tree[path]) missing.push(path);
+      if (!localPaths.has(path)) missing.push(path);
     }
-    // Free the snapshot; it can be large on a big vault.
-    this.storage.tree = {};
 
     if (missing.length === 0) {
       this.plugin.log(`[IonSync] verify: complete — vault matches server (${manifest.size} active files)`);
       return;
     }
 
-    this.plugin.log(`[IonSync] verify: ${missing.length} file(s) missing/stale vs server — repairing: ${missing.slice(0, 5).join(", ")}${missing.length > 5 ? " …" : ""}`);
-    this.xNotify.showNotification(STATUS_WARN, `Repairing ${missing.length} missing file${missing.length === 1 ? "" : "s"} from server…`);
+    // SAFETY CAP: an implausibly large "missing" set means the LOCAL index is
+    // wrong (empty metadata, a cleared tree, a path-format mismatch) — not that
+    // the server is authoritative. Auto-pulling then is exactly the 2026-08
+    // near-disaster. Refuse, and surface it so a human can investigate.
+    if (missing.length > XSync.VERIFY_REPAIR_CAP) {
+      this.plugin.log(`[IonSync] verify: ${missing.length}/${manifest.size} reported missing — implausibly many; REFUSING auto-repair (likely a local index problem, not a real under-fetch). No files pulled.`);
+      this.xNotify.showNotification(STATUS_WARN, `Sync audit found ${missing.length} discrepancies — not auto-repairing (looks like a local index issue). No changes made.`);
+      return;
+    }
+
+    this.plugin.log(`[IonSync] verify: ${missing.length} file(s) truly missing vs server — repairing: ${missing.slice(0, 5).join(", ")}${missing.length > 5 ? " …" : ""}`);
+    this.xNotify.showNotification(STATUS_WARN, `Restoring ${missing.length} missing file${missing.length === 1 ? "" : "s"} from server…`);
     // Ask the server to re-push exactly these paths; they arrive as file_push
     // and are written by _applyServerFile like any other download.
     this.ws.send({ type: "verify_missing", paths: missing });
