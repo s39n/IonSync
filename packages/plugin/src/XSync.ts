@@ -74,6 +74,18 @@ export class XSync {
   private messageQueue: ServerMsg[] = [];
   private isProcessingQueue = false;
 
+  // Completeness audit (integrity safety net). After a bootstrap the client asks
+  // the server for the sha1 of every active file and diffs it against the local
+  // vault; anything missing on disk (or at a different sha1) is pulled back with
+  // a targeted verify_missing. This catches the silent under-fetch a "caught up"
+  // cursor can hide (2026-08). `_verifyManifest` accumulates the streamed chunks;
+  // `_verifying` guards against overlapping passes.
+  private _verifyManifest: Map<string, string> | null = null;
+  private _verifying = false;
+  // Run the audit once per app load, right after the first sync settles. A fresh
+  // XSync is built on every plugin load, so this naturally resets each launch.
+  private _verifyPendingThisLoad = true;
+
   // Paths we are actively writing via _applyServerFile.  When the vault fires
   // a create/modify event for one of these paths we suppress it — otherwise the
   // plugin would re-upload the file it just received, which can race with edits
@@ -411,6 +423,14 @@ export class XSync {
         this._liveMaxSeq = 0;
         await this._onSyncDone();
         break;
+      case "verify_manifest": {
+        // Accumulate the streamed active-file manifest; on the final chunk, diff
+        // against the local vault and pull anything we're missing.
+        if (!this._verifyManifest) this._verifyManifest = new Map();
+        for (const f of msg.files) this._verifyManifest.set(f.path, f.sha1);
+        if (msg.last) await this._finishVerify();
+        break;
+      }
     }
   }
 
@@ -811,6 +831,70 @@ export class XSync {
     // order anyway). Bounds memory after a large bootstrap.
     this._appliedSeq.clear();
     this.isSyncing = false;
+
+    // Integrity safety net: once per launch, after the first sync settles, audit
+    // the local vault against the server's active set and self-heal any silent
+    // under-fetch. Fire-and-forget so it never blocks the sync path.
+    if (this._verifyPendingThisLoad) {
+      this._verifyPendingThisLoad = false;
+      void this._verifyAgainstServer();
+    }
+  }
+
+  /**
+   * Ask the server for its full active-file manifest (path + sha1). The response
+   * streams back as `verify_manifest` chunks; the diff + repair happens in
+   * `_finishVerify` once the final chunk lands. We snapshot a fresh disk scan
+   * first so the comparison reflects what's actually on disk — not what metadata
+   * (or the cursor) *claims* is there, which is exactly what went stale in the
+   * 2026-08 under-fetch.
+   */
+  private async _verifyAgainstServer(): Promise<void> {
+    if (this._verifying || !this.ws.isConnected) return;
+    this._verifying = true;
+    this._verifyManifest = new Map();
+    try {
+      // Fresh disk truth for the diff (reuses the same walk as reconcile).
+      await this.storage.computeTree();
+      this.ws.send({ type: "verify_request" });
+    } catch (e) {
+      this.plugin.log(`[IonSync] verify: failed to start (${e})`);
+      this._verifying = false;
+      this._verifyManifest = null;
+    }
+  }
+
+  /**
+   * Diff the accumulated server manifest against the local disk tree and pull
+   * back anything missing or content-drifted. Download-only: we never delete a
+   * local file the server lacks here (that path stays a normal-sync concern), so
+   * a stale audit can only ever ADD, never remove.
+   */
+  private async _finishVerify(): Promise<void> {
+    const manifest = this._verifyManifest;
+    this._verifyManifest = null;
+    this._verifying = false;
+    if (!manifest) return;
+
+    const missing: string[] = [];
+    for (const [path, sha1] of manifest) {
+      if (this.exclusionFilter?.isExcluded(path)) continue;
+      const local = this.storage.tree[path];
+      if (!local || (sha1 && local.sha1 && local.sha1 !== sha1)) missing.push(path);
+    }
+    // Free the snapshot; it can be large on a big vault.
+    this.storage.tree = {};
+
+    if (missing.length === 0) {
+      this.plugin.log(`[IonSync] verify: complete — vault matches server (${manifest.size} active files)`);
+      return;
+    }
+
+    this.plugin.log(`[IonSync] verify: ${missing.length} file(s) missing/stale vs server — repairing: ${missing.slice(0, 5).join(", ")}${missing.length > 5 ? " …" : ""}`);
+    this.xNotify.showNotification(STATUS_WARN, `Repairing ${missing.length} missing file${missing.length === 1 ? "" : "s"} from server…`);
+    // Ask the server to re-push exactly these paths; they arrive as file_push
+    // and are written by _applyServerFile like any other download.
+    this.ws.send({ type: "verify_missing", paths: missing });
   }
 
   /**

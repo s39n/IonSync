@@ -13,6 +13,7 @@ import { handleFileUpload, handleFileDownload } from "./handlers/fileData.js";
 import { handleFileHistory } from "./handlers/fileHistory.js";
 import { handleRename } from "./handlers/rename.js";
 import { handleVersionCheck } from "./handlers/versionCheck.js";
+import { handleVerifyRequest, handleVerifyMissing } from "./handlers/verify.js";
 import { ConnectionRateLimiter } from "./rateLimit.js";
 import type { IncomingMessage } from "node:http";
 import { diff_match_patch } from "diff-match-patch"; // ✅ Phase 2 Import
@@ -192,6 +193,12 @@ export function attachWebSocketServer(
           break;
         case "file_rename":
           handleRename(ctx, peer, msg);
+          break;
+        case "verify_request":
+          handleVerifyRequest(ctx, peer);
+          break;
+        case "verify_missing":
+          handleVerifyMissing(ctx, peer, msg);
           break;
         default:
           break;

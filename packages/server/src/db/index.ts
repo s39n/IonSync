@@ -177,6 +177,20 @@ export class SyncDB {
   }
 
   /**
+   * Lightweight active-file manifest (path + sha1 only) for the completeness
+   * audit. Excludes folders and deleted rows — a client compares this against
+   * its local vault to find files it's silently missing. Selecting just two
+   * columns keeps even a 50k-file manifest to a few hundred KB.
+   */
+  getActiveManifest(): { path: string; sha1: string }[] {
+    return this.db
+      .prepare<[], { path: string; sha1: string }>(
+        "SELECT path, sha1 FROM files WHERE action = 'active' AND file_type = 'file'"
+      )
+      .all();
+  }
+
+  /**
    * @param size Content size in bytes of the version being recorded. Pass it
    *   whenever the caller has the bytes in hand (uploads, conflict copies) so
    *   dashboard size queries never have to stat the disk. Omitted → the

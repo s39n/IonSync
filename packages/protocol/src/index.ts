@@ -153,6 +153,30 @@ export interface SyncCursorMsg {
   since: number;
 }
 
+/**
+ * Completeness audit (integrity safety net). After a cursor bootstrap a client
+ * can ask the server for the sha1 of every file it currently considers ACTIVE.
+ * The client diffs that manifest against its local vault and, for any path the
+ * server has but the client is missing (or holds at a different sha1), requests
+ * a targeted re-push via `verify_missing`. This closes the silent under-fetch
+ * gap where a client's cursor outran what it actually holds on disk (the
+ * 2026-08 incident): "sync complete" no longer means "cursor caught up", it
+ * means "I actually have every active file the server has".
+ */
+export interface VerifyRequestMsg {
+  type: "verify_request";
+}
+
+/**
+ * Client → server: re-send these specific active paths (download-only repair).
+ * Purely additive — it can only pull files DOWN, never delete, so a stale audit
+ * can never remove data. Capped server-side.
+ */
+export interface VerifyMissingMsg {
+  type: "verify_missing";
+  paths: string[];
+}
+
 export type ClientMsg =
   | AuthMsg
   | VersionCheckMsg
@@ -162,7 +186,9 @@ export type ClientMsg =
   | FileDataUploadMsg
   | FileDataRequestMsg
   | FileHistoryRequestMsg
-  | FileRenameMsg;
+  | FileRenameMsg
+  | VerifyRequestMsg
+  | VerifyMissingMsg;
 
 // ─── Server → Client messages ──────────────────────────────────────────────
 
@@ -296,6 +322,18 @@ export interface RequestSyncMsg {
   type: "request_sync";
 }
 
+/**
+ * Server → client: one bounded chunk of the active-file manifest (path + sha1).
+ * Streamed in chunks like `sync`; `last:true` marks the final chunk. The client
+ * accumulates all chunks, then diffs against its local vault. Only sha1 is sent
+ * (not content), so even a huge vault's manifest is a few hundred KB.
+ */
+export interface VerifyManifestMsg {
+  type: "verify_manifest";
+  files: { path: string; sha1: string }[];
+  last: boolean;
+}
+
 export type ServerMsg =
   | ChallengeMsg
   | AuthOkMsg
@@ -306,7 +344,8 @@ export type ServerMsg =
   | FileHistoryResponseMsg
   | VersionCheckResponseMsg
   | SyncDoneMsg
-  | RequestSyncMsg;
+  | RequestSyncMsg
+  | VerifyManifestMsg;
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
