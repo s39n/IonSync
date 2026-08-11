@@ -87,9 +87,13 @@ export class XSync {
   // see an empty vault (which would flag everything "missing" — the 2026-08
   // false alarm). Diff against this, never the live tree.
   private _verifyLocalPaths: Set<string> | null = null;
-  // Run the audit once per app load, right after the first sync settles. A fresh
-  // XSync is built on every plugin load, so this naturally resets each launch.
-  private _verifyPendingThisLoad = true;
+  // Auto-audit is DISABLED for now. It fired false "N missing" counts while the
+  // local metadata index was empty/rebuilding (2026-08-10), which was alarming
+  // even though the hard cap meant it never changed a file. Re-enable (set true)
+  // only once metadata persistence is solid and the diff is validated against a
+  // healthy vault — ideally behind a manual "Verify vault against server" command
+  // first. The handler, snapshot, and cap all remain in place.
+  private _verifyPendingThisLoad = false;
   // Hard ceiling on files a single audit may auto-repair. A legitimate
   // under-fetch is small; hundreds/thousands "missing" means the LOCAL index is
   // wrong (empty metadata, cleared tree, path mismatch), NOT that the server is
