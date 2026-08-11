@@ -1093,6 +1093,12 @@ export class XSync {
     this.ws.send({ type: "file_data", mode: mode as any, file: entry, content, ...(contentBytes ? { contentBytes } : {}), ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}) });
     this.addActivity("up", path);
     this.syncUpCount++;
+    // Feed the stall watchdog: a large offline reconcile (e.g. a full reseed of a
+    // 20k-file vault) uploads steadily but produces no *download* progress, so
+    // without this stamp _checkSyncStall trips at 45s, and its restart clears
+    // storage.tree out from under this very loop — stranding every remaining
+    // upload (they find no entry and no-op). This kept reseeds stuck partway.
+    this._lastSyncProgress = Date.now();
     await this.storage.writeMetadata(entry);
   }
 
