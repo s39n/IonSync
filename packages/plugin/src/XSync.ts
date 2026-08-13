@@ -3,7 +3,7 @@ import { collectFolderChildren, cascadeDeleteExceedsSafetyCap } from "@ionsync/p
 import { Platform, type TAbstractFile } from "obsidian";
 import { WsManager, type UpdateInfo } from "./WsManager.js";
 import { Storage } from "./Storage.js";
-import { XNotify, NotifyType, STATUS_WARN } from "./XNotify.js";
+import { XNotify, NotifyType, STATUS_WARN, STATUS_OK, STATUS_ERROR, STATUS_SYNC } from "./XNotify.js";
 import { XTimeouts } from "./XTimeouts.js";
 import { ExclusionFilter } from "./ExclusionFilter.js";
 import Utils from "./Utils.js";
@@ -73,6 +73,51 @@ export class XSync {
   private responseListeners: Array<(msg: ServerMsg) => boolean> = [];
   private messageQueue: ServerMsg[] = [];
   private isProcessingQueue = false;
+
+  // Completeness audit (integrity safety net). After a bootstrap the client asks
+  // the server for the sha1 of every active file and diffs it against the local
+  // vault; anything missing on disk (or at a different sha1) is pulled back with
+  // a targeted verify_missing. This catches the silent under-fetch a "caught up"
+  // cursor can hide (2026-08). `_verifyManifest` accumulates the streamed chunks;
+  // `_verifying` guards against overlapping passes.
+  private _verifyManifest: Map<string, string> | null = null;
+  private _verifying = false;
+  // Immutable snapshot of local paths captured when the audit STARTS, so a
+  // concurrent computeTree/sync clearing the shared tree can't make the diff
+  // see an empty vault (which would flag everything "missing" — the 2026-08
+  // false alarm). Diff against this, never the live tree.
+  private _verifyLocalPaths: Set<string> | null = null;
+  // Auto-audit is DISABLED for now. It fired false "N missing" counts while the
+  // local metadata index was empty/rebuilding (2026-08-10), which was alarming
+  // even though the hard cap meant it never changed a file. Re-enable (set true)
+  // only once metadata persistence is solid and the diff is validated against a
+  // healthy vault — ideally behind a manual "Verify vault against server" command
+  // first. The handler, snapshot, and cap all remain in place.
+  private _verifyPendingThisLoad = false;
+  // True while a manual "Verify against server" runs, so completion shows a
+  // visible success notice instead of only a debug-log line.
+  private _verifyManual = false;
+
+  // ── E2EE circuit breaker + apply-failure tracking ─────────────────────────
+  // Set on the FIRST decrypt failure / missing key. While set we stop applying
+  // (undecryptable) content and pause sync instead of writing garbage and
+  // flooding one warning per file. Cleared on the next fresh connect so a
+  // corrected password retries automatically (see _onConnected).
+  private _e2eeHalted = false;
+  // Set by _applyServerFile when a push FAILED to apply (decrypt error, write
+  // error) — as opposed to a legitimate skip (echo, exclusion, already-present).
+  // The caller must NOT advance the cursor past a failed file, or it becomes a
+  // silent under-fetch (device thinks it's caught up while missing files).
+  private _lastApplyFailed = false;
+  // Any ordered session push failed to apply during the current bootstrap batch,
+  // so the batch must not finalize as "complete".
+  private _sessionHadApplyFailure = false;
+  // Hard ceiling on files a single audit may auto-repair. A legitimate
+  // under-fetch is small; hundreds/thousands "missing" means the LOCAL index is
+  // wrong (empty metadata, cleared tree, path mismatch), NOT that the server is
+  // right — auto-pulling then would clobber good local files. Over this, refuse
+  // to repair and surface it instead. This cap is what makes the audit safe.
+  private static readonly VERIFY_REPAIR_CAP = 300;
 
   // Paths we are actively writing via _applyServerFile.  When the vault fires
   // a create/modify event for one of these paths we suppress it — otherwise the
@@ -358,20 +403,29 @@ export class XSync {
         }
         if (typeof msg.seq === "number") {
           if (msg.session) {
-            // Ordered session push: everything up to this seq is now applied, so
-            // it is safe to checkpoint. Persist incrementally so an interrupted
-            // bootstrap resumes from here instead of restarting from 0.
-            if (msg.seq > this._lastSyncedSeq) this._lastSyncedSeq = msg.seq;
-            this._scheduleCursorCheckpoint();
+            // Ordered session push. Only advance/checkpoint the cursor if this file
+            // ACTUALLY applied AND no earlier file in this batch failed — otherwise
+            // we'd checkpoint past a file we don't have (the silent under-fetch).
+            // The first failure freezes the cursor so the whole remainder re-fetches
+            // on the next sync, and blocks the batch from finalizing as "complete".
+            if (!this._lastApplyFailed && !this._sessionHadApplyFailure) {
+              if (msg.seq > this._lastSyncedSeq) this._lastSyncedSeq = msg.seq;
+              this._scheduleCursorCheckpoint();
+            } else {
+              this._sessionHadApplyFailure = true;
+            }
           } else if (this._inCursorSession) {
             // Live push arriving mid-session: applied now, but its seq is ahead of
             // the ordered stream — defer it to sync_done so we don't checkpoint a
-            // gap over un-applied session files.
-            if (msg.seq > this._liveMaxSeq) this._liveMaxSeq = msg.seq;
+            // gap over un-applied session files. Skip if it failed to apply.
+            if (!this._lastApplyFailed && msg.seq > this._liveMaxSeq) this._liveMaxSeq = msg.seq;
           } else {
-            // Live push while idle (already caught up): safe to advance + persist.
-            if (msg.seq > this._lastSyncedSeq) this._lastSyncedSeq = msg.seq;
-            this._scheduleCursorCheckpoint();
+            // Live push while idle (already caught up): safe to advance + persist
+            // only if it actually applied.
+            if (!this._lastApplyFailed && msg.seq > this._lastSyncedSeq) {
+              this._lastSyncedSeq = msg.seq;
+              this._scheduleCursorCheckpoint();
+            }
           }
         }
         break;
@@ -409,12 +463,30 @@ export class XSync {
         this._inCursorSession = false;
         if (this._liveMaxSeq > this._lastSyncedSeq) this._lastSyncedSeq = this._liveMaxSeq;
         this._liveMaxSeq = 0;
-        await this._onSyncDone();
+        // If any ordered file failed to apply, the batch is NOT complete — do not
+        // let it finalize as "fully synced" (that's the silent under-fetch).
+        const sessionComplete = !this._sessionHadApplyFailure;
+        this._sessionHadApplyFailure = false;
+        await this._onSyncDone(sessionComplete);
         break;
+      case "verify_manifest": {
+        // Accumulate the streamed active-file manifest; on the final chunk, diff
+        // against the local vault and pull anything we're missing.
+        if (!this._verifyManifest) this._verifyManifest = new Map();
+        for (const f of msg.files) this._verifyManifest.set(f.path, f.sha1);
+        if (msg.last) await this._finishVerify();
+        break;
+      }
     }
   }
 
   private async _applyServerFile(file: FileEntry, content: string, contentBytes?: Uint8Array): Promise<void> {
+    // Reset the per-call failure flag. The caller reads it after awaiting to decide
+    // whether the cursor may advance past this file (see the file_push handler).
+    this._lastApplyFailed = false;
+    // Circuit breaker tripped (encryption): stop applying and freeze the cursor —
+    // do not advance past files we're skipping — until the user fixes it.
+    if (this._e2eeHalted) { this._lastApplyFailed = true; return; }
     // Emergency guard: drop developer folders
     if (file.path.includes("node_modules/") || file.path.includes(".git/")) return;
     if (this.exclusionFilter?.isExcluded(file.path)) return;
@@ -438,13 +510,13 @@ export class XSync {
     if (file.action !== "deleted" && content && isEncryptedBase64(content)) {
       const key = await this._getEncryptionKey();
       if (!key) {
-        console.warn(`[IonSync] E2EE: received encrypted file but no decryption key is configured — skipping ${file.path}`);
-        this.xNotify.showNotification(STATUS_WARN, "Encrypted file received — enable E2EE in settings to decrypt");
-        // Acknowledge the file in metadata WITHOUT writing content.  This stores
-        // the server's encrypted SHA so the next sync message includes this path
-        // with the correct SHA, causing compareFiles to return null and stopping
-        // the server from re-pushing the file on every connect.
-        await this.storage.writeMetadata(file);
+        // Encrypted content arrived but this device has no key configured. Rather
+        // than silently skip file-by-file (which under-fetches) and spam a warning
+        // per file, trip the circuit breaker: pause and tell the user once.
+        this._lastApplyFailed = true;
+        await this._haltForEncryption(
+          "encrypted files are arriving but no encryption password is set on this device. Enable E2EE and enter the password in settings, then re-enable sync."
+        );
         return;
       }
       try {
@@ -454,8 +526,13 @@ export class XSync {
         // Re-encode as plain base64 so the existing write path handles it normally.
         content = Utils.toBase64(new Uint8Array(plainBytes));
       } catch (e) {
-        console.error(`[IonSync] E2EE: decryption failed for ${file.path} — wrong password or corrupted data:`, e);
-        this.xNotify.showNotification(STATUS_WARN, `E2EE decrypt failed: ${file.path}`);
+        // Wrong password (or a corrupted blob). Halt instead of writing garbage and
+        // flooding one error per file — the whole vault would be undecryptable.
+        console.error(`[IonSync] E2EE: decryption failed for ${file.path}:`, e);
+        this._lastApplyFailed = true;
+        await this._haltForEncryption(
+          "the encryption password on this device doesn't match the server. Fix it in settings, then re-enable sync."
+        );
         return;
       }
     } else if (file.action !== "deleted" && content) {
@@ -626,6 +703,9 @@ export class XSync {
       }
     } catch (e) {
       console.error(`[IonSync] Error applying server file (${file.path}):`, e);
+      // A genuine failure to write — mark it so the caller does not advance the
+      // cursor past this file (which would drop it from the vault permanently).
+      this._lastApplyFailed = true;
     }
   }
 
@@ -679,6 +759,7 @@ export class XSync {
   async sync(): Promise<void> {
     if (!this.ws.isConnected || this.isSyncing) return;
     this.isSyncing = true;
+    this._sessionHadApplyFailure = false; // clean slate for this session's under-fetch guard
     this.syncUpCount = 0;
     this.syncDownCount = 0;
     this.syncApplyCount = 0;
@@ -736,7 +817,7 @@ export class XSync {
     }
   }
 
-  private async _onSyncDone(): Promise<void> {
+  private async _onSyncDone(complete = true): Promise<void> {
     const wasFirstSync = this._isFirstSync;
     this._isFirstSync = false;  // device is now fully synced
     // NOTE: isSyncing stays TRUE until the end of this method. It suppresses the
@@ -757,13 +838,21 @@ export class XSync {
     }
     this.plugin.settings.lastSyncedSeq = this._lastSyncedSeq;
     this.plugin.settings.lastSyncedEndpoint = this._endpointKey();
-    this.plugin.settings.bootstrapComplete = true;
-    this.plugin.settings.bootstrapInProgress = false; // bootstrap truly finished
+    if (complete) {
+      // Only mark the device fully bootstrapped when every ordered file applied.
+      this.plugin.settings.bootstrapComplete = true;
+      this.plugin.settings.bootstrapInProgress = false; // bootstrap truly finished
+    }
     await this.plugin.saveSettings();
 
-    // UPLOAD direction: now that server changes are applied and metadata reflects
-    // them, scan the vault and upload only paths whose content genuinely differs.
-    await this._reconcileUploads();
+    // UPLOAD direction: only reconcile uploads once the DOWNLOAD is fully applied.
+    // If a file failed this batch (complete === false) the cursor is frozen at the
+    // last good file; uploading now would race an incomplete vault.
+    if (complete) {
+      // now that server changes are applied and metadata reflects them, scan the
+      // vault and upload only paths whose content genuinely differs.
+      await this._reconcileUploads();
+    }
 
     // After a first-ever sync, discard every delete-queue entry that accumulated
     // during the initial write burst.  The platform (iOS iCloud eviction, Android
@@ -811,6 +900,152 @@ export class XSync {
     // order anyway). Bounds memory after a large bootstrap.
     this._appliedSeq.clear();
     this.isSyncing = false;
+
+    if (!complete) {
+      // A file in this bootstrap failed to apply, so we did NOT mark it complete —
+      // the device will not falsely report "fully synced". The cursor is frozen at
+      // the last good file; re-fetch from there. Skip if the E2EE breaker tripped
+      // (wait for the user to fix the password and re-enable — avoids a hot loop).
+      this.plugin.log("[IonSync] bootstrap batch incomplete (a file failed to apply) — re-fetching from the last good cursor");
+      if (!this._e2eeHalted && this.ws.isConnected) {
+        void this._waitForIdle().then(() => {
+          if (this.ws.isConnected && !this._e2eeHalted && !this.isSyncing) void this.sync();
+        });
+      }
+      return;
+    }
+
+    // Integrity safety net: once per launch, after the first sync settles, audit
+    // the local vault against the server's active set and self-heal any silent
+    // under-fetch. Fire-and-forget so it never blocks the sync path.
+    if (this._verifyPendingThisLoad) {
+      this._verifyPendingThisLoad = false;
+      void this._verifyAgainstServer();
+    }
+  }
+
+  /**
+   * E2EE circuit breaker. On the FIRST decryption failure (wrong or missing key)
+   * we stop the sync rather than write files we can't read and flood the user with
+   * one warning per file. Pauses sync (persisted) and shows a single, sticky,
+   * actionable notice. Cleared on the next fresh connect (see `_onConnected`), so
+   * a corrected password retries automatically.
+   */
+  private async _haltForEncryption(reason: string): Promise<void> {
+    if (this._e2eeHalted) return; // one notice, one pause — never a spam of them
+    this._e2eeHalted = true;
+    console.error(`[IonSync] E2EE halt — ${reason}`);
+    // delay 0 = sticky notice (stays until dismissed).
+    this.xNotify.showNotification(STATUS_ERROR, `IonSync paused — ${reason}`, 0);
+    // Pause sync so we stop receiving and applying content we cannot decrypt.
+    this.plugin.settings.syncEnabled = false;
+    await this.plugin.saveSettings(); // flips ws.setEnabled(false) → disconnect
+  }
+
+  /**
+   * Manual completeness check (command palette: "Verify vault against server").
+   * Asks the server for its active-file manifest, diffs it against a FRESH disk
+   * scan, and reports the result visibly: "vault complete" or how many files are
+   * missing (which it then repairs, download-only, capped — same safety as the
+   * auto-audit). This is the confidence check that the sync is truly complete.
+   */
+  async verifyNow(): Promise<void> {
+    if (!this.ws.isConnected) {
+      this.xNotify.showNotification(STATUS_WARN, "Verify: connect to the server first.");
+      return;
+    }
+    if (this._verifying) {
+      this.xNotify.showNotification(STATUS_WARN, "Verify: a check is already running…");
+      return;
+    }
+    this._verifyManual = true;
+    this.xNotify.showNotification(STATUS_SYNC, "Verifying vault against server…", 3_000);
+    await this._verifyAgainstServer();
+  }
+
+  /**
+   * Ask the server for its full active-file manifest (path + sha1). The response
+   * streams back as `verify_manifest` chunks; the diff + repair happens in
+   * `_finishVerify` once the final chunk lands. We snapshot a fresh disk scan
+   * first so the comparison reflects what's actually on disk — not what metadata
+   * (or the cursor) *claims* is there, which is exactly what went stale in the
+   * 2026-08 under-fetch.
+   */
+  private async _verifyAgainstServer(): Promise<void> {
+    if (this._verifying || !this.ws.isConnected) return;
+    this._verifying = true;
+    this._verifyManifest = new Map();
+    try {
+      // Fresh disk truth for the diff (reuses the same walk as reconcile).
+      await this.storage.computeTree();
+      // Snapshot NOW, while we know the tree is fully populated. If the scan
+      // produced implausibly few files, abort — comparing against a broken/empty
+      // local index would flag the whole vault "missing" and pull it all down.
+      const paths = Object.keys(this.storage.tree);
+      if (paths.length === 0) {
+        this.plugin.log("[IonSync] verify: local scan empty — skipping audit");
+        this._verifying = false;
+        this._verifyManifest = null;
+        return;
+      }
+      this._verifyLocalPaths = new Set(paths);
+      this.ws.send({ type: "verify_request" });
+    } catch (e) {
+      this.plugin.log(`[IonSync] verify: failed to start (${e})`);
+      this._verifying = false;
+      this._verifyManifest = null;
+      this._verifyLocalPaths = null;
+    }
+  }
+
+  /**
+   * Diff the accumulated server manifest against the local disk tree and pull
+   * back anything missing or content-drifted. Download-only: we never delete a
+   * local file the server lacks here (that path stays a normal-sync concern), so
+   * a stale audit can only ever ADD, never remove.
+   */
+  private async _finishVerify(): Promise<void> {
+    const manifest = this._verifyManifest;
+    const localPaths = this._verifyLocalPaths;
+    const manual = this._verifyManual;
+    this._verifyManifest = null;
+    this._verifyLocalPaths = null;
+    this._verifyManual = false;
+    this._verifying = false;
+    if (!manifest || !localPaths) return;
+
+    // ONLY repair files genuinely ABSENT from disk (the silent under-fetch this
+    // exists for), compared against the immutable start-of-audit snapshot. A
+    // sha1 difference is drift (timestamps, plugin rewrites, a real edit) and is
+    // normal-sync's job — never a blind download that could clobber a newer or
+    // git-restored local file.
+    const missing: string[] = [];
+    for (const [path] of manifest) {
+      if (this.exclusionFilter?.isExcluded(path)) continue;
+      if (!localPaths.has(path)) missing.push(path);
+    }
+
+    if (missing.length === 0) {
+      this.plugin.log(`[IonSync] verify: complete — vault matches server (${manifest.size} active files)`);
+      if (manual) this.xNotify.showNotification(STATUS_OK, `Vault complete — all ${manifest.size} files present and matching the server.`);
+      return;
+    }
+
+    // SAFETY CAP: an implausibly large "missing" set means the LOCAL index is
+    // wrong (empty metadata, a cleared tree, a path-format mismatch) — not that
+    // the server is authoritative. Auto-pulling then is exactly the 2026-08
+    // near-disaster. Refuse, and surface it so a human can investigate.
+    if (missing.length > XSync.VERIFY_REPAIR_CAP) {
+      this.plugin.log(`[IonSync] verify: ${missing.length}/${manifest.size} reported missing — implausibly many; REFUSING auto-repair (likely a local index problem, not a real under-fetch). No files pulled.`);
+      this.xNotify.showNotification(STATUS_WARN, `Sync audit found ${missing.length} discrepancies — not auto-repairing (looks like a local index issue). No changes made.`);
+      return;
+    }
+
+    this.plugin.log(`[IonSync] verify: ${missing.length} file(s) truly missing vs server — repairing: ${missing.slice(0, 5).join(", ")}${missing.length > 5 ? " …" : ""}`);
+    this.xNotify.showNotification(STATUS_WARN, `Restoring ${missing.length} missing file${missing.length === 1 ? "" : "s"} from server…`);
+    // Ask the server to re-push exactly these paths; they arrive as file_push
+    // and are written by _applyServerFile like any other download.
+    this.ws.send({ type: "verify_missing", paths: missing });
   }
 
   /**
@@ -968,6 +1203,12 @@ export class XSync {
     this.ws.send({ type: "file_data", mode: mode as any, file: entry, content, ...(contentBytes ? { contentBytes } : {}), ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}) });
     this.addActivity("up", path);
     this.syncUpCount++;
+    // Feed the stall watchdog: a large offline reconcile (e.g. a full reseed of a
+    // 20k-file vault) uploads steadily but produces no *download* progress, so
+    // without this stamp _checkSyncStall trips at 45s, and its restart clears
+    // storage.tree out from under this very loop — stranding every remaining
+    // upload (they find no entry and no-op). This kept reseeds stuck partway.
+    this._lastSyncProgress = Date.now();
     await this.storage.writeMetadata(entry);
   }
 
@@ -1279,6 +1520,9 @@ export class XSync {
   }
 
   private async _onConnected(): Promise<void> {
+    // Fresh connection: clear the E2EE breaker so a corrected password gets a
+    // chance to work. If it's still wrong the next bad file re-trips it.
+    this._e2eeHalted = false;
     this.xNotify.notifyStatus(NotifyType.CONNECTED);
     // NOTE: the delete queue is intentionally NOT drained here.
     // Draining on connect is dangerous because _isFirstSync has not yet been set

@@ -99,7 +99,11 @@ const DEFAULT_SETTINGS: PluginSettings = {
   tls: false,
   deviceId: "",
   deviceName: "",
-  syncEnabled: true,
+  // New devices start PAUSED. A fresh install should not connect and begin
+  // pulling/pushing until the user has entered the server AND (for an E2EE vault)
+  // the encryption password — otherwise a device with the wrong/no key would
+  // download undecryptable files. The user enables sync deliberately in settings.
+  syncEnabled: false,
   autoSync: true,
   delayedSync: 0,
   notifications: 1,
@@ -165,6 +169,12 @@ export class IonSyncPlugin extends Plugin {
         this.settings.autoSync = !this.settings.autoSync;
         await this.saveSettings();
       },
+    });
+
+    this.addCommand({
+      id: "verify-against-server",
+      name: "Verify vault against server",
+      callback: () => { void this.xSync.verifyNow(); },
     });
 
     this.addSettingTab(new IonSyncSettingsTab(this.app, this));

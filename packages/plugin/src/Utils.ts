@@ -63,7 +63,12 @@ class Utils {
 
   /** SHA-1 of a UTF-8 string (returns hex string, or null for empty input) */
   async getSHA(data: string | null | undefined): Promise<string | null> {
-    if (!data) return null;
+    // Only null/undefined mean "no content". An EMPTY string is real content and
+    // must hash to the well-defined SHA-1 of "" — returning null here gave empty
+    // files a blank sha1, which defeats the upload-dedupe (both skip checks want a
+    // truthy sha), so empty config files (e.g. an empty plugin data.json) re-sent
+    // on every 5s config poll forever, bloating version history.
+    if (data == null) return null;
     const digest = await crypto.subtle.digest("SHA-1", Utils._encoder.encode(data));
     return bufToHex(new Uint8Array(digest));
   }
