@@ -106,6 +106,19 @@ export const MIGRATIONS: Array<{ version: number; up: (db: Database.Database) =>
       db.exec(`ALTER TABLE files ADD COLUMN size INTEGER NOT NULL DEFAULT -1;`);
     },
   },
+  {
+    version: 6,
+    up(db) {
+      // Highest sync cursor each device has durably applied (the `since` it sends
+      // on sync_cursor — the client only advances it over files it actually wrote,
+      // per the 2026-08 under-fetch hardening). Lets cleanup hard-delete a
+      // tombstone as soon as EVERY device has synced past its seq, instead of the
+      // old fixed 7-day wait: a delete a device hasn't seen yet still has
+      // seq > that device's synced_seq, so it is never purged out from under it.
+      // Default 0 = "has synced nothing yet"; existing devices update on next sync.
+      db.exec(`ALTER TABLE devices ADD COLUMN synced_seq INTEGER NOT NULL DEFAULT 0;`);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

@@ -27,7 +27,7 @@ export class SyncCleanup {
 
   run(): void {
     const { config, db, storage } = this.ctx;
-    const { versionsPerFile, keepDeletedFilesSecs } = config.cleanup;
+    const { versionsPerFile } = config.cleanup;
 
     // 1. Trim version history
     const allPaths = db.getAllFilePaths();
@@ -42,27 +42,28 @@ export class SyncCleanup {
       trimmedCount += toTrim.length;
     }
 
-    // 2. Purge expired deleted-file records
-    const cutoff = Date.now() - keepDeletedFilesSecs * 1_000;
-    const oldestDeviceOnline = db.getOldestDeviceOnline();
-
-    if (oldestDeviceOnline < cutoff) {
-      if (trimmedCount > 0) {
-        pushLog(this.ctx, `[cleanup] trimmed ${trimmedCount} old versions`);
-      }
-      return;
-    }
-
-    const expired = db.getExpiredDeletedFiles(cutoff);
-    for (const file of expired) {
+    // 2. Hard-delete tombstones every device has already synced past.
+    //
+    // A deletion is stamped with the seq at which it happened. Once EVERY known
+    // device's durable cursor (synced_seq) has passed that seq, they have all
+    // seen the deletion (or bootstrapped fresh without the file), so the record
+    // can be permanently removed — the server "forgets it ever existed". This
+    // replaces the old fixed 7-day wait: it's immediate once devices are caught
+    // up, and safe because a delete a device hasn't seen yet has seq greater than
+    // that device's synced_seq and is therefore skipped. A stale device that
+    // never returns will hold minSynced down and block purging — remove it from
+    // the dashboard Devices list to let cleanup proceed.
+    const minSynced = db.getMinSyncedSeq();
+    const purgeable = db.getDeletedFilesUpToSeq(minSynced);
+    for (const file of purgeable) {
       storage.deleteAllVersions(file.path);
       db.deleteFileMeta(file.path);
     }
 
-    if (expired.length > 0 || trimmedCount > 0) {
+    if (purgeable.length > 0 || trimmedCount > 0) {
       pushLog(
         this.ctx,
-        `[cleanup] trimmed ${trimmedCount} old versions; purged ${expired.length} deleted files`
+        `[cleanup] trimmed ${trimmedCount} old versions; purged ${purgeable.length} deleted file record(s) (all devices synced past seq ${minSynced === Number.MAX_SAFE_INTEGER ? "∞ (no devices)" : minSynced})`
       );
     }
   }

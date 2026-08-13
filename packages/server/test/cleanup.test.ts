@@ -35,7 +35,7 @@ describe("SyncCleanup", () => {
     await srv.stop();
   });
 
-  it("purges deleted files after all devices have been online past the cutoff", async () => {
+  it("purges a tombstone once every device's synced cursor has passed its seq", async () => {
     const srv = await startTestServer({
       cleanup: { intervalSecs: 3600, versionsPerFile: 5, keepDeletedFilesSecs: 1 },
     });
@@ -47,12 +47,13 @@ describe("SyncCleanup", () => {
     srv.ctx.db.upsertFile(file);
     srv.ctx.storage.write(filePath, file.mtime, Buffer.from("to be deleted"));
 
-    // Mark deleted (received_at is set to now by upsertFile)
+    // Delete it — the tombstone is stamped with a fresh seq.
     srv.ctx.db.upsertFile({ ...file, action: "deleted", mtime: 2000 });
+    const tombstoneSeq = srv.ctx.db.getCurrentSeq();
 
-    // Wait past the 1s keep window, then touch the device so oldestDeviceOnline > cutoff
-    await new Promise((r) => setTimeout(r, 1100));
+    // A device that has durably synced PAST the deletion.
     srv.ctx.db.touchDevice("device-test");
+    srv.ctx.db.recordDeviceSyncedSeq("device-test", tombstoneSeq);
 
     new SyncCleanup(srv.ctx).run();
 
@@ -62,28 +63,29 @@ describe("SyncCleanup", () => {
     await srv.stop();
   });
 
-  it("does NOT purge deleted files if a device hasn't been online since deletion", async () => {
+  it("does NOT purge a deletion a device hasn't synced yet", async () => {
     const srv = await startTestServer({
       cleanup: { intervalSecs: 3600, versionsPerFile: 5, keepDeletedFilesSecs: 1 },
     });
 
-    // Register a device that came online before we create/delete the file
-    srv.ctx.db.touchDevice("offline-device");
-
     const filePath = "notes/protected.md";
-    const file: FileEntry = {
-      path: filePath, sha1: "prot-sha", mtime: 1000, action: "deleted", fileType: "file",
-    };
-    srv.ctx.db.upsertFile(file);
+    srv.ctx.db.upsertFile({
+      path: filePath, sha1: "prot-sha", mtime: 1000, action: "active", fileType: "file",
+    });
+    // A device that has only synced up to BEFORE the deletion.
+    const beforeDeleteSeq = srv.ctx.db.getCurrentSeq();
+    srv.ctx.db.touchDevice("behind-device");
+    srv.ctx.db.recordDeviceSyncedSeq("behind-device", beforeDeleteSeq);
 
-    // Wait past the keep window — but do NOT touch offline-device again
-    await new Promise((r) => setTimeout(r, 1100));
+    // Now delete the file — its tombstone seq is above the device's synced cursor.
+    srv.ctx.db.upsertFile({
+      path: filePath, sha1: "prot-sha", mtime: 2000, action: "deleted", fileType: "file",
+    });
 
     new SyncCleanup(srv.ctx).run();
 
-    // Record must still exist because offline-device predates the deletion
-    const stored = srv.ctx.db.getFile(filePath);
-    assert.ok(stored !== undefined);
+    // Must still exist — behind-device hasn't seen the deletion.
+    assert.ok(srv.ctx.db.getFile(filePath) !== undefined);
 
     await srv.stop();
   });

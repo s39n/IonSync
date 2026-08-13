@@ -601,7 +601,7 @@
         </div>
         <div class="card">
           <table>
-            <thead><tr><th>Device</th><th>Last Seen</th><th>Status</th></tr></thead>
+            <thead><tr><th>Device</th><th>Last Seen</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody id="devices-body"></tbody>
           </table>
         </div>
@@ -1339,7 +1339,7 @@ async function dbRemoveDevice(id, btn) {
   btn.disabled = true; btn.textContent = '…';
   try {
     await api('/api/db/device/' + encodeURIComponent(id), { method: 'DELETE' });
-    dbLoadDevices(); dbLoadStats();
+    dbLoadDevices(); dbLoadStats(); loadDevices();
     toast('Device removed', 'success');
   } catch(e) {
     toast('Failed: ' + e.message, 'error');
@@ -1550,7 +1550,7 @@ function renderPeers() {
 function renderDevices() {
   const tbody = document.getElementById('devices-body');
   if (!S.devices.length) {
-    tbody.innerHTML = '<tr><td colspan="3" class="empty">No devices seen yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">No devices seen yet</td></tr>';
     return;
   }
   tbody.innerHTML = S.devices.map(d => `
@@ -1558,6 +1558,7 @@ function renderDevices() {
       <td style="cursor:pointer" data-action="rename-device" data-id="${escHtml(d.id)}" data-name="${escHtml(d.name||'')}" title="Click to rename">${deviceLabel(d.id, d.name)}</td>
       <td>${escHtml(fmtDate(d.lastOnline))}</td>
       <td>${d.connected ? '<span class="badge-pill green">Connected</span>' : '<span class="badge-pill muted">Offline</span>'}</td>
+      <td><button class="btn danger" style="font-size:11px;padding:3px 8px" data-action="db-remove-device" data-id="${escHtml(d.id)}" title="Forget this device. Safe to do for old/duplicate entries; a real device will simply re-register next time it connects.">Remove</button></td>
     </tr>
   `).join('');
 }

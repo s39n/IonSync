@@ -33,6 +33,7 @@ interface DbVersionRow {
 interface DbDeviceRow {
   id: string;
   last_online: number;
+  synced_seq: number;
 }
 
 function rowToFileEntry(row: DbFileRow): FileEntry {
@@ -391,7 +392,44 @@ export class SyncDB {
     return row?.min_lo ?? 0;
   }
 
+  /** Record the highest cursor a device has durably applied (its sync_cursor
+   *  `since`). Monotonic — never moves backward. The row already exists via
+   *  touchDevice, but upsert defensively so a first message can't miss it. */
+  recordDeviceSyncedSeq(id: string, seq: number): void {
+    this.db
+      .prepare<[string, number, number]>(
+        `INSERT INTO devices (id, last_online, synced_seq) VALUES (?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET synced_seq = MAX(synced_seq, excluded.synced_seq)`
+      )
+      .run(id, Date.now(), Math.max(0, Math.floor(seq)));
+  }
+
+  /** The lowest synced_seq across all known devices — i.e. the seq every device
+   *  has provably caught up to. A tombstone at or below this has been seen by
+   *  everyone, so it is safe to hard-delete. With no devices there is nobody to
+   *  resurrect a file, so return a sentinel that lets all tombstones purge. */
+  getMinSyncedSeq(): number {
+    const row = this.db
+      .prepare<[], { min_s: number | null; n: number }>(
+        "SELECT MIN(synced_seq) AS min_s, COUNT(*) AS n FROM devices"
+      )
+      .get();
+    if (!row || row.n === 0) return Number.MAX_SAFE_INTEGER;
+    return row.min_s ?? 0;
+  }
+
   // --- Cleanup helpers ------------------------------------------------------
+
+  /** Deleted-file records (tombstones) whose seq is at or below `seq` — i.e. old
+   *  enough that a device caught up to `seq` has already seen the deletion. */
+  getDeletedFilesUpToSeq(seq: number): FileEntry[] {
+    return this.db
+      .prepare<[number], DbFileRow>(
+        "SELECT * FROM files WHERE action = 'deleted' AND seq <= ?"
+      )
+      .all(seq)
+      .map(rowToFileEntry);
+  }
 
   getExpiredDeletedFiles(cutoff: number): FileEntry[] {
     return this.db

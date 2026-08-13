@@ -56,6 +56,12 @@ export function handleSyncCursor(ctx: SyncContext, peer: SyncPeer, msg: SyncCurs
   }
   const current = ctx.db.getCurrentSeq();
 
+  // Record how far this device has durably caught up. `since` is the client's
+  // persisted cursor, which (post-2026-08 hardening) only advances over files it
+  // actually applied — so it is a safe "everyone has seen up to here" signal that
+  // cleanup uses to hard-delete tombstones no device still needs.
+  if (peer.deviceId) ctx.db.recordDeviceSyncedSeq(peer.deviceId, since);
+
   // A genuine from-0 bootstrap must NEVER carry deletions: a client re-bootstrapping
   // with files on disk but empty metadata would otherwise have the server's
   // tombstones replayed as mass deletes over a healthy vault (the 2026-08 delete

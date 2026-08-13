@@ -560,6 +560,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
       if (peer.deviceId === id) peer.disconnect("Device removed by admin");
     }
     ctx.db.deleteDevice(id);
+    ctx.db.deleteDeviceName(id);
     res.json({ ok: true });
   });
 
