@@ -212,6 +212,10 @@ export class SyncDB {
              action      = excluded.action,
              file_type   = excluded.file_type,
              seq         = excluded.seq,
+             -- Overwriting a path clears any stale rename-tombstone marker: an
+             -- active row must never carry renamed_to, or re-deleting this file
+             -- would later look like a rename and mint spurious conflict copies.
+             renamed_to  = NULL,
              size        = CASE WHEN excluded.size >= 0 THEN excluded.size ELSE files.size END`
         )
         .run(file.path, file.sha1, file.mtime, now, file.action, file.fileType, seq, size ?? -1);

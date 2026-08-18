@@ -29,12 +29,18 @@ function decideUpload(
   const serverFile = ctx.db.getFile(file.path);
   if (!serverFile) return "accept";
   if (serverFile.action === "deleted") {
-    // A plain delete → an upload is a re-add (accept). But if the old path was
-    // retired by a *rename* (renamed_to set), an upload to it is an edit that
-    // raced the rename — a structural conflict against the rename target, not a
-    // resurrection of the dead path. Hidden/config paths never conflict-copy.
+    // A plain delete → an upload is a re-add (accept). If the old path was
+    // retired by a *rename* (renamed_to set), an upload to it MAY be an edit
+    // that raced the rename — a structural conflict against the rename target.
+    // Only a client that actually HAD the pre-rename file can race the rename:
+    // such an upload carries a baseSha1 (the sha it last synced for this path).
+    // A brand-new create with no baseSha1 is a new note that merely reuses a
+    // recycled name (e.g. "Untitled 1.md", whose earlier incarnation was renamed
+    // away) — it is a re-add, not a race, and must NOT be diverted into a
+    // conflict copy or it would close the note out from under the editor.
     const renamedTo = ctx.db.getRenameTarget(file.path);
-    if (renamedTo && !isHiddenOrConfigPath(file.path)) return "structural_conflict";
+    const hasBase = baseSha1 !== undefined && baseSha1 !== "";
+    if (hasBase && renamedTo && !isHiddenOrConfigPath(file.path)) return "structural_conflict";
     return "accept";
   }
   if (file.sha1 && file.sha1 === serverFile.sha1) return "accept";

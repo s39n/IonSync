@@ -224,4 +224,36 @@ describe("file_rename", () => {
     client.close();
     await srv.stop();
   });
+
+  it("fresh create on a recycled/renamed name is a new note, not a structural conflict", async () => {
+    const srv = await startTestServer();
+    const client = connectClient(srv.port);
+    await waitForOpen(client);
+    await client.auth();
+
+    // A note lived at "notes/Untitled 1.md", then was renamed to "notes/Sermon.md".
+    await uploadNew(client, "notes/Untitled 1.md", "old sermon", 1000);
+    client.send({ type: "file_rename", from: "notes/Untitled 1.md", to: "notes/Sermon.md", sha1: sha1("old sermon"), mtime: 2000, baseSha1: sha1("old sermon"), fileType: "file" });
+    await settle(client, "notes/Sermon.md");
+    assert.equal(srv.ctx.db.getRenameTarget("notes/Untitled 1.md"), "notes/Sermon.md");
+
+    // Later the user hits "new note" and Obsidian reuses the name "Untitled 1.md".
+    // This is a fresh create — NO baseSha1 — so it must be accepted as a new note,
+    // never diverted into a "(Conflicted Copy)" of the rename target (which used
+    // to close the note out from under the editor).
+    await uploadNew(client, "notes/Untitled 1.md", "brand new note", 3000);
+
+    // The new note lives at its own path with its own content.
+    assert.equal(srv.ctx.db.getFile("notes/Untitled 1.md")?.action, "active");
+    assert.equal(srv.ctx.db.getFile("notes/Untitled 1.md")?.sha1, sha1("brand new note"));
+    assert.equal(srv.ctx.storage.readLatest("notes/Untitled 1.md")?.toString(), "brand new note");
+    // The rename target is untouched, and no conflict copy was minted.
+    assert.equal(srv.ctx.db.getFile("notes/Sermon.md")?.sha1, sha1("old sermon"));
+    assert.ok(!hasCopy(srv));
+    // The stale rename marker is cleared now that the path is active again.
+    assert.equal(srv.ctx.db.getRenameTarget("notes/Untitled 1.md"), null);
+
+    client.close();
+    await srv.stop();
+  });
 });
