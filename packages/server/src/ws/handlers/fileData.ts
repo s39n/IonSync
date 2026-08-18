@@ -256,7 +256,7 @@ export function handleFileUpload(
 
   // Only update the database and broadcast if the file was ACTUALLY saved
   if (!isRejected) {
-    ctx.db.upsertFile(file, savedSize);
+    ctx.db.upsertFile(file, savedSize, peer.deviceId ?? null);
     broadcastToPeers(ctx, peer, file);
     logInfo(ctx, `[file_data] saved ${file.path} (action=${file.action}, mtime=${file.mtime})`);
     pushActivity(ctx, { kind: "upload", deviceId: peer.deviceId ?? undefined, path: file.path });
@@ -309,7 +309,7 @@ function applyConflict(
       fileType: "file",
     };
     ctx.storage.write(copyEntry.path, copyEntry.mtime, buf);
-    ctx.db.upsertFile(copyEntry, buf.length);
+    ctx.db.upsertFile(copyEntry, buf.length, peer.deviceId ?? null);
     // Uploader receives the copy directly; broadcastToPeers covers everyone else.
     // Pass raw bytes — peer.send frames them (binary or base64) per peer caps.
     peer.send({ type: "file_push", file: copyEntry, content: "", contentBytes: buf });
@@ -373,7 +373,7 @@ function applyStructuralConflict(
       fileType: "file",
     };
     ctx.storage.write(copyEntry.path, copyEntry.mtime, buf);
-    ctx.db.upsertFile(copyEntry, buf.length);
+    ctx.db.upsertFile(copyEntry, buf.length, peer.deviceId ?? null);
     peer.send({ type: "file_push", file: copyEntry, content: "", contentBytes: buf });
     broadcastToPeers(ctx, peer, copyEntry);
     logWarn(ctx, `[Structural] ${peer.deviceId} edited ${file.path} which was renamed to ${renamedTo} — stored edit as ${copyEntry.path}`);

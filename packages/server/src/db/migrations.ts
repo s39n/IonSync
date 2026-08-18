@@ -119,6 +119,19 @@ export const MIGRATIONS: Array<{ version: number; up: (db: Database.Database) =>
       db.exec(`ALTER TABLE devices ADD COLUMN synced_seq INTEGER NOT NULL DEFAULT 0;`);
     },
   },
+  {
+    version: 7,
+    up(db) {
+      // File attribution for the dashboard. `created_by` = the device that first
+      // introduced a path (stamped once, preserved across later edits);
+      // `last_by` = the device that most recently wrote it. Existing rows stay
+      // NULL (no historical record) and populate going forward.
+      db.exec(`
+        ALTER TABLE files ADD COLUMN created_by TEXT;
+        ALTER TABLE files ADD COLUMN last_by TEXT;
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

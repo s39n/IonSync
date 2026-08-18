@@ -16,6 +16,10 @@ interface DbFileRow {
   renamed_to?: string | null;
   /** Content size in bytes of the head version; -1 = unknown (pre-v5 row). */
   size: number;
+  /** Device that first introduced this path (migration v7); null = unknown/pre-v7. */
+  created_by?: string | null;
+  /** Device that most recently wrote this path (migration v7). */
+  last_by?: string | null;
 }
 
 /** A file row plus the sequence number at which its head last changed. */
@@ -197,14 +201,14 @@ export class SyncDB {
    *   dashboard size queries never have to stat the disk. Omitted → the
    *   previously stored size is kept (metadata-only updates, deletions).
    */
-  upsertFile(file: FileEntry, size?: number): void {
+  upsertFile(file: FileEntry, size?: number, deviceId?: string | null): void {
     const now = Date.now();
     this.db.transaction(() => {
       const seq = this.allocateSeq();
       this.db
-        .prepare<[string, string, number, number, string, string, number, number]>(
-          `INSERT INTO files (path, sha1, mtime, received_at, action, file_type, seq, size)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        .prepare<[string, string, number, number, string, string, number, number, string | null, string | null]>(
+          `INSERT INTO files (path, sha1, mtime, received_at, action, file_type, seq, size, created_by, last_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(path) DO UPDATE SET
              sha1        = excluded.sha1,
              mtime       = excluded.mtime,
@@ -216,9 +220,14 @@ export class SyncDB {
              -- active row must never carry renamed_to, or re-deleting this file
              -- would later look like a rename and mint spurious conflict copies.
              renamed_to  = NULL,
+             -- created_by is deliberately NOT updated: it records the device that
+             -- first introduced the path and must survive later edits. last_by
+             -- follows the most recent writer, but keep the old value when this
+             -- upsert carries no device (e.g. an internal tombstone write).
+             last_by     = COALESCE(excluded.last_by, files.last_by),
              size        = CASE WHEN excluded.size >= 0 THEN excluded.size ELSE files.size END`
         )
-        .run(file.path, file.sha1, file.mtime, now, file.action, file.fileType, seq, size ?? -1);
+        .run(file.path, file.sha1, file.mtime, now, file.action, file.fileType, seq, size ?? -1, deviceId ?? null, deviceId ?? null);
 
       if (file.fileType === "file") {
         this.db
@@ -533,7 +542,9 @@ export class SyncDB {
    * migration v5 carry size = -1; callers should fall back to a storage stat
    * for those (they heal to a real size on the next upload).
    */
-  getFilesWithSize(action: "active" | "deleted" | "all"): FileWithSize[] {
+  getFilesWithSize(
+    action: "active" | "deleted" | "all"
+  ): Array<FileWithSize & { createdBy: string | null; lastBy: string | null }> {
     const rows =
       action === "all"
         ? this.db
@@ -544,7 +555,12 @@ export class SyncDB {
               "SELECT * FROM files WHERE action = ? AND file_type = 'file' ORDER BY path"
             )
             .all(action);
-    return rows.map((r) => ({ ...rowToFileEntry(r), size: r.size ?? -1 }));
+    return rows.map((r) => ({
+      ...rowToFileEntry(r),
+      size: r.size ?? -1,
+      createdBy: r.created_by ?? null,
+      lastBy: r.last_by ?? null,
+    }));
   }
 
   /**
