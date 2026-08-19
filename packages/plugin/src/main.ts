@@ -1,4 +1,4 @@
-import { Plugin } from "obsidian";
+import { Plugin, Platform } from "obsidian";
 import { XSync } from "./XSync.js";
 import { IonSyncSettingsTab } from "./SettingsTab.js";
 
@@ -133,6 +133,23 @@ const DEFAULT_SETTINGS: PluginSettings = {
   bootstrapInProgress: false,
 };
 
+/**
+ * A distinct, human-readable default device name for a brand-new install, so
+ * every device is self-labelled and unique out of the box — two browsers both
+ * running Obsidian Web no longer both show up as just "Obsidian Web". The
+ * 4-char suffix comes from the device's own UUID (guaranteed unique); the
+ * prefix reflects the runtime. The user can still rename it in settings.
+ */
+function defaultDeviceName(deviceId: string): string {
+  const suffix = deviceId.replace(/-/g, "").slice(0, 4) || "0000";
+  const kind = Platform.isMobile
+    ? "Obsidian Mobile"
+    : Platform.isDesktopApp
+      ? "Obsidian Desktop"
+      : "Obsidian Web";
+  return `${kind} ${suffix}`;
+}
+
 // ---------- Plugin ----------
 
 export class IonSyncPlugin extends Plugin {
@@ -146,10 +163,19 @@ export class IonSyncPlugin extends Plugin {
     console.log(`[IonSync] plugin loaded — build ${BUILD}`);
     await this.loadSettings();
 
+    let identitySet = false;
     if (!this.settings.deviceId) {
       this.settings.deviceId = crypto.randomUUID();
-      await this.saveSettings();
+      identitySet = true;
     }
+    // Auto-assign a distinct default name on first run so every device is
+    // identifiable and unique in the dashboard (and the added-by/edited-by
+    // attribution) without the user having to name each one by hand.
+    if (!this.settings.deviceName) {
+      this.settings.deviceName = defaultDeviceName(this.settings.deviceId);
+      identitySet = true;
+    }
+    if (identitySet) await this.saveSettings();
 
     this.xSync = new XSync(this);
 
