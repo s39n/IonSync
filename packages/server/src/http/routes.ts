@@ -330,12 +330,18 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     // 5-second dashboard poll, which crawled on 20k–50k file vaults. Rows
     // predating v5 (size = -1) fall back to a one-off stat and heal on the
     // next upload.
+    // Resolve an attribution device id to its friendly name (set in the Devices
+    // panel), falling back to a short id, or null when unknown (pre-v7 rows).
+    const who = (id: string | null): string | null =>
+      id ? (ctx.db.getDeviceName(id) ?? id.slice(0, 8)) : null;
     const files = ctx.db.getFilesWithSize("active")
       .map(f => ({
         path: f.path,
         size: f.size >= 0 ? f.size : (ctx.storage.getSizeLatest(f.path) ?? 0),
         mtime: f.mtime,
         action: f.action,
+        createdBy: who(f.createdBy),
+        lastBy: who(f.lastBy),
       }));
     res.json(files);
   });

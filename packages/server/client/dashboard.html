@@ -1651,6 +1651,7 @@ function renderTreeNode(node, depth) {
       `<span class="tree-name">${escHtml(f._name)}</span>` +
       `<span class="tree-meta">${fmtSize(f.size)}</span>` +
       `<span class="tree-meta">${escHtml(fmtDate(f.mtime))}</span>` +
+      `<span class="tree-meta tree-attr">${fileAttribution(f)}</span>` +
       `<div class="tree-actions">` +
       `<button class="btn" data-action="open-preview" data-path="${escHtml(f.path)}">Preview</button>` +
       `<button class="btn" data-action="open-history" data-path="${escHtml(f.path)}">History</button>` +
@@ -1700,6 +1701,16 @@ function renderFileTree() {
   }
 
   el.innerHTML = renderTreeNode(buildFileTree(filtered), 0);
+}
+
+// Compact "who introduced / who last edited" label for a file row. Empty for
+// pre-attribution files (no recorded device). Names arrive already resolved
+// from /api/files (friendly device name, or a short id when unnamed).
+function fileAttribution(f) {
+  const parts = [];
+  if (f.createdBy) parts.push('added by ' + escHtml(f.createdBy));
+  if (f.lastBy && f.lastBy !== f.createdBy) parts.push('edited by ' + escHtml(f.lastBy));
+  return parts.join(' · ');
 }
 
 // Alias for legacy call sites
