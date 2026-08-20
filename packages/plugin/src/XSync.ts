@@ -150,6 +150,13 @@ export class XSync {
   // grace window is long enough to catch any platform cleanup burst.
   private _recentlyApplied = new Map<string, number>();
 
+  // Conflict copies minted during the current sync pass. Capped so a stale or
+  // diverged device can't mass-mint conflict copies on catch-up (the 2026-08-20
+  // web-client storm minted 300+). Reset at the start of each sync().
+  private _conflictMintsThisPass = 0;
+  private _conflictCapWarned = false;
+  private readonly MAX_CONFLICT_MINTS_PER_PASS = 20;
+
   // ── E2EE key cache ────────────────────────────────────────────────────────
   // PBKDF2 derivation is expensive (~100–200 ms).  Cache the derived key and
   // only re-derive when the password changes.
@@ -582,23 +589,49 @@ export class XSync {
           // producing a "conflict copy" that contains the server's content rather than
           // the local content we were trying to preserve (a phantom conflict).
           let capturedContent: string | ArrayBuffer | null = null;
+          let localSha: string | null = null;
           if (isBinary) {
             const buf = await this.storage.readBinary(file.path);
             capturedContent = buf;
-            if (buf && (await Utils.getSHABinary(buf)) === file.sha1) isSame = true;
+            localSha = buf ? ((await Utils.getSHABinary(buf)) ?? null) : null;
           } else {
             const txt = await this.storage.read(file.path);
             capturedContent = txt;
-            if (txt !== null && (await Utils.getSHA(txt)) === file.sha1) isSame = true;
+            localSha = txt !== null ? ((await Utils.getSHA(txt)) ?? null) : null;
           }
+          if (localSha !== null && localSha === file.sha1) isSame = true;
+
+          // Stale, not edited: the local content still equals what we last synced
+          // (localMeta.sha1) — only its *mtime* moved (the web client's storage
+          // bumps mtimes; re-encryption does too), which the mtime>metadata check
+          // above mistakes for an offline edit. This is NOT a real edit, so do
+          // not back it up — the (newer) incoming version simply wins. Without
+          // this, a device that fell behind while another device batch-edited
+          // many notes mints a conflict copy of EVERY stale note on catch-up
+          // (the 2026-08-20 web-client storm: 300+ junk copies of unchanged notes).
+          const localUnchangedSinceSync =
+            localMeta != null && localSha !== null && localSha === localMeta.sha1;
 
           // Hidden/config files (.obsidian/**) flap constantly between devices;
           // conflicted copies of them are junk that multiplies on every flap.
           // Let the incoming version win silently for those paths.
           const isConfigLike = file.path.startsWith(".") || file.path.includes("/.");
-          if (!isSame && !isConfigLike) {
-            this.plugin.log(`[Conflict] ${file.path} modified offline. Backing up.`);
-            await this._createConflictedCopy(file.path, capturedContent ?? undefined);
+          if (!isSame && !isConfigLike && !localUnchangedSinceSync) {
+            // Backstop cap: a genuine concurrent-edit backup is rare and small.
+            // A burst of many mints in one pass means the device is stale/diverged;
+            // stop minting (adopt the server version) and warn once, so a bad
+            // catch-up can never mass-produce conflict copies again.
+            if (this._conflictMintsThisPass >= this.MAX_CONFLICT_MINTS_PER_PASS) {
+              if (!this._conflictCapWarned) {
+                this._conflictCapWarned = true;
+                this.plugin.log(`[Conflict] mint cap (${this.MAX_CONFLICT_MINTS_PER_PASS}) reached — device looks stale/diverged; adopting server versions without more copies. Consider a reseed.`);
+                this.xNotify.showNotification(STATUS_WARN, "Sync: too many conflicts this pass — taking server versions. If this device is behind, reseed it.");
+              }
+            } else {
+              this._conflictMintsThisPass++;
+              this.plugin.log(`[Conflict] ${file.path} modified offline. Backing up.`);
+              await this._createConflictedCopy(file.path, capturedContent ?? undefined);
+            }
           }
 
           if (isSame) {
@@ -759,6 +792,8 @@ export class XSync {
   async sync(): Promise<void> {
     if (!this.ws.isConnected || this.isSyncing) return;
     this.isSyncing = true;
+    this._conflictMintsThisPass = 0; // reset the per-pass conflict-copy mint cap
+    this._conflictCapWarned = false;
     this._sessionHadApplyFailure = false; // clean slate for this session's under-fetch guard
     this.syncUpCount = 0;
     this.syncDownCount = 0;
