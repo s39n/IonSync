@@ -966,6 +966,24 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     res.json({ ok: true });
   });
 
+  // Restore a conflict's losing content as the file's CURRENT head and sync it
+  // to every device (broadcast). Marks the conflict resolved.
+  router.post("/api/conflict-restore", express.json(), (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const id = Number((req.body ?? {}).id);
+    const c = Number.isFinite(id) ? ctx.db.getConflict(id) : undefined;
+    if (!c) { res.status(404).json({ error: "Unknown conflict" }); return; }
+    const buf = ctx.storage.readLatest(`_conflicts/${c.id}`);
+    if (!buf) { res.status(404).json({ error: "Conflict content missing" }); return; }
+    const entry: FileEntry = { path: c.path, sha1: c.sha1, mtime: Date.now(), action: "active", fileType: "file" };
+    ctx.storage.write(c.path, entry.mtime, buf);
+    ctx.db.upsertFile(entry, buf.length, null);
+    ctx.db.resolveConflict(id);
+    broadcastToPeers(ctx, null, entry);
+    pushActivity(ctx, { kind: "upload", path: c.path });
+    res.json({ ok: true });
+  });
+
   router.get("/api/activity", (req, res) => {
     if (!checkAuth(req, res)) return;
     res.json([...ctx.activityLog].reverse());
