@@ -9,7 +9,7 @@ import { handleAuth } from "./handlers/auth.js";
 import { handleSync } from "./handlers/sync.js";
 import { handleSyncCursor } from "./handlers/syncCursor.js";
 import { handleFileEvent } from "./handlers/fileEvent.js";
-import { handleFileUpload, handleFileDownload } from "./handlers/fileData.js";
+import { handleFileUpload, handleFileDownload, handleConflictUpload } from "./handlers/fileData.js";
 import { handleFileHistory } from "./handlers/fileHistory.js";
 import { handleRename } from "./handlers/rename.js";
 import { handleVersionCheck } from "./handlers/versionCheck.js";
@@ -182,6 +182,9 @@ export function attachWebSocketServer(
           }
           else if (rawMsg.mode === "apply") {
             handleFileUpload(ctx, peer, rawMsg);
+          }
+          else if (rawMsg.mode === "conflict") {
+            handleConflictUpload(ctx, peer, rawMsg);
           }
           else {
             handleFileDownload(ctx, peer, rawMsg);

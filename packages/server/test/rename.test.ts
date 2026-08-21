@@ -96,15 +96,17 @@ describe("file_rename", () => {
     assert.equal(result.result, "structural_conflict");
     assert.equal(result.renamedTo, "notes/b.md");
 
-    const copyPush = await client.nextMsg<{ file: FileEntry; content: string }>(
-      (m) => (m as { type: string }).type === "file_push" && (m as { file: FileEntry }).file.path.includes("(Conflicted Copy")
-    );
-    assert.equal(copyPush.content, b64("bravo"));
+    // No copy file — the losing edit is a conflict record against the target.
+    assert.ok(!hasCopy(srv));
+    const cs = srv.ctx.db.listConflicts();
+    assert.equal(cs.length, 1);
+    assert.equal(cs[0]!.path, "notes/b.md");
+    assert.equal(cs[0]!.sha1, sha1("bravo"));
+    assert.equal(srv.ctx.storage.readLatest(`_conflicts/${cs[0]!.id}`)?.toString(), "bravo");
 
-    // Old path stays dead (never resurrected); target keeps A's content; edit preserved as a copy.
+    // Old path stays dead (never resurrected); target keeps A's content.
     assert.equal(srv.ctx.db.getFile("notes/a.md")?.action, "deleted");
     assert.equal(srv.ctx.db.getFile("notes/b.md")?.sha1, sha1("alpha"));
-    assert.equal(hasCopy(srv)?.sha1, sha1("bravo"));
 
     client.close();
     await srv.stop();
@@ -124,11 +126,7 @@ describe("file_rename", () => {
     // Rename based on the stale pre-edit head → structural conflict.
     client.send({ type: "file_rename", from: "notes/a.md", to: "notes/b.md", sha1: sha1("alpha"), mtime: 5000, baseSha1: sha1("alpha"), fileType: "file" });
 
-    const copyPush = await client.nextMsg<{ file: FileEntry; content: string }>(
-      (m) => (m as { type: string }).type === "file_push" && (m as { file: FileEntry }).file.path.includes("(Conflicted Copy")
-    );
-    assert.equal(copyPush.content, b64("bravo")); // the concurrent edit is preserved
-
+    // The concurrent edit is preserved as a conflict record (no copy file).
     const scResult = await client.nextMsg<{ path: string; result: string; renamedTo?: string }>(
       (m) => (m as { type: string }).type === "file_event_result" &&
              (m as { path: string }).path === "notes/a.md" &&
@@ -145,10 +143,15 @@ describe("file_rename", () => {
     client.send({ type: "file_data", mode: "apply", file: entry("notes/b.md", "alpha", 5000), content: b64("alpha") });
     await settle(client, "notes/b.md");
 
-    // Same final tree as the rename-first ordering: b.md = alpha, copy = bravo, a.md dead.
+    // Same final tree: b.md = alpha, a.md dead, concurrent edit (bravo) preserved
+    // as a conflict record rather than a copy file.
     assert.equal(srv.ctx.db.getFile("notes/a.md")?.action, "deleted");
     assert.equal(srv.ctx.db.getFile("notes/b.md")?.sha1, sha1("alpha"));
-    assert.equal(hasCopy(srv)?.sha1, sha1("bravo"));
+    assert.ok(!hasCopy(srv));
+    const cs2 = srv.ctx.db.listConflicts();
+    assert.equal(cs2.length, 1);
+    assert.equal(cs2[0]!.path, "notes/b.md");
+    assert.equal(cs2[0]!.sha1, sha1("bravo"));
 
     client.close();
     await srv.stop();

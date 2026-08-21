@@ -3,7 +3,7 @@ import type { SyncContext } from "../../context.js";
 import { pushActivity } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 import { broadcastToPeers } from "./sync.js";
-import { conflictCopyPath, isHiddenOrConfigPath } from "./fileData.js";
+import { isHiddenOrConfigPath, storeConflict } from "./fileData.js";
 
 /**
  * Client renamed/moved a path as one atomic operation (`file_rename`), instead
@@ -48,25 +48,9 @@ export function handleRename(ctx: SyncContext, peer: SyncPeer, msg: FileRenameMs
   //     (the current `from` head) as a conflicted copy of `to`, complete the
   //     rename, and pull the initiator's own `to` content to overwrite it.
   if (concurrent) {
-    const headBuf = ctx.storage.readLatest(from);
-    if (headBuf) {
-      const copyEntry: FileEntry = {
-        path: conflictCopyPath(to, peer.deviceId),
-        sha1: serverFrom.sha1,
-        mtime: serverFrom.mtime,
-        action: "active",
-        fileType: "file",
-      };
-      ctx.storage.write(copyEntry.path, copyEntry.mtime, headBuf);
-      ctx.db.upsertFile(copyEntry, headBuf.length);
-      peer.send({ type: "file_push", file: copyEntry, content: headBuf.toString("base64") });
-      broadcastToPeers(ctx, peer, copyEntry);
-      logWarn(
-        ctx,
-        `[Structural] ${peer.deviceId} renamed ${from}→${to} but ${from} was edited concurrently — preserved edit as ${copyEntry.path}`
-      );
-      pushActivity(ctx, { kind: "upload", deviceId: peer.deviceId ?? undefined, path: copyEntry.path });
-    }
+    // Preserve the concurrent edit (the current `from` head) as a conflict
+    // record against `to`, instead of a "(Conflicted Copy ...)" file.
+    storeConflict(ctx, peer, to, serverFrom.sha1, serverFrom.mtime, ctx.storage.readLatest(from));
     completeRename(ctx, from, to);
     broadcastDelete(ctx, peer, from);
     requestUpload(peer, to); // initiator uploads its `to` content (the renamed version)

@@ -1,4 +1,4 @@
-import type { FileDataUploadMsg, FileDataRequestMsg, FileEntry } from "@ionsync/protocol";
+import type { FileDataUploadMsg, FileDataRequestMsg, FileConflictMsg, FileEntry } from "@ionsync/protocol";
 import type { SyncContext } from "../../context.js";
 import { pushActivity } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
@@ -289,10 +289,35 @@ function advanceUploadQueue(peer: SyncPeer, path: string): void {
 }
 
 /**
- * A concurrent edit was detected: store the client's content as a
- * "(Conflicted Copy …)" file, notify the uploader, distribute the copy to all
- * peers, and re-push the server's current head of the original path so the
- * uploader converges. The server head is never overwritten.
+ * Preserve the LOSING side of a conflict as a reviewable server-side record
+ * instead of a "(Conflicted Copy …)" file: store its bytes under the dedicated
+ * storage key `_conflicts/<id>` (isolated from the file's version history, so it
+ * can never become `readLatest`) and index it in the `conflicts` table. The head
+ * is never touched and nothing is broadcast — no copy appears in any vault.
+ * Empty/no content is dropped (nothing worth preserving).
+ */
+export function storeConflict(
+  ctx: SyncContext,
+  peer: SyncPeer,
+  path: string,
+  sha1: string,
+  mtime: number,
+  buf: Buffer | null
+): void {
+  if (!buf || isEmptyUpload(buf)) {
+    logWarn(ctx, `[Conflict] ${peer.deviceId} conflict on ${path} with ${buf ? "empty" : "no"} content — head kept, nothing recorded`);
+    return;
+  }
+  const id = ctx.db.recordConflict(path, sha1, mtime, peer.deviceId ?? null);
+  ctx.storage.write(`_conflicts/${id}`, mtime, buf);
+  logWarn(ctx, `[Conflict] ${peer.deviceId} conflict on ${path} — recorded as conflict #${id} (${buf.length}b), head kept`);
+  pushActivity(ctx, { kind: "conflict", deviceId: peer.deviceId ?? undefined, path });
+}
+
+/**
+ * A concurrent edit was detected on an upload: preserve the client's (losing)
+ * content as a conflict record, tell the uploader, and re-push the server's
+ * current head so the uploader converges. The head is never overwritten.
  */
 function applyConflict(
   ctx: SyncContext,
@@ -300,31 +325,25 @@ function applyConflict(
   file: FileEntry,
   buf: Buffer | null
 ): void {
-  if (buf && !isEmptyUpload(buf)) {
-    const copyEntry: FileEntry = {
-      path: conflictCopyPath(file.path, peer.deviceId),
-      sha1: file.sha1,
-      mtime: file.mtime,
-      action: "active",
-      fileType: "file",
-    };
-    ctx.storage.write(copyEntry.path, copyEntry.mtime, buf);
-    ctx.db.upsertFile(copyEntry, buf.length, peer.deviceId ?? null);
-    // Uploader receives the copy directly; broadcastToPeers covers everyone else.
-    // Pass raw bytes — peer.send frames them (binary or base64) per peer caps.
-    peer.send({ type: "file_push", file: copyEntry, content: "", contentBytes: buf });
-    broadcastToPeers(ctx, peer, copyEntry);
-    logWarn(ctx, `[Conflict] ${peer.deviceId} uploaded ${file.path} from a stale base — stored as ${copyEntry.path}`);
-    pushActivity(ctx, { kind: "upload", deviceId: peer.deviceId ?? undefined, path: copyEntry.path });
-  } else {
-    // No content, or an EMPTY conflicting upload (a damaged/restored device
-    // re-uploading a truncated file). Nothing worth preserving — keep the server
-    // head and re-push it; do NOT mint an empty "(Conflicted Copy)" stub.
-    logWarn(ctx, `[Conflict] ${peer.deviceId} uploaded ${file.path} from a stale base with ${buf ? "empty" : "no"} content — server head kept, no copy`);
-  }
-
+  storeConflict(ctx, peer, file.path, file.sha1, file.mtime, buf);
   peer.send({ type: "file_event_result", path: file.path, result: "conflict" });
   pushHeadToUploader(ctx, peer, file.path);
+}
+
+/**
+ * Client is preserving its own losing side of a conflict (mode:"conflict") —
+ * the offline edit it made that the incoming server version beat. Record it;
+ * never touch the head or broadcast.
+ */
+export function handleConflictUpload(ctx: SyncContext, peer: SyncPeer, msg: FileConflictMsg): void {
+  const { file } = msg;
+  const hasBytes = msg.contentBytes !== undefined && msg.contentBytes.length > 0;
+  const buf = hasBytes
+    ? Buffer.from(msg.contentBytes!.buffer, msg.contentBytes!.byteOffset, msg.contentBytes!.byteLength)
+    : (msg.content ? Buffer.from(msg.content, "base64") : null);
+  storeConflict(ctx, peer, file.path, file.sha1, file.mtime, buf);
+  msg.content = "";
+  delete msg.contentBytes;
 }
 
 /**
@@ -364,23 +383,9 @@ function applyStructuralConflict(
     return;
   }
 
-  if (buf) {
-    const copyEntry: FileEntry = {
-      path: conflictCopyPath(renamedTo, peer.deviceId),
-      sha1: file.sha1,
-      mtime: file.mtime,
-      action: "active",
-      fileType: "file",
-    };
-    ctx.storage.write(copyEntry.path, copyEntry.mtime, buf);
-    ctx.db.upsertFile(copyEntry, buf.length, peer.deviceId ?? null);
-    peer.send({ type: "file_push", file: copyEntry, content: "", contentBytes: buf });
-    broadcastToPeers(ctx, peer, copyEntry);
-    logWarn(ctx, `[Structural] ${peer.deviceId} edited ${file.path} which was renamed to ${renamedTo} — stored edit as ${copyEntry.path}`);
-    pushActivity(ctx, { kind: "upload", deviceId: peer.deviceId ?? undefined, path: copyEntry.path });
-  } else {
-    logWarn(ctx, `[Structural] ${peer.deviceId} edited renamed path ${file.path} (no content) — target ${renamedTo} kept`);
-  }
+  // Preserve the losing edit as a conflict record against the rename TARGET
+  // (where the content now belongs), instead of a "(Conflicted Copy ...)" file.
+  storeConflict(ctx, peer, renamedTo, file.sha1, file.mtime, buf);
 
   peer.send({ type: "file_event_result", path: file.path, result: "structural_conflict", renamedTo });
   pushRenameConvergence(ctx, peer, file.path, renamedTo);

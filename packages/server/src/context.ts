@@ -6,7 +6,7 @@ import type { SyncPeer } from "./ws/peer.js";
 
 export interface ActivityEvent {
   ts: number;
-  kind: "upload" | "push" | "delete" | "connect" | "disconnect" | "rename";
+  kind: "upload" | "push" | "delete" | "connect" | "disconnect" | "rename" | "conflict";
   deviceId?: string | undefined;
   path?: string | undefined;
   detail?: string | undefined;

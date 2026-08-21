@@ -522,6 +522,7 @@
       <div class="nav-section">Storage</div>
       <button class="nav-btn" data-panel="files"><span class="icon">📁</span> Files</button>
       <button class="nav-btn" data-panel="dbmgr"><span class="icon">🗄️</span> Database</button>
+      <button class="nav-btn" data-panel="conflicts"><span class="icon">⚔️</span> Conflicts <span class="badge" id="conflicts-badge" style="display:none">0</span></button>
       <div class="nav-section">Debug</div>
       <button class="nav-btn" data-panel="logs"><span class="icon">📋</span> Logs</button>
       <div class="nav-section">Admin</div>
@@ -646,6 +647,22 @@
       </div>
 
       <!-- ── Logs ── -->
+      <!-- Conflicts -->
+      <div class="panel" id="panel-conflicts">
+        <div class="toolbar">
+          <h2 style="margin:0">Conflicts</h2>
+          <div class="spacer"></div>
+          <button class="btn" data-action="load-conflicts">↻ Refresh</button>
+        </div>
+        <p class="text-muted" style="font-size:12px;margin:4px 0 12px">
+          The losing side of each conflict, kept here for review instead of a copy file in your vault.
+          Enter your vault key in the Files panel to auto-decrypt previews.
+          <strong>Restore</strong> makes a version the file's current content and syncs it everywhere;
+          <strong>Dismiss</strong> discards it.
+        </p>
+        <div id="conflicts-list"><p class="text-muted" style="padding:12px">Loading…</p></div>
+      </div>
+
       <div class="panel" id="panel-logs">
         <div class="toolbar">
           <h2 style="margin:0">Server Logs</h2>
@@ -1794,6 +1811,7 @@ function showPanel(name) {
   // Load live data for overview and database panels
   if (name === 'overview') loadActivity();
   if (name === 'dbmgr') { dbLoadStats(); loadStorageChart(); }
+  if (name === 'conflicts') loadConflicts();
 }
 
 // ── Toast ──────────────────────────────────────────────────────────────────
@@ -2247,6 +2265,10 @@ const ACTIONS = {
   'db-load-devices':       () => dbLoadDevices(),
   'restore-deleted':       (el) => restoreDeleted(el),
   'clear-conflicts':       (el) => clearAllConflicts(el),
+  'load-conflicts':        () => loadConflicts(),
+  'conflict-view':         (el) => toggleConflictView(el.dataset.id),
+  'conflict-dismiss':      (el) => dismissConflict(el.dataset.id, el),
+  'conflict-restore':      (el) => restoreConflict(el.dataset.id, el),
   'reset-server':          (el) => resetServer(el),
   'preview-tab':           (el) => switchPreviewTab(el.dataset.tab),
   'db-restore-file':       (el) => dbRestoreFile(el.dataset.path, el),
@@ -2384,6 +2406,79 @@ async function e2eeDecryptB64(b64, pw) {
   const key = await e2eeDeriveKey(pw, version);
   return crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.slice(8, 20) }, key, raw.slice(20));
 }
+
+// -- Conflicts panel (reviewable records, not copy files) --------------------
+let conflictsCache = [];
+async function loadConflicts() {
+  const el = document.getElementById('conflicts-list');
+  try { const r = await api('/api/conflicts'); conflictsCache = await r.json(); }
+  catch (e) { el.innerHTML = `<p style="color:var(--red);padding:12px">Failed to load: ${escHtml(e.message)}</p>`; return; }
+  renderConflicts(); updateConflictsBadge();
+}
+function updateConflictsBadge() {
+  const b = document.getElementById('conflicts-badge'); if (!b) return;
+  const n = conflictsCache.length; b.textContent = n; b.style.display = n ? '' : 'none';
+}
+function renderConflicts() {
+  const el = document.getElementById('conflicts-list');
+  if (!conflictsCache.length) { el.innerHTML = `<p class="text-muted" style="padding:16px">No conflicts — every edit converged cleanly.</p>`; return; }
+  el.innerHTML = conflictsCache.map(c => {
+    const who = c.deviceName ? escHtml(c.deviceName) : (c.deviceId ? escHtml(String(c.deviceId).slice(0,8)) : 'unknown');
+    return `<div class="card" style="margin-bottom:8px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(c.path)}">${escHtml(c.path)}</div>
+          <div style="font-size:11px;color:var(--muted)">from ${who} · ${escHtml(fmtDate(c.createdAt))}</div>
+        </div>
+        <button class="btn" style="font-size:11px" data-action="conflict-view" data-id="${c.id}">View</button>
+        <button class="btn primary" style="font-size:11px" data-action="conflict-restore" data-id="${c.id}" title="Make this the file's current content, synced to all devices">Restore</button>
+        <button class="btn danger" style="font-size:11px" data-action="conflict-dismiss" data-id="${c.id}" title="Discard this conflict version">Dismiss</button>
+      </div>
+      <div id="conflict-body-${c.id}" style="display:none;margin-top:8px"></div>
+    </div>`;
+  }).join('');
+}
+async function toggleConflictView(id) {
+  const body = document.getElementById('conflict-body-' + id); if (!body) return;
+  if (body.style.display !== 'none') { body.style.display = 'none'; return; }
+  body.style.display = ''; body.innerHTML = '<span class="text-muted" style="font-size:12px">Loading…</span>';
+  try {
+    const r = await api('/api/conflict-content?id=' + encodeURIComponent(id));
+    const data = await r.json();
+    let text;
+    if (data.encrypted) {
+      const pw = sessionStorage.getItem('e2ee-pw') || '';
+      if (pw && crypto?.subtle) {
+        try { text = new TextDecoder('utf-8', { fatal: true }).decode(await e2eeDecryptB64(data.content, pw)); }
+        catch { text = '🔒 Encrypted — enter the correct vault key in the Files panel to decrypt.'; }
+      } else { text = '🔒 Encrypted — enter your vault key in the Files panel to decrypt.'; }
+    } else {
+      const bytes = Uint8Array.from(atob(data.content), ch => ch.charCodeAt(0));
+      try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+      catch { text = '[Binary content — cannot display as text]'; }
+    }
+    body.innerHTML = `<pre style="white-space:pre-wrap;word-break:break-word;max-height:300px;overflow:auto;background:rgba(127,127,127,0.12);padding:10px;border-radius:6px;font-size:12px;margin:0">${escHtml(text)}</pre>`;
+  } catch (e) { body.innerHTML = `<span style="color:var(--red);font-size:12px">Failed: ${escHtml(e.message)}</span>`; }
+}
+async function dismissConflict(id, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await api('/api/conflict-resolve', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ id: Number(id) }) });
+    conflictsCache = conflictsCache.filter(c => String(c.id) !== String(id)); renderConflicts(); updateConflictsBadge();
+    toast('Conflict dismissed');
+  } catch (e) { toast('Failed: ' + e.message); if (btn) btn.disabled = false; }
+}
+async function restoreConflict(id, btn) {
+  const c = conflictsCache.find(x => String(x.id) === String(id));
+  if (!confirm(`Restore this version as the current content of:\n${c ? c.path : id}\n\nThis overwrites the file everywhere it syncs.`)) return;
+  if (btn) btn.disabled = true;
+  try {
+    await api('/api/conflict-restore', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ id: Number(id) }) });
+    conflictsCache = conflictsCache.filter(x => String(x.id) !== String(id)); renderConflicts(); updateConflictsBadge();
+    toast('Restored — the file now holds this version');
+  } catch (e) { toast('Failed: ' + e.message); if (btn) btn.disabled = false; }
+}
+
 
 let previewCurrentPath = '';
 let previewCurrentB64 = '';   // raw base64 from server (may be encrypted)
