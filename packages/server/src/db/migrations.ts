@@ -132,6 +132,29 @@ export const MIGRATIONS: Array<{ version: number; up: (db: Database.Database) =>
       `);
     },
   },
+  {
+    version: 8,
+    up(db) {
+      // Conflicts as reviewable records instead of "(Conflicted Copy …)" files.
+      // The losing side of a conflict is stored server-side (blob under the
+      // storage key `_conflicts/<id>`) and indexed here — the vault head is never
+      // touched and no copy file is created on any device. `resolved` flips when
+      // the user dismisses/restores it from the dashboard Conflicts panel.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS conflicts (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          path        TEXT    NOT NULL,
+          sha1        TEXT    NOT NULL,
+          mtime       INTEGER NOT NULL,
+          device_id   TEXT,
+          created_at  INTEGER NOT NULL,
+          resolved    INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_conflicts_resolved ON conflicts (resolved);
+        CREATE INDEX IF NOT EXISTS idx_conflicts_path ON conflicts (path);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

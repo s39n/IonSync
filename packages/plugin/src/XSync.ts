@@ -382,7 +382,7 @@ export class XSync {
           // which arrives via file_push along with the server's head version.
           this.plugin.log(`[Conflict] ${msg.path} was edited elsewhere — local edits saved as a conflicted copy`);
           this.addActivity("down", msg.path);
-          this.xNotify.showNotification(STATUS_WARN, `Sync conflict: ${msg.path} — your edits were saved as a conflicted copy`);
+          this.xNotify.showNotification(STATUS_WARN, `Sync conflict: ${msg.path} — your edits were saved to Conflicts on the server for review`);
         }
         else if (msg.result === "structural_conflict") {
           // The path was renamed/moved on another device while we edited it. The
@@ -391,7 +391,7 @@ export class XSync {
           const target = (msg as { renamedTo?: string }).renamedTo ?? "the new location";
           this.plugin.log(`[Conflict] ${msg.path} was renamed to ${target} while edited here — edit saved as a conflicted copy`);
           this.addActivity("down", msg.path);
-          this.xNotify.showNotification(STATUS_WARN, `Sync conflict: ${msg.path} was moved to ${target} — your edits were saved as a conflicted copy`);
+          this.xNotify.showNotification(STATUS_WARN, `Sync conflict: ${msg.path} was moved to ${target} — your edits were saved to Conflicts on the server for review`);
         }
         break;
       case "file_push": {
@@ -630,7 +630,7 @@ export class XSync {
             } else {
               this._conflictMintsThisPass++;
               this.plugin.log(`[Conflict] ${file.path} modified offline. Backing up.`);
-              await this._createConflictedCopy(file.path, capturedContent ?? undefined);
+              await this._createConflictedCopy(file.path, localSha ?? "", capturedContent ?? undefined, localStat.mtime);
             }
           }
 
@@ -751,40 +751,33 @@ export class XSync {
    * and this function, which would cause the conflict copy to contain the
    * server's content rather than the local edits we're trying to preserve.
    */
-  private async _createConflictedCopy(originalPath: string, capturedContent?: string | ArrayBuffer): Promise<void> {
-    const date = new Date();
-    const ts = date.toISOString().replace(/[:.]/g, "-").slice(0, 16);
-    // Extension = dot inside the basename only (not folder dots, not a leading dot).
-    const lastSlash = originalPath.lastIndexOf("/");
-    const lastDot = originalPath.lastIndexOf(".");
-    const hasExt = lastDot > lastSlash + 1;
-    // Strip any existing "(Conflicted Copy …)" suffixes so a conflict on a
-    // conflict copy names back to the original — suffixes must never stack
-    // (stacked names exceeded the filesystem name limit in production, July 2026).
-    const pathNoExt = (hasExt ? originalPath.slice(0, lastDot) : originalPath)
-      .replace(/ \(Conflicted Copy [^()/]*\)/g, "");
-    const ext = hasExt ? originalPath.slice(lastDot) : "";
-    const suffix = ` (Conflicted Copy ${ts})${ext}`;
-    // Backstop: keep the final path component under ~200 chars.
-    const slash = pathNoExt.lastIndexOf("/");
-    const dir = pathNoExt.slice(0, slash + 1);
-    let stem = pathNoExt.slice(slash + 1);
-    const maxStem = 200 - suffix.length;
-    if (stem.length > maxStem) stem = stem.slice(0, Math.max(1, maxStem));
-    const newPath = `${dir}${stem}${suffix}`;
-
+  private async _createConflictedCopy(
+    originalPath: string,
+    localSha: string,
+    capturedContent?: string | ArrayBuffer,
+    mtime: number = Date.now()
+  ): Promise<void> {
+    // Preserve the local (losing) side of a conflict by uploading it to the
+    // server as a reviewable conflict record (mode:"conflict"). The incoming
+    // (winning) version is written locally by the caller afterward. No
+    // "(Conflicted Copy).md" is created in the vault — conflicts live on the
+    // server and are reviewed from the dashboard Conflicts panel.
+    if (capturedContent == null) return;
+    const e2eeKey = await this._getEncryptionKey();
+    let contentBytes: Uint8Array | undefined;
     if (Utils.isBinary(originalPath)) {
-      const buf = capturedContent instanceof ArrayBuffer
-        ? capturedContent
-        : await this.storage.readBinary(originalPath);
-      if (buf) await this.plugin.app.vault.adapter.writeBinary(newPath, buf);
+      const buf = capturedContent instanceof ArrayBuffer ? capturedContent : null;
+      if (!buf) return;
+      contentBytes = e2eeKey ? await encryptToBytes(e2eeKey, buf) : new Uint8Array(buf);
     } else {
-      const txt = typeof capturedContent === "string"
-        ? capturedContent
-        : await this.storage.read(originalPath);
-      if (txt !== null) await this.plugin.app.vault.adapter.write(newPath, txt);
+      const txt = typeof capturedContent === "string" ? capturedContent : null;
+      if (txt === null) return;
+      const bytes = new TextEncoder().encode(txt);
+      contentBytes = e2eeKey ? await encryptToBytes(e2eeKey, bytes) : bytes;
     }
-    this.xNotify.showNotification("#ff9800", `Conflict saved: ${newPath}`);
+    const entry: FileEntry = { path: originalPath, sha1: localSha, mtime, action: "active", fileType: "file" };
+    this.ws.send({ type: "file_data", mode: "conflict", file: entry, content: "", ...(contentBytes ? { contentBytes } : {}) });
+    this.addActivity("up", `conflict: ${originalPath}`);
   }
 
   // ── Sync Engine ───────────────────────────────────────────────────────────

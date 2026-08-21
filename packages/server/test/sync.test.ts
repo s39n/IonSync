@@ -332,27 +332,22 @@ describe("conflict resolution (baseSha1)", () => {
     );
     assert.equal(result.result, "conflict");
 
-    // The conflicted copy is pushed back to the uploader with the rejected content…
-    const copyPush = await client.nextMsg<{ type: string; file: FileEntry; content: string }>(
-      (m) => (m as { type: string }).type === "file_push" &&
-             (m as { file: FileEntry }).file.path.includes("(Conflicted Copy")
-    );
-    assert.equal(copyPush.content, V3.b64);
-    assert.equal(copyPush.file.sha1, V3.sha1);
-
-    // …and the server re-pushes its head so the uploader converges.
+    // The server re-pushes its head so the uploader converges.
     const headPush = await client.nextMsg<{ type: string; file: FileEntry; content: string }>(
       (m) => (m as { type: string }).type === "file_push" &&
              (m as { file: FileEntry }).file.path === PATH
     );
     assert.equal(headPush.content, V2.b64);
 
-    // Server head untouched; copy registered in the DB.
+    // Server head untouched; NO copy file — the losing edit (V3) is kept as a
+    // reviewable conflict record instead.
     assert.equal(srv.ctx.db.getFile(PATH)?.sha1, V2.sha1);
-    const copy = srv.ctx.db.getAllFiles().find((f) => f.path.includes("(Conflicted Copy"));
-    assert.ok(copy);
-    assert.equal(copy?.sha1, V3.sha1);
-    assert.equal(copy?.action, "active");
+    assert.ok(!srv.ctx.db.getAllFiles().some((f) => f.path.includes("(Conflicted Copy")));
+    const cs = srv.ctx.db.listConflicts();
+    assert.equal(cs.length, 1);
+    assert.equal(cs[0]!.path, PATH);
+    assert.equal(cs[0]!.sha1, V3.sha1);
+    assert.equal(srv.ctx.storage.readLatest(`_conflicts/${cs[0]!.id}`)?.toString("base64"), V3.b64);
 
     client.close();
     await srv.stop();
@@ -406,7 +401,7 @@ describe("conflict resolution (baseSha1)", () => {
 });
 
 describe("conflict copies for binary paths", () => {
-  it("keeps the extension so peers route the copy through binary handling", async () => {
+  it("records a conflict for a binary path (no copy file)", async () => {
     const srv = await startTestServer();
     const client = connectClient(srv.port);
     await waitForOpen(client);
@@ -426,14 +421,19 @@ describe("conflict copies for binary paths", () => {
     client.send({ type: "file_history", path: PATH });
     await client.nextMsg((m) => (m as { type: string }).type === "file_history_response");
 
-    // Stale base → conflict; copy must stay inside assets.v2/ and end in .png.
+    // Stale base → conflict; the losing edit is recorded against the original
+    // binary path (no copy file is created).
     client.send({ type: "file_data", mode: "apply", file: entry(V3.sha1, 3000), content: V3.b64, baseSha1: V1.sha1 });
-    const copyPush = await client.nextMsg<{ type: string; file: FileEntry; content: string }>(
-      (m) => (m as { type: string }).type === "file_push" &&
-             (m as { file: FileEntry }).file.path.includes("(Conflicted Copy")
+    const result = await client.nextMsg<{ type: string; path: string; result: string }>(
+      (m) => (m as { type: string }).type === "file_event_result" && (m as { path: string }).path === PATH
     );
-    assert.match(copyPush.file.path, /^assets\.v2\/photo \(Conflicted Copy [^/]+\)\.png$/);
-    assert.equal(copyPush.content, V3.b64);
+    assert.equal(result.result, "conflict");
+    assert.ok(!srv.ctx.db.getAllFiles().some((f) => f.path.includes("(Conflicted Copy")));
+    const cs = srv.ctx.db.listConflicts();
+    assert.equal(cs.length, 1);
+    assert.equal(cs[0]!.path, PATH);
+    assert.equal(cs[0]!.sha1, V3.sha1);
+    assert.equal(srv.ctx.storage.readLatest(`_conflicts/${cs[0]!.id}`)?.toString("base64"), V3.b64);
 
     client.close();
     await srv.stop();

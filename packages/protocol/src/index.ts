@@ -103,6 +103,23 @@ export interface FileDataRequestMsg {
   mtime?: number;
 }
 
+/**
+ * Client preserving the LOSING side of a conflict. Instead of minting a
+ * "(Conflicted Copy …)" file in the vault, the losing content is uploaded here
+ * and stored server-side as a reviewable conflict record — the head is never
+ * touched and nothing is broadcast. `file.path` is the original note; `file.sha1`
+ * and `file.mtime` describe the losing content.
+ */
+export interface FileConflictMsg {
+  type: "file_data";
+  mode: "conflict";
+  file: FileEntry;
+  /** base64-encoded losing content (empty when contentBytes is used). */
+  content: string;
+  /** Raw losing bytes on the binary-frame path (see FileDataUploadMsg.contentBytes). */
+  contentBytes?: Uint8Array;
+}
+
 export interface FileHistoryRequestMsg {
   type: "file_history";
   path: string;
@@ -185,6 +202,7 @@ export type ClientMsg =
   | FileEventMsg
   | FileDataUploadMsg
   | FileDataRequestMsg
+  | FileConflictMsg
   | FileHistoryRequestMsg
   | FileRenameMsg
   | VerifyRequestMsg

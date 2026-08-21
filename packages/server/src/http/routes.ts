@@ -936,6 +936,36 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
 
   // ── Activity feed ─────────────────────────────────────────────────────────
   // Returns the last 100 structured activity events, newest-first.
+  // ── Conflicts (reviewable records, in place of copy files) ────────────
+  router.get("/api/conflicts", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const includeResolved = String(req.query.all ?? "") === "1";
+    const list = ctx.db.listConflicts(includeResolved).map(c => ({
+      ...c,
+      deviceName: c.deviceId ? (ctx.db.getDeviceName(c.deviceId) ?? c.deviceId.slice(0, 8)) : null,
+    }));
+    res.json(list);
+  });
+
+  // Losing content of one conflict (base64; decrypt client-side for E2EE).
+  router.get("/api/conflict-content", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const id = Number(req.query.id);
+    const c = Number.isFinite(id) ? ctx.db.getConflict(id) : undefined;
+    if (!c) { res.status(404).json({ error: "Unknown conflict" }); return; }
+    const buf = ctx.storage.readLatest(`_conflicts/${c.id}`);
+    res.json({ id: c.id, path: c.path, mtime: c.mtime, content: buf ? buf.toString("base64") : "", encrypted: buf ? isE2eeEncrypted(buf) : false });
+  });
+
+  // Dismiss a conflict (mark resolved). Head is unaffected.
+  router.post("/api/conflict-resolve", express.json(), (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const id = Number((req.body ?? {}).id);
+    if (!Number.isFinite(id)) { res.status(400).json({ error: "Missing id" }); return; }
+    ctx.db.resolveConflict(id);
+    res.json({ ok: true });
+  });
+
   router.get("/api/activity", (req, res) => {
     if (!checkAuth(req, res)) return;
     res.json([...ctx.activityLog].reverse());

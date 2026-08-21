@@ -40,6 +40,34 @@ interface DbDeviceRow {
   synced_seq: number;
 }
 
+interface DbConflictRow {
+  id: number;
+  path: string;
+  sha1: string;
+  mtime: number;
+  device_id: string | null;
+  created_at: number;
+  resolved: number;
+}
+
+/** A recorded conflict (the losing side of an edit) awaiting review. */
+export interface ConflictRecord {
+  id: number;
+  path: string;
+  sha1: string;
+  mtime: number;
+  deviceId: string | null;
+  createdAt: number;
+  resolved: boolean;
+}
+
+function rowToConflict(r: DbConflictRow): ConflictRecord {
+  return {
+    id: r.id, path: r.path, sha1: r.sha1, mtime: r.mtime,
+    deviceId: r.device_id ?? null, createdAt: r.created_at, resolved: !!r.resolved,
+  };
+}
+
 function rowToFileEntry(row: DbFileRow): FileEntry {
   return {
     path: row.path,
@@ -314,6 +342,38 @@ export class SyncDB {
          )`
       )
       .run(filePath, filePath, keepCount);
+  }
+
+  // ─── Conflicts ─────────────────────────────────────────────────────────────
+
+  /** Record the losing side of a conflict. Returns the new conflict id, which
+   *  doubles as the storage key (`_conflicts/<id>`) for its content blob. */
+  recordConflict(path: string, sha1: string, mtime: number, deviceId: string | null): number {
+    const info = this.db
+      .prepare<[string, string, number, string | null, number]>(
+        `INSERT INTO conflicts (path, sha1, mtime, device_id, created_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(path, sha1, mtime, deviceId, Date.now());
+    return Number(info.lastInsertRowid);
+  }
+
+  /** List conflicts, newest first. Unresolved only unless includeResolved. */
+  listConflicts(includeResolved = false): ConflictRecord[] {
+    const rows = includeResolved
+      ? this.db.prepare<[], DbConflictRow>("SELECT * FROM conflicts ORDER BY created_at DESC").all()
+      : this.db.prepare<[], DbConflictRow>("SELECT * FROM conflicts WHERE resolved = 0 ORDER BY created_at DESC").all();
+    return rows.map(rowToConflict);
+  }
+
+  getConflict(id: number): ConflictRecord | undefined {
+    const r = this.db.prepare<[number], DbConflictRow>("SELECT * FROM conflicts WHERE id = ?").get(id);
+    return r ? rowToConflict(r) : undefined;
+  }
+
+  /** Mark a conflict resolved (dismissed or restored). */
+  resolveConflict(id: number): void {
+    this.db.prepare<[number]>("UPDATE conflicts SET resolved = 1 WHERE id = ?").run(id);
   }
 
   /**
