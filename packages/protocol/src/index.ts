@@ -422,5 +422,38 @@ export function cascadeDeleteExceedsSafetyCap(childCount: number, vaultSize: num
   return false;
 }
 
+/**
+ * Offline-delete reconciliation (sync-audit gap S4). Given the device's synced
+ * metadata and the set of paths actually present on disk *after a fully drained
+ * download*, return the active files that were deleted while this device was
+ * offline: present in metadata as an active file, absent from disk, and not
+ * excluded (config / .obsidian). Such deletes never flow through live vault
+ * events, so without propagating them the server keeps the files active and
+ * resurrects them on the next reconnect.
+ *
+ * Pure and conservative by construction:
+ *  - Returns only a SUBSET of `metadata` keys — it can never invent a path.
+ *  - Returns [] when `onDiskPaths` is empty: an empty snapshot means the scan
+ *    did not run or the vault is unavailable, never "delete everything".
+ * The caller must still gate the result through `cascadeDeleteExceedsSafetyCap`
+ * (so an unmounted vault cannot mass-delete) and re-stat each path before it
+ * sends the delete (a transiently-evicted file may reappear on disk).
+ */
+export function computeOfflineDeletes(
+  metadata: Record<string, Pick<FileEntry, "action" | "fileType" | "sha1"> | undefined>,
+  onDiskPaths: ReadonlySet<string>,
+  isExcluded: (path: string) => boolean = () => false
+): string[] {
+  if (onDiskPaths.size === 0) return [];
+  const missing: string[] = [];
+  for (const [path, meta] of Object.entries(metadata)) {
+    if (!meta || meta.action !== "active" || meta.fileType !== "file") continue;
+    if (onDiskPaths.has(path)) continue;
+    if (isExcluded(path)) continue;
+    missing.push(path);
+  }
+  return missing;
+}
+
 // ─── Binary-frame wire codec ────────────────────────────────────────────────
 export { encodeFrame, decodeFrame, canBinaryFrame, BINARY_FRAMES_CAP } from "./wire.js";
