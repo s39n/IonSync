@@ -63,6 +63,13 @@ bootstrap instead of falsely reporting "synced." These three were the direct
 causes of your incident and are now fixed + tested.
 
 ### ⚠️ S4 — Cold device that *deleted* files while offline  → **files resurrect**
+> **UPDATE (2026-08):** Addressed. The client now runs a bounded offline-delete
+> reconciliation after a fully-drained download (`computeOfflineDeletes` in
+> `@ionsync/protocol` + `XSync._reconcileOfflineDeletes`): files active in local
+> metadata but absent from disk after the download are propagated as deletes,
+> gated by the same cascade safety cap and the per-path re-stat in
+> `_processDeleteQueue`. The original analysis follows.
+
 This is the biggest remaining correctness gap, and it's by design today. Deletes
 only propagate through *live* vault events. If you delete notes on a device
 that's offline (or the plugin is disabled), those deletions are **never sent**.

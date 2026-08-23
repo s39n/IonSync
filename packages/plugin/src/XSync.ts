@@ -1,5 +1,5 @@
 import type { FileEntry, ServerMsg } from "@ionsync/protocol";
-import { collectFolderChildren, cascadeDeleteExceedsSafetyCap } from "@ionsync/protocol";
+import { collectFolderChildren, cascadeDeleteExceedsSafetyCap, computeOfflineDeletes } from "@ionsync/protocol";
 import { Platform, type TAbstractFile } from "obsidian";
 import { WsManager, type UpdateInfo } from "./WsManager.js";
 import { Storage } from "./Storage.js";
@@ -876,7 +876,12 @@ export class XSync {
     // UPLOAD direction: only reconcile uploads once the DOWNLOAD is fully applied.
     // If a file failed this batch (complete === false) the cursor is frozen at the
     // last good file; uploading now would race an incomplete vault.
+    // Capture whether this pass performs the once-per-app-load disk scan. The
+    // offline-delete reconciliation below reuses that fresh snapshot and must
+    // never run without it (a stale/empty tree would look like a mass delete).
+    let didOfflineScan = false;
     if (complete) {
+      didOfflineScan = this._needsFullReconcile;
       // now that server changes are applied and metadata reflects them, scan the
       // vault and upload only paths whose content genuinely differs.
       await this._reconcileUploads();
@@ -905,6 +910,16 @@ export class XSync {
     // path strings in memory indefinitely on devices with large vaults.
     if (wasFirstSync) {
       setTimeout(() => { this._recentlyApplied.clear(); }, 65_000);
+    }
+
+    // Offline-delete reconciliation (sync-audit gap S4): a file still active in
+    // our synced metadata but gone from disk after a COMPLETE download was
+    // deleted while this device was offline. Propagate it — otherwise the server
+    // keeps it active and resurrects it. Gated on a fresh full scan so a
+    // not-yet-downloaded file is never mistaken for a delete; the queued deletes
+    // drain through the re-stat guard in _processDeleteQueue just below.
+    if (complete && !wasFirstSync && didOfflineScan) {
+      await this._reconcileOfflineDeletes();
     }
 
     // Drain any offline delete-queue entries that accumulated while disconnected.
@@ -1162,6 +1177,55 @@ export class XSync {
       try { await this._uploadFile(path); }
       catch (e) { this.plugin.log(`[IonSync] reconcile upload failed for ${path}: ${e}`); }
     }
+  }
+
+  /**
+   * Offline-delete reconciliation (sync-audit gap S4). After a COMPLETE download
+   * the server's active set has been applied and storage.tree (built by
+   * _reconcileUploads this pass) is an authoritative snapshot of what is on disk.
+   * A file still active in our synced metadata but no longer on disk was deleted
+   * while this device was offline — the delete never went through a live vault
+   * event, so the server still has it active and would push it back. Queue those
+   * as deletes; _processDeleteQueue re-stats each path (dropping any that turn
+   * out to still exist) before it tells the server.
+   *
+   * Only ever invoked with `complete && !wasFirstSync && didOfflineScan`, so the
+   * snapshot is fresh and the download fully applied. The cascade safety cap
+   * refuses to act when an implausible fraction of the vault looks deleted (e.g.
+   * the vault folder is unmounted): the files stay on the server, nothing lost.
+   */
+  private async _reconcileOfflineDeletes(): Promise<void> {
+    if (!this.ws.isConnected) return;
+    const onDisk = new Set(Object.keys(this.storage.tree));
+    if (onDisk.size === 0) return; // no fresh scan / vault unavailable — never delete
+    const allMeta = this.storage.getAllMetadata();
+    const total = Object.keys(allMeta).length;
+    const candidates = computeOfflineDeletes(
+      allMeta,
+      onDisk,
+      (p) => this.exclusionFilter?.isExcluded(p) ?? false
+    ).filter((p) => !(p in this.deleteQueue)); // don't double-queue a live delete
+    if (candidates.length === 0) return;
+    if (cascadeDeleteExceedsSafetyCap(candidates.length, total)) {
+      this.plugin.log(
+        `[IonSync] SAFETY: offline-delete reconcile would remove ${candidates.length} of ${total} ` +
+        `tracked files — refusing (vault may be unmounted or metadata glitched). ` +
+        `No deletes sent; the files stay on the server.`
+      );
+      return;
+    }
+    this.plugin.log(
+      `[IonSync] Offline-delete reconcile: ${candidates.length} file(s) deleted while offline — ` +
+      `propagating: ${candidates.slice(0, 3).join(", ")}${candidates.length > 3 ? " ..." : ""}`
+    );
+    for (const path of candidates) {
+      const meta = allMeta[path];
+      this.deleteQueue[path] = {
+        metadata: { action: "deleted", sha1: meta?.sha1 ?? "", mtime: Date.now(), fileType: "file" },
+        timestamp: Date.now(),
+      };
+    }
+    await this.storage.saveDeleteQueue(this.deleteQueue);
   }
 
   private async _uploadFile(path: string): Promise<void> {
