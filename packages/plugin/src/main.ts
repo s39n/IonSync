@@ -222,6 +222,16 @@ export class IonSyncPlugin extends Plugin {
       },
     });
 
+    // Command palette — review/resolve sync conflicts from inside Obsidian.
+    this.addCommand({
+      id: "show-conflicts",
+      name: "Show sync conflicts",
+      callback: () => {
+        const { ConflictsModal } = require("./modals/index.js") as typeof import("./modals/index.js");
+        new ConflictsModal(this).open();
+      },
+    });
+
     // Right-click a file in the explorer / tab header → Version history.
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {

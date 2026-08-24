@@ -74,7 +74,7 @@ export class XNotify {
 
   private showMenu(evt: MouseEvent): void {
     // Dynamic import to avoid circular references at module load time
-    const { VersionHistoryModal, FilesHistoryModal, ActivityLogModal } = require("./modals/index.js") as typeof import("./modals/index.js");
+    const { VersionHistoryModal, FilesHistoryModal, ActivityLogModal, ConflictsModal } = require("./modals/index.js") as typeof import("./modals/index.js");
     const menu = new Menu();
     const plugin = this.xSync.plugin;
     const connected = this.xSync.ws.isConnected;
@@ -120,6 +120,9 @@ export class XNotify {
     );
     menu.addItem((i) =>
       i.setTitle("Activity Log").setIcon("list").onClick(() => { new ActivityLogModal(plugin).open(); })
+    );
+    menu.addItem((i) =>
+      i.setTitle("Conflicts").setIcon("swords").onClick(() => { new ConflictsModal(plugin).open(); })
     );
     menu.addSeparator();
     menu.addItem((i) =>
