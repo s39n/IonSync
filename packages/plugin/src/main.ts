@@ -142,9 +142,15 @@ const DEFAULT_SETTINGS: PluginSettings = {
  */
 function defaultDeviceName(deviceId: string): string {
   const suffix = deviceId.replace(/-/g, "").slice(0, 4) || "0000";
+  // ObsidianWeb serves the DESKTOP build of Obsidian in a browser, so
+  // Platform.isDesktopApp is hard-coded true there and every web device would
+  // mislabel as "Obsidian Desktop". The web host injects window.__obsidianWeb at
+  // boot (with the vault id) — a global real Obsidian never has — so use it to
+  // tell an in-browser web client apart from a genuine desktop app.
+  const isObsidianWeb = typeof window !== "undefined" && !!(window as { __obsidianWeb?: unknown }).__obsidianWeb;
   const kind = Platform.isMobile
     ? "Obsidian Mobile"
-    : Platform.isDesktopApp
+    : (Platform.isDesktopApp && !isObsidianWeb)
       ? "Obsidian Desktop"
       : "Obsidian Web";
   return `${kind} ${suffix}`;
