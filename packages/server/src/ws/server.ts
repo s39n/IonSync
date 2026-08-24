@@ -11,6 +11,12 @@ import { handleSyncCursor } from "./handlers/syncCursor.js";
 import { handleFileEvent } from "./handlers/fileEvent.js";
 import { handleFileUpload, handleFileDownload, handleConflictUpload } from "./handlers/fileData.js";
 import { handleFileHistory } from "./handlers/fileHistory.js";
+import {
+  handleConflictList,
+  handleConflictContent,
+  handleConflictResolve,
+  handleConflictRestore,
+} from "./handlers/conflicts.js";
 import { handleRename } from "./handlers/rename.js";
 import { handleVersionCheck } from "./handlers/versionCheck.js";
 import { handleVerifyRequest, handleVerifyMissing } from "./handlers/verify.js";
@@ -193,6 +199,18 @@ export function attachWebSocketServer(
         }
         case "file_history":
           handleFileHistory(ctx, peer, msg);
+          break;
+        case "conflict_list":
+          handleConflictList(ctx, peer, msg);
+          break;
+        case "conflict_content":
+          handleConflictContent(ctx, peer, msg);
+          break;
+        case "conflict_resolve":
+          handleConflictResolve(ctx, peer, msg);
+          break;
+        case "conflict_restore":
+          handleConflictRestore(ctx, peer, msg);
           break;
         case "file_rename":
           handleRename(ctx, peer, msg);

@@ -125,6 +125,34 @@ export interface FileHistoryRequestMsg {
   path: string;
 }
 
+// ─── Conflict management (client ↔ server) ──────────────────────────────────
+// Lets a plugin review and act on the server-side conflict records (the losing
+// sides of conflicts, stored instead of "(Conflicted Copy …)" files) without
+// opening the web dashboard.
+
+/** Ask for the list of unresolved conflicts. */
+export interface ConflictListRequestMsg {
+  type: "conflict_list";
+}
+
+/** Ask for the losing content of one conflict (base64; decrypt client-side). */
+export interface ConflictContentRequestMsg {
+  type: "conflict_content";
+  id: number;
+}
+
+/** Dismiss a conflict (mark it resolved). The file head is untouched. */
+export interface ConflictResolveMsg {
+  type: "conflict_resolve";
+  id: number;
+}
+
+/** Restore a conflict's losing content as the file's current head and broadcast it. */
+export interface ConflictRestoreMsg {
+  type: "conflict_restore";
+  id: number;
+}
+
 /**
  * Client telling the server that a path was renamed/moved as a single atomic
  * operation. Sent instead of the legacy delete(from)+create(to) decomposition
@@ -204,6 +232,10 @@ export type ClientMsg =
   | FileDataRequestMsg
   | FileConflictMsg
   | FileHistoryRequestMsg
+  | ConflictListRequestMsg
+  | ConflictContentRequestMsg
+  | ConflictResolveMsg
+  | ConflictRestoreMsg
   | FileRenameMsg
   | VerifyRequestMsg
   | VerifyMissingMsg;
@@ -293,6 +325,41 @@ export interface FileHistoryResponseMsg {
   versions: VersionEntry[];
 }
 
+/** One unresolved conflict, as surfaced to a client for review. */
+export interface ConflictSummary {
+  id: number;
+  path: string;
+  sha1: string;
+  mtime: number;
+  /** Human-readable name of the device that produced the losing edit, if known. */
+  deviceName: string | null;
+  createdAt: number;
+}
+
+export interface ConflictListResponseMsg {
+  type: "conflict_list_response";
+  conflicts: ConflictSummary[];
+}
+
+export interface ConflictContentResponseMsg {
+  type: "conflict_content_response";
+  id: number;
+  path: string;
+  /** base64 losing content (may be E2EE ciphertext — see `encrypted`). */
+  content: string;
+  encrypted: boolean;
+  found: boolean;
+}
+
+export interface ConflictActionResponseMsg {
+  type: "conflict_action_response";
+  id: number;
+  action: "resolve" | "restore";
+  ok: boolean;
+  path?: string;
+  error?: string;
+}
+
 export interface VersionCheckResponseMsg {
   type: "version_check_response";
   needsUpdate: boolean;
@@ -360,6 +427,9 @@ export type ServerMsg =
   | FilePushMsg
   | FileDataResponseMsg
   | FileHistoryResponseMsg
+  | ConflictListResponseMsg
+  | ConflictContentResponseMsg
+  | ConflictActionResponseMsg
   | VersionCheckResponseMsg
   | SyncDoneMsg
   | RequestSyncMsg
