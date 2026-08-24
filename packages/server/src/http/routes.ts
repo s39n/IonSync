@@ -871,39 +871,6 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     }
   });
 
-  // ── Rename a single file (conflict promotion) ─────────────────────────────
-  // Body: { from: "conflict/path.md", to: "original/path.md" }
-  // Replaces the destination with the source — any existing file at `to` is
-  // removed first so the conflict copy becomes the canonical version.
-  router.post("/api/rename-file", express.json(), (req, res) => {
-    if (!checkAuth(req, res)) return;
-    const { from: fromPath, to: toPath } = req.body as { from?: string; to?: string };
-    if (!fromPath || !toPath || fromPath === toPath) {
-      res.status(400).json({ error: "Provide distinct from and to paths" }); return;
-    }
-    for (const p of [fromPath, toPath]) {
-      const n = path.normalize(p);
-      if (n.startsWith("..") || path.isAbsolute(n)) {
-        res.status(400).json({ error: "Invalid path" }); return;
-      }
-    }
-    const source = ctx.db.getFile(fromPath);
-    if (!source) { res.status(404).json({ error: "Source file not found" }); return; }
-
-    // Remove any existing file at the destination
-    const dest = ctx.db.getFile(toPath);
-    if (dest) {
-      ctx.db.upsertFile({ ...dest, action: "deleted", mtime: Date.now() });
-      ctx.storage.deleteAllVersions(toPath);
-    }
-
-    // Rename in DB and storage
-    ctx.db.renameFilePath(fromPath, toPath);
-    ctx.storage.renameFile(fromPath, toPath);
-
-    pushActivity(ctx, { kind: "rename", detail: `${fromPath} => ${toPath}` });
-    res.json({ ok: true });
-  });
 
   // ── Rename folder ─────────────────────────────────────────────────────────
   // Body: { from: "old/path", to: "new/path" }

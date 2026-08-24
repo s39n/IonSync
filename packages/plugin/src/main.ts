@@ -1,4 +1,4 @@
-import { Plugin, Platform } from "obsidian";
+import { Plugin, Platform, TFile } from "obsidian";
 import { XSync } from "./XSync.js";
 import { IonSyncSettingsTab } from "./SettingsTab.js";
 
@@ -202,6 +202,48 @@ export class IonSyncPlugin extends Plugin {
       name: "Verify vault against server",
       callback: () => { void this.xSync.verifyNow(); },
     });
+
+    // Open the server-backed version history for a file. Dynamic require keeps
+    // the modal bundle out of the module-load cycle (same pattern as XNotify).
+    const openVersionHistory = (path: string) => {
+      const { VersionHistoryModal } = require("./modals/index.js") as typeof import("./modals/index.js");
+      new VersionHistoryModal(this, path).open();
+    };
+
+    // Command palette (keyboard-assignable) — version history for the active file.
+    this.addCommand({
+      id: "file-version-history",
+      name: "Show version history for current file",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!file) return false;
+        if (!checking) openVersionHistory(file.path);
+        return true;
+      },
+    });
+
+    // Right-click a file in the explorer / tab header → Version history.
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (!(file instanceof TFile)) return;
+        menu.addItem((item) =>
+          item.setTitle("Version history").setIcon("history").setSection("info")
+            .onClick(() => openVersionHistory(file.path))
+        );
+      })
+    );
+
+    // Right-click inside an open note → Version history for that note.
+    this.registerEvent(
+      this.app.workspace.on("editor-menu", (menu) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!file) return;
+        menu.addItem((item) =>
+          item.setTitle("Version history").setIcon("history").setSection("info")
+            .onClick(() => openVersionHistory(file.path))
+        );
+      })
+    );
 
     this.addSettingTab(new IonSyncSettingsTab(this.app, this));
 
