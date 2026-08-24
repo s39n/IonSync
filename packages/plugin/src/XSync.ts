@@ -1,4 +1,4 @@
-import type { FileEntry, ServerMsg } from "@ionsync/protocol";
+import type { FileEntry, ServerMsg, ConflictListResponseMsg, ConflictContentResponseMsg, ConflictActionResponseMsg } from "@ionsync/protocol";
 import { collectFolderChildren, cascadeDeleteExceedsSafetyCap, computeOfflineDeletes } from "@ionsync/protocol";
 import { Platform, type TAbstractFile } from "obsidian";
 import { WsManager, type UpdateInfo } from "./WsManager.js";
@@ -1889,6 +1889,29 @@ export class XSync {
   async downloadVersion(path: string, mtime?: number): Promise<any> {
     this.ws.send({ type: "file_data", mode: "send", path, ...(mtime !== undefined ? { mtime } : {}) });
     return this._waitForResponse("file_data_response");
+  }
+
+  // ── Conflict management (review/resolve conflicts from inside Obsidian) ──
+  // Mirror the dashboard Conflicts panel over WebSocket; the modal drives them
+  // one at a time, so _waitForResponse's first-match-by-type is sufficient.
+  async listConflicts(): Promise<ConflictListResponseMsg> {
+    this.ws.send({ type: "conflict_list" });
+    return this._waitForResponse("conflict_list_response");
+  }
+
+  async getConflictContent(id: number): Promise<ConflictContentResponseMsg> {
+    this.ws.send({ type: "conflict_content", id });
+    return this._waitForResponse("conflict_content_response");
+  }
+
+  async dismissConflict(id: number): Promise<ConflictActionResponseMsg> {
+    this.ws.send({ type: "conflict_resolve", id });
+    return this._waitForResponse("conflict_action_response");
+  }
+
+  async restoreConflict(id: number): Promise<ConflictActionResponseMsg> {
+    this.ws.send({ type: "conflict_restore", id });
+    return this._waitForResponse("conflict_action_response");
   }
 
   /** Derive and return the current E2EE decryption key, or null if E2EE is off. */
