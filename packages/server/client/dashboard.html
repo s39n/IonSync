@@ -429,38 +429,6 @@
     .activity-device { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; flex-shrink: 0; }
     .activity-time { color: var(--muted); white-space: nowrap; flex-shrink: 0; margin-left: auto; }
 
-    /* ── Conflict compare overlay ────────────────────────────────────────────── */
-    #compare-overlay {
-      display: none; position: fixed; inset: 0; z-index: 150;
-      background: rgba(0,0,0,.6); align-items: center; justify-content: center;
-    }
-    #compare-overlay.open { display: flex; }
-    #compare-modal {
-      background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
-      width: min(1140px, 96vw); max-height: 90vh; display: flex; flex-direction: column;
-      box-shadow: 0 8px 40px rgba(0,0,0,.5);
-    }
-    #compare-header {
-      padding: 12px 18px; border-bottom: 1px solid var(--border);
-      display: flex; align-items: center; gap: 10px; background: var(--bg3); flex-shrink: 0;
-    }
-    #compare-panes {
-      display: grid; grid-template-columns: 1fr 1fr; flex: 1; overflow: hidden; min-height: 0;
-    }
-    .compare-pane {
-      display: flex; flex-direction: column; overflow: hidden;
-    }
-    .compare-pane + .compare-pane { border-left: 1px solid var(--border); }
-    .compare-pane-title {
-      padding: 7px 14px; font-size: 11px; font-family: var(--mono); border-bottom: 1px solid var(--border);
-      background: var(--bg3); flex-shrink: 0; word-break: break-all;
-    }
-    .compare-pane-title.conflict { color: var(--yellow); }
-    .compare-pane-content {
-      flex: 1; overflow-y: auto; padding: 14px; margin: 0;
-      font-family: var(--mono); font-size: 12px; white-space: pre-wrap;
-      word-break: break-all; line-height: 1.65; color: var(--text); background: var(--bg);
-    }
     </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
@@ -739,7 +707,6 @@
               <button class="btn dbmgr-tab active" data-action="db-set-tab" data-tab="all">All</button>
               <button class="btn dbmgr-tab" data-action="db-set-tab" data-tab="active">Active</button>
               <button class="btn dbmgr-tab" data-action="db-set-tab" data-tab="deleted">Deleted</button>
-              <button class="btn dbmgr-tab" data-action="db-set-tab" data-tab="conflicts">Conflicts</button>
             </div>
             <input id="db-search" type="search" placeholder="Search paths…"
               style="padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg3);color:var(--text);font-size:12px;width:200px">
@@ -792,20 +759,6 @@
           </div>
         </div>
 
-        <div class="card" style="border-color:var(--yellow,#f0a500);margin-bottom:16px">
-          <div class="card-header" style="background:var(--bg3)">
-            <h3 style="color:var(--yellow,#f0a500)">Remove All Conflicts</h3>
-          </div>
-          <div style="padding:16px 20px">
-            <p style="margin:0 0 8px;font-size:13px">
-              Deletes every file whose name contains <em>"conflicted"</em> from the server.
-              This resolves all pending conflicts by discarding the conflict copies — the original files are kept untouched.
-            </p>
-            <p style="margin:0 0 16px;font-size:12px;color:var(--muted)">Conflict copies only. Original files are not affected.</p>
-            <button class="btn danger" id="clear-conflicts-btn" data-action="clear-conflicts">Remove All Conflicts</button>
-          </div>
-        </div>
-
         <div class="card" style="border-color:var(--red)">
           <div class="card-header" style="background:var(--bg3)">
             <h3 style="color:var(--red)">Factory Reset</h3>
@@ -841,34 +794,6 @@
     </div>
     <div id="history-body" style="display:none;overflow-y:auto;flex:1">
       <!-- Rendered by loadVersionHistory() -->
-    </div>
-  </div>
-</div>
-
-<!-- ── Conflict compare overlay ── -->
-<div id="compare-overlay">
-  <div id="compare-modal" role="dialog" aria-modal="true">
-    <div id="compare-header">
-      <span style="font-size:14px;font-weight:600">Conflict Comparison</span>
-      <div style="flex:1"></div>
-      <button id="compare-close" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;line-height:1;padding:0 4px" title="Close">✕</button>
-    </div>
-    <div id="compare-panes">
-      <div class="compare-pane">
-        <div class="compare-pane-title" id="compare-original-title">original</div>
-        <div style="padding:4px 12px 8px;display:flex;gap:8px;border-bottom:1px solid var(--border)">
-          <button class="btn danger" style="font-size:11px;padding:3px 10px" data-action="compare-delete" data-side="original">Delete this version</button>
-        </div>
-        <pre class="compare-pane-content" id="compare-original-content"></pre>
-      </div>
-      <div class="compare-pane">
-        <div class="compare-pane-title conflict" id="compare-conflict-title">conflicted</div>
-        <div style="padding:4px 12px 8px;display:flex;gap:8px;border-bottom:1px solid var(--border)">
-          <button class="btn primary" style="font-size:11px;padding:3px 10px" data-action="promote-conflict" title="Replace the original with this conflict copy — makes this version canonical">Use as canonical</button>
-          <button class="btn danger" style="font-size:11px;padding:3px 10px" data-action="compare-delete" data-side="conflict">Delete this version</button>
-        </div>
-        <pre class="compare-pane-content" id="compare-conflict-content"></pre>
-      </div>
     </div>
   </div>
 </div>
@@ -1129,7 +1054,7 @@ async function loadLogs() {
 // ── Database Manager ────────────────────────────────────────────────────────
 
 let dbAllFiles = [];       // raw file list from server
-let dbCurrentTab = 'all';  // all | active | deleted | conflicts
+let dbCurrentTab = 'all';  // all | active | deleted
 
 async function dbLoadStats() {
   try {
@@ -1191,7 +1116,6 @@ function dbRenderFiles() {
 
   if (dbCurrentTab === 'active')    files = files.filter(f => f.action === 'active');
   if (dbCurrentTab === 'deleted')   files = files.filter(f => f.action === 'deleted');
-  if (dbCurrentTab === 'conflicts') files = files.filter(f => f.path.toLowerCase().includes('conflicted'));
   if (q) files = files.filter(f => f.path.toLowerCase().includes(q));
 
   if (!files.length) {
@@ -1202,22 +1126,15 @@ function dbRenderFiles() {
 
   const rows = files.map(f => {
     const isDeleted = f.action === 'deleted';
-    const isConflict = f.path.toLowerCase().includes('conflicted');
     const statusBadge = isDeleted
       ? `<span class="badge-pill red" style="font-size:10px">deleted</span>`
-      : isConflict
-        ? `<span class="badge-pill" style="font-size:10px;background:var(--yellow,#f0a500);color:#000">conflict</span>`
-        : `<span class="badge-pill" style="font-size:10px;background:var(--green,#22c55e);color:#000">active</span>`;
+      : `<span class="badge-pill" style="font-size:10px;background:var(--green,#22c55e);color:#000">active</span>`;
 
     const p = escHtml(f.path);
     const actions = isDeleted
       ? `<button class="btn" style="font-size:11px;padding:3px 8px" data-action="db-restore-file" data-path="${p}">Restore</button>
          <button class="btn danger" style="font-size:11px;padding:3px 8px" data-action="db-purge-file" data-path="${p}" title="Erase this deleted record entirely so the server forgets it">Purge</button>`
-      : isConflict
-        ? `<button class="btn" style="font-size:11px;padding:3px 8px" data-action="compare-conflict" data-path="${p}">Compare</button>
-           <button class="btn" style="font-size:11px;padding:3px 8px" data-action="open-history" data-path="${p}">Versions</button>
-           <button class="btn" style="font-size:11px;padding:3px 8px" data-action="open-preview" data-path="${p}">Preview</button>`
-        : `<button class="btn" style="font-size:11px;padding:3px 8px" data-action="db-edit-meta" data-path="${p}" data-mtime="${f.mtime}">Edit</button>
+      : `<button class="btn" style="font-size:11px;padding:3px 8px" data-action="db-edit-meta" data-path="${p}" data-mtime="${f.mtime}">Edit</button>
            <button class="btn" style="font-size:11px;padding:3px 8px" data-action="open-history" data-path="${p}">Versions</button>
            <button class="btn" style="font-size:11px;padding:3px 8px" data-action="open-preview" data-path="${p}">Preview</button>`;
 
@@ -2087,155 +2004,12 @@ async function renameDevice(deviceId, currentName, cellEl) {
   input.addEventListener('blur', save);
 }
 
-// ── Conflict comparison ────────────────────────────────────────────────────
 
-async function compareConflict(conflictPath) {
-  // Infer the original path by stripping the "(conflicted …)" portion.
-  // Common patterns: "file (conflicted 2024-01-01 at 12-34-56).md"
-  //                  "file (Conflicted Copy 2024-01-01).md"
-  //                  "file (conflicted).md"
-  const dir = conflictPath.includes('/') ? conflictPath.substring(0, conflictPath.lastIndexOf('/') + 1) : '';
-  const filename = conflictPath.includes('/') ? conflictPath.substring(conflictPath.lastIndexOf('/') + 1) : conflictPath;
-  const originalFilename = filename.replace(/\s*\([^)]*conflicted[^)]*\)/i, '').trim();
-  const originalPath = dir + originalFilename;
 
-  document.getElementById('compare-original-title').textContent = originalPath || '(could not infer original)';
-  document.getElementById('compare-conflict-title').textContent = conflictPath;
-  document.getElementById('compare-original-content').textContent = 'Loading…';
-  document.getElementById('compare-conflict-content').textContent = 'Loading…';
-  document.getElementById('compare-overlay').classList.add('open');
 
-  const [leftResult, rightResult] = await Promise.allSettled([
-    _loadFileText(originalPath),
-    _loadFileText(conflictPath),
-  ]);
 
-  document.getElementById('compare-original-content').textContent =
-    leftResult.status === 'fulfilled' ? leftResult.value : `⚠ ${leftResult.reason?.message ?? 'Not found'}`;
-  document.getElementById('compare-conflict-content').textContent =
-    rightResult.status === 'fulfilled' ? rightResult.value : `⚠ ${rightResult.reason?.message ?? 'Not found'}`;
-}
 
-async function deleteCompareVersion(side) {
-  // side = 'original' | 'conflict'
-  const titleId = side === 'original' ? 'compare-original-title' : 'compare-conflict-title';
-  const filePath = document.getElementById(titleId).textContent;
-  if (!filePath || filePath.startsWith('(')) {
-    toast('Cannot determine file path', 'error');
-    return;
-  }
-  if (!confirm(`Delete this version from the server?\n\n${filePath}\n\nThis cannot be undone.`)) return;
-  try {
-    await api(`/api/delete-file/${encodeURIComponent(filePath)}`, { method: 'DELETE' });
-    toast('Version deleted', 'success');
-    document.getElementById('compare-overlay').classList.remove('open');
-    await loadFiles();
-  } catch (e) {
-    toast(`Delete failed: ${e.message}`, 'error');
-  }
-}
 
-async function clearAllConflicts(btn) {
-  // Always fetch fresh data — allFiles may be stale if the Files panel was
-  // never visited or new conflicted copies arrived since the last load.
-  let freshFiles;
-  try {
-    const r = await api('/api/files');
-    freshFiles = await r.json();
-  } catch (e) {
-    toast('Could not load file list: ' + e.message, 'error');
-    return;
-  }
-
-  // Find all files whose path contains "conflicted" (case-insensitive)
-  const conflicts = freshFiles.filter(f => f.path.toLowerCase().includes('conflicted'));
-  if (!conflicts.length) { toast('No conflict files found', 'success'); return; }
-
-  // Two-click arm pattern
-  if (!btn.dataset.armed) {
-    btn.dataset.armed = '1';
-    btn.textContent = `Confirm — delete ${conflicts.length} conflict file${conflicts.length !== 1 ? 's' : ''}?`;
-    setTimeout(() => {
-      if (btn.dataset.armed) {
-        delete btn.dataset.armed;
-        btn.textContent = 'Remove All Conflicts';
-      }
-    }, 5000);
-    return;
-  }
-  delete btn.dataset.armed;
-  btn.disabled = true;
-  btn.textContent = 'Removing…';
-
-  const failedPaths = [];
-  let ok = 0;
-  for (const f of conflicts) {
-    try {
-      await api(`/api/delete-file/${encodeURIComponent(f.path)}`, { method: 'DELETE' });
-      ok++;
-    } catch (e) {
-      console.error('[IonSync] Failed to delete conflict:', f.path, e.message);
-      failedPaths.push(f.path);
-    }
-  }
-
-  btn.disabled = false;
-  btn.textContent = 'Remove All Conflicts';
-  if (failedPaths.length) {
-    console.warn('[IonSync] Conflicts that could not be deleted:\n' + failedPaths.join('\n'));
-    toast(`Removed ${ok}, failed ${failedPaths.length} — open browser console (F12) to see which files`, 'error');
-  } else {
-    toast(`Removed ${ok} conflict file${ok !== 1 ? 's' : ''}`, 'success');
-  }
-  await loadFiles();
-}
-
-async function _loadFileText(filePath) {
-  const r = await api('/api/file-content?path=' + encodeURIComponent(filePath));
-  const data = await r.json();
-  if (data.encrypted) {
-    // Try auto-decrypt with session password if available
-    const savedPw = sessionStorage.getItem('e2ee-pw') || '';
-    if (savedPw && crypto?.subtle) {
-      try {
-        const plain = await e2eeDecryptB64(data.content, savedPw);
-        return new TextDecoder('utf-8', { fatal: true }).decode(plain);
-      } catch { /* fall through to locked message */ }
-    }
-    return '🔒 Encrypted — enter vault key in the Files panel to auto-decrypt';
-  }
-  const bytes = Uint8Array.from(atob(data.content), c => c.charCodeAt(0));
-  try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
-  catch { return '[Binary file — cannot display as text]'; }
-}
-
-function closeCompare() {
-  document.getElementById('compare-overlay').classList.remove('open');
-}
-
-// Promote the conflict copy to be the canonical version:
-// renames the conflicted file to the original path, replacing it.
-async function promoteConflict() {
-  const conflictPath = document.getElementById('compare-conflict-title').textContent.trim();
-  const originalPath = document.getElementById('compare-original-title').textContent.trim();
-  if (!conflictPath || conflictPath.startsWith('(') || !originalPath || originalPath.startsWith('(')) {
-    toast('Cannot determine file paths', 'error'); return;
-  }
-  if (!confirm(`Replace:\n  ${originalPath}\n\nWith the conflict copy:\n  ${conflictPath}\n\nThe conflict version will become the canonical file. This cannot be undone.`)) return;
-  try {
-    await api('/api/rename-file', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: conflictPath, to: originalPath }),
-    });
-    toast('Conflict resolved — conflict version is now canonical', 'success');
-    document.getElementById('compare-overlay').classList.remove('open');
-    await loadFiles();
-    if (document.getElementById('panel-dbmgr').classList.contains('active')) dbLoadFiles();
-  } catch(e) {
-    toast('Failed: ' + e.message, 'error');
-  }
-}
 
 // ── Delegated actions (CSP: no inline handlers) ────────────────────────────
 // Every dynamic control carries data-action / data-change instead of an
@@ -2264,7 +2038,6 @@ const ACTIONS = {
   'db-delete-selected':    () => dbDeleteSelected(),
   'db-load-devices':       () => dbLoadDevices(),
   'restore-deleted':       (el) => restoreDeleted(el),
-  'clear-conflicts':       (el) => clearAllConflicts(el),
   'load-conflicts':        () => loadConflicts(),
   'conflict-view':         (el) => toggleConflictView(el.dataset.id),
   'conflict-dismiss':      (el) => dismissConflict(el.dataset.id, el),
@@ -2273,9 +2046,6 @@ const ACTIONS = {
   'preview-tab':           (el) => switchPreviewTab(el.dataset.tab),
   'db-restore-file':       (el) => dbRestoreFile(el.dataset.path, el),
   'db-purge-file':         (el) => dbPurgeFile(el.dataset.path, el),
-  'compare-conflict':      (el) => compareConflict(el.dataset.path),
-  'compare-delete':        (el) => deleteCompareVersion(el.dataset.side),
-  'promote-conflict':      () => promoteConflict(),
   'open-history':          (el) => openHistory(el.dataset.path),
   'open-preview':          (el) => openPreview(el.dataset.path),
   'db-edit-meta':          (el) => dbEditMeta(el.dataset.path, Number(el.dataset.mtime), el),
@@ -2338,13 +2108,8 @@ document.getElementById('logout-btn').addEventListener('click', logout);
 document.querySelectorAll('.nav-btn').forEach(btn => {
   btn.addEventListener('click', () => showPanel(btn.dataset.panel));
 });
-document.getElementById('compare-close').addEventListener('click', closeCompare);
-document.getElementById('compare-overlay').addEventListener('click', e => {
-  if (e.target === document.getElementById('compare-overlay')) closeCompare();
-});
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    closeCompare();
     closePreview();
   }
 });
