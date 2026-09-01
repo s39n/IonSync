@@ -1369,7 +1369,15 @@ export class XSync {
     if (this.exclusionFilter?.isExcluded(path)) return;
     try {
       const stat = await this.plugin.app.vault.adapter.stat(path);
-      if (stat) await this._sendFileEvent({ path } as TAbstractFile, false);
+      // FILES ONLY. A folder has no content to hash, so _sendFileEvent can't
+      // dedup it (empty sha1 defeats the fast-path), and — unlike a visible
+      // folder, whose normal vault "create" event is echo-suppressed via
+      // _applyingPaths — a hidden folder only surfaces through this raw event,
+      // which has no such guard. Sending it makes the folder record ping-pong
+      // between devices forever (observed as a ~2s .rss-dashboard-data/feeds
+      // re-save storm). Folders need no live event: they're created implicitly
+      // when a child file lands (ensureParentDir) and captured by the reconcile.
+      if (stat && stat.type === "file") await this._sendFileEvent({ path } as TAbstractFile, false);
     } catch { /* removed mid-flight or adapter hiccup — the poll will catch up */ }
     this.xNotify.updatePendingCount(Object.keys(this.unsentSessionEvents).length);
   }
