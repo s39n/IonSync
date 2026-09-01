@@ -369,6 +369,21 @@ export class Storage {
     await this._computeHiddenConfigFiles(exclusionFilter);
   }
 
+  /**
+   * Lists the JSON files sitting directly in the config dir (app.json,
+   * daily-notes.json, etc.) — non-recursive. Shared by computeTree's offline
+   * reconcile and XSync's config poll so the two config-enumeration paths can't
+   * drift on this rule. Returns [] if the config dir is unreadable.
+   */
+  async listConfigRootJson(): Promise<string[]> {
+    try {
+      const listing = await this.app.vault.adapter.list(this.app.vault.configDir);
+      return listing.files.filter((f) => f.endsWith(".json"));
+    } catch {
+      return [];
+    }
+  }
+
   private async _computeHiddenConfigFiles(exclusionFilter: ExclusionFilter): Promise<void> {
     const configDir = this.app.vault.configDir;
 
@@ -386,12 +401,9 @@ export class Storage {
 
     // Core plugin settings: any remaining JSON files directly in .obsidian/
     // (e.g. daily-notes.json, templates.json). Not subdirectories.
-    try {
-      const listing = await this.app.vault.adapter.list(configDir);
-      for (const f of listing.files) {
-        if (f.endsWith(".json") && !targets.includes(f)) targets.push(f);
-      }
-    } catch { /* configDir unreadable — skip */ }
+    for (const f of await this.listConfigRootJson()) {
+      if (!targets.includes(f)) targets.push(f);
+    }
 
     // Installed community plugins — .obsidian/plugins/ (recursive).
     // The exclusion filter gates on syncInstalledCommunityPlugins and always

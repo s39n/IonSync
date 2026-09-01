@@ -1810,12 +1810,9 @@ export class XSync {
     // .json sitting directly in the config dir — app.json, appearance.json,
     // hotkeys.json, community-plugins.json, and core-plugin settings like
     // daily-notes.json. Absent singletons simply won't be listed (no 404).
-    try {
-      const listing = await this.plugin.app.vault.adapter.list(configDir);
-      for (const f of listing.files) {
-        if (f.endsWith(".json") && !this.exclusionFilter?.isExcluded(f)) targets.push(f);
-      }
-    } catch { /* configDir unreadable — skip */ }
+    for (const f of await this.storage.listConfigRootJson()) {
+      if (!this.exclusionFilter?.isExcluded(f)) targets.push(f);
+    }
 
     // Each installed plugin's data.json — but ONLY when it actually exists.
     // Most plugins have no saved settings, so blindly statting "<plugin>/data.json"
