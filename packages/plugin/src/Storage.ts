@@ -307,17 +307,18 @@ export class Storage {
       } 
       else if (file instanceof TFile) {
         const mtime = file.stat.mtime;
+        const size = file.stat.size;
         const stored = this.readMetadata(file.path);
 
         // 🔥 FAST PATH: Memory mtime matches stored mtime -> Instant skip
-        if (stored && stored.mtime === mtime && stored.sha1 && stored.sha1.length === 40) {
+        if (stored && stored.mtime === mtime && stored.size === size && stored.sha1 && stored.sha1.length === 40) {
           this.tree[file.path] = stored;
           continue;
         }
 
         const MAX_FILE_SIZE = (this.settings.maxFileSizeMB ?? 25) * 1024 * 1024;
         if (file.stat.size > MAX_FILE_SIZE) {
-          this.tree[file.path] = { path: file.path, sha1: "", mtime, action: "active", fileType: "file" };
+          this.tree[file.path] = { path: file.path, sha1: "", mtime, size, action: "active", fileType: "file" };
           continue;
         }
 
@@ -360,12 +361,27 @@ export class Storage {
         } else {
           effectiveMtime = mtime;
         }
-        this.tree[file.path] = { path: file.path, sha1: sha1 ?? "", mtime: effectiveMtime, action: "active", fileType: "file" };
+        this.tree[file.path] = { path: file.path, sha1: sha1 ?? "", mtime: effectiveMtime, size, action: "active", fileType: "file" };
       }
     }
 
     // Obsidian's cache hides the .obsidian config folder, so we check them manually.
     await this._computeHiddenConfigFiles(exclusionFilter);
+  }
+
+  /**
+   * Lists the JSON files sitting directly in the config dir (app.json,
+   * daily-notes.json, etc.) — non-recursive. Shared by computeTree's offline
+   * reconcile and XSync's config poll so the two config-enumeration paths can't
+   * drift on this rule. Returns [] if the config dir is unreadable.
+   */
+  async listConfigRootJson(): Promise<string[]> {
+    try {
+      const listing = await this.app.vault.adapter.list(this.app.vault.configDir);
+      return listing.files.filter((f) => f.endsWith(".json"));
+    } catch {
+      return [];
+    }
   }
 
   private async _computeHiddenConfigFiles(exclusionFilter: ExclusionFilter): Promise<void> {
@@ -385,12 +401,9 @@ export class Storage {
 
     // Core plugin settings: any remaining JSON files directly in .obsidian/
     // (e.g. daily-notes.json, templates.json). Not subdirectories.
-    try {
-      const listing = await this.app.vault.adapter.list(configDir);
-      for (const f of listing.files) {
-        if (f.endsWith(".json") && !targets.includes(f)) targets.push(f);
-      }
-    } catch { /* configDir unreadable — skip */ }
+    for (const f of await this.listConfigRootJson()) {
+      if (!targets.includes(f)) targets.push(f);
+    }
 
     // Installed community plugins — .obsidian/plugins/ (recursive).
     // The exclusion filter gates on syncInstalledCommunityPlugins and always
@@ -410,9 +423,10 @@ export class Storage {
         if (!stat) continue;
 
         const mtime = stat.mtime;
+        const size = stat.size;
         const stored = this.readMetadata(path);
 
-        if (stored && stored.mtime === mtime && stored.sha1) {
+        if (stored && stored.mtime === mtime && stored.size === size && stored.sha1) {
           this.tree[path] = stored;
           continue;
         }
@@ -425,7 +439,7 @@ export class Storage {
           : stored && stored.action === "active" && stored.mtime > mtime
             ? stored.mtime
             : mtime;
-        this.tree[path] = { path, sha1: sha1 ?? "", mtime: effectiveMtime, action: "active", fileType: "file" };
+        this.tree[path] = { path, sha1: sha1 ?? "", mtime: effectiveMtime, size, action: "active", fileType: "file" };
       } catch {
         // File doesn't exist or can't be read — skip silently
       }
@@ -476,7 +490,7 @@ export class Storage {
     // _checkConfigFiles and _sendFileEvent see stored.mtime ≠ stat.mtime every 5 s
     // and re-upload the file indefinitely, causing a cross-device ping-pong loop.
     const stat = await this.app.vault.adapter.stat(path);
-    const metaEntry = stat ? { ...entry, mtime: stat.mtime } : entry;
+    const metaEntry = stat ? { ...entry, mtime: stat.mtime, size: stat.size } : entry;
     await this.writeMetadata(metaEntry);
     // Shadow copies are only needed for delta UPLOADS. Skipping them on the
     // download/apply path saves an extra write per file — a real cost on
@@ -499,7 +513,7 @@ export class Storage {
     // Same mtime fix as write() above — store the OS-assigned mtime, not the
     // server's, so the fast-path check in _sendFileEvent stays stable.
     const stat = await this.app.vault.adapter.stat(path);
-    const metaEntry = stat ? { ...entry, mtime: stat.mtime } : entry;
+    const metaEntry = stat ? { ...entry, mtime: stat.mtime, size: stat.size } : entry;
     await this.writeMetadata(metaEntry);
   }
 
