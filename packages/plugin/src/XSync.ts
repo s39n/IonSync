@@ -1342,7 +1342,16 @@ export class XSync {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- "raw" is an undocumented vault event (string path), not in the typings.
     this.eventRefs["raw"] = (this.plugin.app.vault as any).on("raw", (path: string) => {
       if (!this.isEnabled) return;
-      if (typeof path !== "string" || !path.startsWith(configPrefix)) return;
+      if (typeof path !== "string") return;
+      // Handle config-dir changes always, and other hidden paths when "Hidden
+      // files" is on (e.g. .rss-dashboard-data/) — the typed vault events don't
+      // fire for any dotfile. Normal notes have no dot segment and fall through
+      // to those events, so they're never double-processed here. .git/etc. are
+      // dropped by the exclusion check so a git op can't storm this handler.
+      const underConfig = path.startsWith(configPrefix);
+      const hidden = this.plugin.settings.syncHiddenFiles && (path.startsWith(".") || path.includes("/."));
+      if (!underConfig && !hidden) return;
+      if (this.exclusionFilter?.isExcluded(path)) return;
       // Coalesce bursty writes (a plugin rewriting its data.json rapidly) into a
       // single _sendFileEvent, so we hash and upload once per settled change.
       const existing = this._rawDebounce.get(path);

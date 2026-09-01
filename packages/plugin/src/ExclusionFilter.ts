@@ -37,6 +37,14 @@ export class ExclusionFilter {
     //     short-name trees) and never upload or apply it.
     if (this.isShortNameConfig(path)) return true;
 
+    // 1c. IMMUTABLE RULE: never sync version-control or dependency dirs,
+    //     wherever they appear. They are huge, churn constantly, and are
+    //     machine-local; syncing a .git across devices corrupts working
+    //     copies. Mirrors the hard-skip in XSync._processLocalEvent so
+    //     discovery, live events, and the raw watcher all agree. (.gitignore
+    //     is a normal file and is NOT matched.)
+    if (this.isVcsOrDeps(path)) return true;
+
     // 2. IMMUTABLE RULE: Never sync IonSync's own plugin directory.
     //    It contains device-specific settings (deviceId, password, metadata)
     //    that must not bleed across devices regardless of any toggle.
@@ -79,6 +87,7 @@ export class ExclusionFilter {
   }
 
   private isShortNameConfig(p: string) { return /(^|\/)OBSIDI~\d+(\/|$)/i.test(p); }
+  private isVcsOrDeps(p: string) { return /(^|\/)(\.git|node_modules)(\/|$)/.test(p); }
   private isTrashPath(p: string) { return p === ".trash" || p.startsWith(".trash/"); }
   private isHiddenPath(p: string) {
     return p.startsWith(".") || p.includes("/.");
