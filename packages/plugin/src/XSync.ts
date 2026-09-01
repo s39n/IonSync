@@ -132,6 +132,9 @@ export class XSync {
   // write increments; each suppressed create/modify event decrements.
   private _applyingPaths = new Map<string, number>();
 
+  // Per-path debounce timers for config-dir "raw" events (see _registerRawEvent).
+  private _rawDebounce = new Map<string, ReturnType<typeof setTimeout>>();
+
   private _applyingAdd(path: string): void {
     this._applyingPaths.set(path, (this._applyingPaths.get(path) ?? 0) + 1);
   }
@@ -244,6 +247,7 @@ export class XSync {
     this._registerVaultEvent("modify");
     this._registerVaultEvent("delete");
     this._registerVaultEvent("rename");
+    this._registerRawEvent();
 
     // When the app is backgrounded, flush any debounced file events over the
     // WebSocket while it is still alive. (An earlier "background sync" design
@@ -274,7 +278,10 @@ export class XSync {
     this.eventRefs["active-leaf-change"] = this.plugin.app.workspace.on("active-leaf-change", onFocus);
     this.eventRefs["layout-change"] = this.plugin.app.workspace.on("layout-change", onFocus);
 
-    this.configCheckInterval = window.setInterval(() => { void this._checkConfigFiles(); }, 5_000);
+    // 30s safety net; the "raw" event (see _registerRawEvent) is the primary,
+    // near-instant config-change detector. The poll catches anything raw misses
+    // (mobile) without the old every-5s adapter.list() churn on slow devices.
+    this.configCheckInterval = window.setInterval(() => { void this._checkConfigFiles(); }, 30_000);
     this._syncWatchdog = window.setInterval(() => this._checkSyncStall(), 15_000);
 
     this.ws.on((event) => {
@@ -301,6 +308,8 @@ export class XSync {
     this.storage.close(); // close IndexedDB connection (no-op on the json path)
     this.xTimeouts.clear();
     this._recentlyApplied.clear();
+    for (const t of this._rawDebounce.values()) clearTimeout(t);
+    this._rawDebounce.clear();
     if (this.configCheckInterval !== null) {
       window.clearInterval(this.configCheckInterval);
       this.configCheckInterval = null;
@@ -322,7 +331,7 @@ export class XSync {
     if (!this.inited) return;
     this.inited = false;
 
-    for (const type of ["create", "modify", "delete", "rename"]) {
+    for (const type of ["create", "modify", "delete", "rename", "raw"]) {
       const ref = this.eventRefs[type];
       if (ref) this.plugin.app.vault.offref(ref);
       delete this.eventRefs[type];
@@ -1314,6 +1323,44 @@ export class XSync {
     });
   }
 
+  // Obsidian does NOT fire create/modify/delete vault events for files under the
+  // config dir (.obsidian). Its undocumented "raw" event does, so we use it as
+  // the primary, near-instant detector for config-file changes. The poll below
+  // (_checkConfigFiles) stays on as a safety net at a longer interval — mobile
+  // adapters don't always emit "raw". Notes are already covered by the typed
+  // vault events, so we scope this strictly to the config dir to avoid
+  // double-processing them. Echo suppression and toggle gating come for free:
+  // the handler funnels into _sendFileEvent, whose mtime+size+sha1 dedup already
+  // no-ops our own apply-writes (exactly as the poll relies on), and
+  // exclusionFilter honours the per-config-file sync toggles.
+  private _registerRawEvent(): void {
+    const configPrefix = `${this.plugin.app.vault.configDir}/`;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- "raw" is an undocumented vault event (string path), not in the typings.
+    this.eventRefs["raw"] = (this.plugin.app.vault as any).on("raw", (path: string) => {
+      if (!this.isEnabled) return;
+      if (typeof path !== "string" || !path.startsWith(configPrefix)) return;
+      // Coalesce bursty writes (a plugin rewriting its data.json rapidly) into a
+      // single _sendFileEvent, so we hash and upload once per settled change.
+      const existing = this._rawDebounce.get(path);
+      if (existing) clearTimeout(existing);
+      this._rawDebounce.set(path, setTimeout(() => {
+        this._rawDebounce.delete(path);
+        void this._processRawConfig(path);
+      }, 400));
+    });
+  }
+
+  private async _processRawConfig(path: string): Promise<void> {
+    // Same gate as the poll: only when connected, auto-sync on, and not mid-sync.
+    if (!this.ws.isConnected || !this.plugin.settings.autoSync || this.isSyncing) return;
+    if (this.exclusionFilter?.isExcluded(path)) return;
+    try {
+      const stat = await this.plugin.app.vault.adapter.stat(path);
+      if (stat) await this._sendFileEvent({ path } as TAbstractFile, false);
+    } catch { /* removed mid-flight or adapter hiccup — the poll will catch up */ }
+    this.xNotify.updatePendingCount(Object.keys(this.unsentSessionEvents).length);
+  }
+
   async _processLocalEvent(action: VaultAction, file: TAbstractFile, forceChanged = false, args: unknown[] = []): Promise<void> {
     // ✅ Emergency Guard: Do not process local edits in developer folders
     if (file.path.includes("node_modules/") || file.path.includes(".git/")) {
@@ -1759,7 +1806,7 @@ export class XSync {
     // files that exist, so there are no 404s and one bad file can't kill the loop.
     const targets: string[] = [];
 
-    // Vault events don't fire for config-dir changes, so we poll. Pick up every
+    // Safety-net sweep (the "raw" event is the primary detector). Pick up every
     // .json sitting directly in the config dir — app.json, appearance.json,
     // hotkeys.json, community-plugins.json, and core-plugin settings like
     // daily-notes.json. Absent singletons simply won't be listed (no 404).
