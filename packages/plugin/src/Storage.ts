@@ -307,17 +307,18 @@ export class Storage {
       } 
       else if (file instanceof TFile) {
         const mtime = file.stat.mtime;
+        const size = file.stat.size;
         const stored = this.readMetadata(file.path);
 
         // 🔥 FAST PATH: Memory mtime matches stored mtime -> Instant skip
-        if (stored && stored.mtime === mtime && stored.sha1 && stored.sha1.length === 40) {
+        if (stored && stored.mtime === mtime && stored.size === size && stored.sha1 && stored.sha1.length === 40) {
           this.tree[file.path] = stored;
           continue;
         }
 
         const MAX_FILE_SIZE = (this.settings.maxFileSizeMB ?? 25) * 1024 * 1024;
         if (file.stat.size > MAX_FILE_SIZE) {
-          this.tree[file.path] = { path: file.path, sha1: "", mtime, action: "active", fileType: "file" };
+          this.tree[file.path] = { path: file.path, sha1: "", mtime, size, action: "active", fileType: "file" };
           continue;
         }
 
@@ -360,7 +361,7 @@ export class Storage {
         } else {
           effectiveMtime = mtime;
         }
-        this.tree[file.path] = { path: file.path, sha1: sha1 ?? "", mtime: effectiveMtime, action: "active", fileType: "file" };
+        this.tree[file.path] = { path: file.path, sha1: sha1 ?? "", mtime: effectiveMtime, size, action: "active", fileType: "file" };
       }
     }
 
@@ -410,9 +411,10 @@ export class Storage {
         if (!stat) continue;
 
         const mtime = stat.mtime;
+        const size = stat.size;
         const stored = this.readMetadata(path);
 
-        if (stored && stored.mtime === mtime && stored.sha1) {
+        if (stored && stored.mtime === mtime && stored.size === size && stored.sha1) {
           this.tree[path] = stored;
           continue;
         }
@@ -425,7 +427,7 @@ export class Storage {
           : stored && stored.action === "active" && stored.mtime > mtime
             ? stored.mtime
             : mtime;
-        this.tree[path] = { path, sha1: sha1 ?? "", mtime: effectiveMtime, action: "active", fileType: "file" };
+        this.tree[path] = { path, sha1: sha1 ?? "", mtime: effectiveMtime, size, action: "active", fileType: "file" };
       } catch {
         // File doesn't exist or can't be read — skip silently
       }
@@ -476,7 +478,7 @@ export class Storage {
     // _checkConfigFiles and _sendFileEvent see stored.mtime ≠ stat.mtime every 5 s
     // and re-upload the file indefinitely, causing a cross-device ping-pong loop.
     const stat = await this.app.vault.adapter.stat(path);
-    const metaEntry = stat ? { ...entry, mtime: stat.mtime } : entry;
+    const metaEntry = stat ? { ...entry, mtime: stat.mtime, size: stat.size } : entry;
     await this.writeMetadata(metaEntry);
     // Shadow copies are only needed for delta UPLOADS. Skipping them on the
     // download/apply path saves an extra write per file — a real cost on
@@ -499,7 +501,7 @@ export class Storage {
     // Same mtime fix as write() above — store the OS-assigned mtime, not the
     // server's, so the fast-path check in _sendFileEvent stays stable.
     const stat = await this.app.vault.adapter.stat(path);
-    const metaEntry = stat ? { ...entry, mtime: stat.mtime } : entry;
+    const metaEntry = stat ? { ...entry, mtime: stat.mtime, size: stat.size } : entry;
     await this.writeMetadata(metaEntry);
   }
 

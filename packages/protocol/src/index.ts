@@ -9,6 +9,7 @@ export interface FileEntry {
   mtime: number; // milliseconds, client-reported — used for conflict resolution
   action: FileAction;
   fileType: FileType;
+  size?: number; // bytes; client-local change-detection aid (strengthens the mtime fast-path). Optional: absent on server-originated entries and older metadata.
 } 
 
 export interface VersionEntry {

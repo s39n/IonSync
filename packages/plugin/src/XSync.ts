@@ -1370,7 +1370,7 @@ export class XSync {
         });
         // Reflect the move locally: drop the old path's metadata, record the new.
         await this.storage.deleteMetadata(oldPath);
-        await this.storage.writeMetadata({ path: file.path, sha1: newSha1, mtime, action: "active", fileType: "file" });
+        await this.storage.writeMetadata({ path: file.path, sha1: newSha1, mtime, ...(typeof stat?.size === "number" ? { size: stat.size } : {}), action: "active", fileType: "file" });
         return;
       }
 
@@ -1516,7 +1516,7 @@ export class XSync {
     if (!stat) return;
 
     const stored = this.storage.readMetadata(file.path);
-    if (!forceChanged && stored && stored.mtime === stat.mtime && stored.sha1) return;
+    if (!forceChanged && stored && stored.mtime === stat.mtime && stored.size === stat.size && stored.sha1) return;
 
     const isBinary = Utils.isBinary(file.path);
     let sha1: string | null = "";
@@ -1574,11 +1574,11 @@ export class XSync {
     // mtime so we don't re-hash this path on the next spurious event. Honour
     // forceChanged (version restore / pushFile) which must always send.
     if (!forceChanged && sha1 && stored?.sha1 === sha1) {
-      await this.storage.writeMetadata({ path: file.path, sha1, mtime: stat.mtime, action: "active", fileType: "file" });
+      await this.storage.writeMetadata({ path: file.path, sha1, mtime: stat.mtime, size: stat.size, action: "active", fileType: "file" });
       return;
     }
 
-    const entry: FileEntry = { path: file.path, sha1: sha1 ?? "", mtime: stat.mtime, action: "active", fileType: "file" };
+    const entry: FileEntry = { path: file.path, sha1: sha1 ?? "", mtime: stat.mtime, size: stat.size, action: "active", fileType: "file" };
     // baseSha1 = the sha we last synced for this path. The server uses it to
     // detect concurrent edits (stale base) without trusting device clocks.
     this.ws.send({ type: "file_data", mode: mode as any, file: entry, content, ...(contentBytes ? { contentBytes } : {}), ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}) });
