@@ -367,6 +367,10 @@ export class Storage {
 
     // Obsidian's cache hides the .obsidian config folder, so we check them manually.
     await this._computeHiddenConfigFiles(exclusionFilter);
+
+    // "Hidden files" also covers dot-files/folders elsewhere in the vault
+    // (e.g. .rss-dashboard-data/), which the cache omits just like config.
+    if (this.settings.syncHiddenFiles) await this._computeHiddenRootFiles(exclusionFilter);
   }
 
   /**
@@ -414,13 +418,55 @@ export class Storage {
     await this._enumerateConfigDir(`${configDir}/themes`, targets);
     await this._enumerateConfigDir(`${configDir}/snippets`, targets);
 
-    for (const path of targets) {
+    await this._addFilesToTree(targets, exclusionFilter);
+  }
+
+  /**
+   * When "Hidden files" is on, sync also covers dot-files/folders OUTSIDE the
+   * config dir (e.g. .rss-dashboard-data/). Obsidian's loaded-file cache omits
+   * every dotfile, so computeTree()'s main loop never sees them and the config
+   * sweep only covers .obsidian. Here we list the vault root, pick the hidden
+   * entries, and walk them. .obsidian is handled separately; .git/node_modules
+   * are hard-excluded by the ExclusionFilter; .trash is gated by its own toggle
+   * (excluded here before we ever descend, so we never crawl a huge tree).
+   */
+  private async _computeHiddenRootFiles(exclusionFilter: ExclusionFilter): Promise<void> {
+    const configDir = this.app.vault.configDir;
+    const targets: string[] = [];
+    try {
+      const strip = (p: string) => (p.startsWith("/") ? p.slice(1) : p);
+      let root;
+      try { root = await this.app.vault.adapter.list("/"); }
+      catch { root = await this.app.vault.adapter.list(""); }
+      const isHiddenName = (p: string) => (p.split("/").pop() ?? p).startsWith(".");
+      for (const f of root.files.map(strip)) {
+        if (isHiddenName(f)) targets.push(f);
+      }
+      for (const d of root.folders.map(strip)) {
+        // Skip the config dir (handled separately) and anything the filter
+        // rejects at the folder level (.git, node_modules, .trash-when-off) so
+        // we never descend into a huge or machine-local tree.
+        if (!isHiddenName(d) || d === configDir || exclusionFilter.isExcluded(d)) continue;
+        await this._enumerateConfigDir(d, targets);
+      }
+    } catch { /* vault root unreadable — skip */ }
+    await this._addFilesToTree(targets, exclusionFilter);
+  }
+
+  /**
+   * Stats, hashes, and records tree entries for a list of explicit file paths
+   * (the hidden-file discovery paths — config sweep and root sweep). Uses the
+   * same mtime+size fast-path, binary-aware hashing, and stale-delete /
+   * re-encrypt effectiveMtime logic as computeTree()'s main loop.
+   */
+  private async _addFilesToTree(paths: string[], exclusionFilter: ExclusionFilter): Promise<void> {
+    for (const path of paths) {
       if (this.aborted) break;
       if (exclusionFilter.isExcluded(path)) continue;
 
       try {
         const stat = await this.app.vault.adapter.stat(path);
-        if (!stat) continue;
+        if (!stat || stat.type !== "file") continue;
 
         const mtime = stat.mtime;
         const size = stat.size;
@@ -431,8 +477,14 @@ export class Storage {
           continue;
         }
 
-        const txt = await this.fsVault.read(path);
-        const sha1 = txt != null ? await Utils.getSHA(txt) : "";
+        let sha1: string | null = "";
+        if (Utils.isBinary(path)) {
+          const buf = await this.fsVault.readBinary(path);
+          sha1 = buf ? await Utils.getSHABinary(buf) : "";
+        } else {
+          const txt = await this.fsVault.read(path);
+          sha1 = txt != null ? await Utils.getSHA(txt) : "";
+        }
         // Same three-case logic as in computeTree() above — see that comment.
         const effectiveMtime = stored && stored.action === "deleted"
           ? Date.now()
