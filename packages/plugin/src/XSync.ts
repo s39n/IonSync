@@ -135,6 +135,9 @@ export class XSync {
   // Per-path debounce timers for config-dir "raw" events (see _registerRawEvent).
   private _rawDebounce = new Map<string, ReturnType<typeof setTimeout>>();
 
+  // Trailing-pass timer for hot-applying a synced community-plugins.json (see _reloadCommunityPlugins).
+  private _pluginReloadTimer: ReturnType<typeof setTimeout> | null = null;
+
   private _applyingAdd(path: string): void {
     this._applyingPaths.set(path, (this._applyingPaths.get(path) ?? 0) + 1);
   }
@@ -310,6 +313,7 @@ export class XSync {
     this._recentlyApplied.clear();
     for (const t of this._rawDebounce.values()) clearTimeout(t);
     this._rawDebounce.clear();
+    if (this._pluginReloadTimer) { clearTimeout(this._pluginReloadTimer); this._pluginReloadTimer = null; }
     if (this.configCheckInterval !== null) {
       window.clearInterval(this.configCheckInterval);
       this.configCheckInterval = null;
@@ -1781,6 +1785,19 @@ export class XSync {
 
   private _reloadObsidianConfig(path: string): void {
     const configDir = this.plugin.app.vault.configDir;
+
+    // A synced plugin enable/disable (community-plugins.json) or a newly-arrived
+    // plugin (its manifest.json) → apply live so it takes effect without an
+    // Obsidian restart. Obsidian only scans .obsidian/plugins/ at startup, so
+    // without this a synced plugin sits on disk unseen (see _reloadCommunityPlugins).
+    if (
+      path === `${configDir}/community-plugins.json` ||
+      (path.startsWith(`${configDir}/plugins/`) && path.endsWith("/manifest.json"))
+    ) {
+      this._scheduleCommunityPluginReload();
+      return;
+    }
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const css = (this.plugin.app as any).customCss;
     if (!css) return;
@@ -1792,6 +1809,72 @@ export class XSync {
       path.startsWith(`${configDir}/snippets/`)
     ) {
       css.readCssSources?.();
+    }
+  }
+
+  // Run a community-plugins reload now, then once more after a short delay. The
+  // plugin's code files (main.js/manifest.json) can arrive as separate file_data
+  // messages a beat after community-plugins.json, so the immediate pass may find
+  // the manifest not yet present; the trailing pass catches it.
+  private _scheduleCommunityPluginReload(): void {
+    void this._reloadCommunityPlugins();
+    if (this._pluginReloadTimer) clearTimeout(this._pluginReloadTimer);
+    this._pluginReloadTimer = setTimeout(() => {
+      this._pluginReloadTimer = null;
+      void this._reloadCommunityPlugins();
+    }, 1500);
+  }
+
+  /**
+   * Hot-apply a synced community-plugins.json so an enable/disable/install done
+   * on another device takes effect here WITHOUT an Obsidian restart — mirroring
+   * how appearance/theme config already reloads live. All APIs are internal
+   * (app.plugins.*, already used by main.js for our own enablePlugin), hence the
+   * any-cast and try/catch: a future rename must never throw here. We use
+   * enablePlugin/disablePlugin, NOT the *AndSave variants: those rewrite
+   * community-plugins.json, which is already the synced source of truth and would
+   * echo straight back out.
+   */
+  private async _reloadCommunityPlugins(): Promise<void> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const plugins = (this.plugin.app as any).plugins;
+    if (!plugins?.enablePlugin || !plugins?.disablePlugin) return;
+    try {
+      // Register any plugin folders that arrived since startup, so their
+      // manifests are known before we try to enable them.
+      await plugins.loadManifests?.();
+
+      const configDir = this.plugin.app.vault.configDir;
+      const raw = await this.plugin.app.vault.adapter
+        .read(`${configDir}/community-plugins.json`)
+        .catch(() => null);
+      const parsed: unknown = raw ? JSON.parse(raw) : [];
+      const desired = new Set(
+        Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : []
+      );
+      const enabled: Set<string> = plugins.enabledPlugins ?? new Set<string>();
+
+      // Enable anything newly-listed whose manifest is actually present. A
+      // missing manifest means the code files are still in flight — the trailing
+      // pass (or a later sync) retries.
+      for (const id of desired) {
+        if (id === "ion-sync") continue; // never touch our own lifecycle
+        if (!enabled.has(id) && plugins.manifests?.[id]) {
+          try { await plugins.enablePlugin(id); this.plugin.log(`[IonSync] hot-enabled synced plugin ${id}`); }
+          catch (e) { console.warn(`[IonSync] enablePlugin(${id}) failed:`, e); }
+        }
+      }
+      // Disable anything the synced list no longer enables (matches what a
+      // restart would do when it reads the same file).
+      for (const id of Array.from(enabled)) {
+        if (id === "ion-sync") continue;
+        if (!desired.has(id)) {
+          try { await plugins.disablePlugin(id); this.plugin.log(`[IonSync] hot-disabled synced plugin ${id}`); }
+          catch (e) { console.warn(`[IonSync] disablePlugin(${id}) failed:`, e); }
+        }
+      }
+    } catch (e) {
+      console.warn("[IonSync] community-plugins hot-reload failed:", e);
     }
   }
 
