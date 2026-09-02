@@ -26,7 +26,7 @@ const postBuildPlugin = {
     const SERVER_CLIENT_DIR = path.join(__dirname, "..", "server", "client") + path.sep;
     const SERVER_ROOT_DIR = path.join(__dirname, "..", "server") + path.sep;
 
-    build.onEnd(() => {
+    build.onEnd(async () => {
       const pkg = JSON.parse(fs.readFileSync("./package.json", "utf-8"));
       const VERSION = pkg.version;
       const BUILD = Date.now();
@@ -36,6 +36,26 @@ const postBuildPlugin = {
         .replaceAll("__IONSYNC_VERSION__", JSON.stringify(VERSION))
         .replaceAll("__IONSYNC_BUILD__", JSON.stringify(String(BUILD)));
       fs.writeFileSync(BUILD_DIR + "main.js", mainJs);
+
+      // Sign main.js when a build secret is present. The private key never
+      // enters the runtime image; the plugin pins the matching public key and
+      // verifies before hot-reloading server-pushed code (updateSig / SECURITY.md
+      // #4). Without a key the build is UNSIGNED and signed clients refuse to
+      // auto-update — a safe, loud failure, never an RCE. Transport-independent:
+      // it protects ws:// and wss:// alike, so it never forces TLS on anyone.
+      let sig;
+      const signKey = (process.env.IONSYNC_SIGN_KEY || "").trim();
+      if (signKey) {
+        try {
+          const { signPluginBundle } = await import("../protocol/dist/index.js");
+          sig = signPluginBundle(Buffer.from(mainJs, "utf-8"), signKey);
+          console.log("[sign] main.js signed");
+        } catch (e) {
+          console.error("[sign] FAILED to sign (build will be UNSIGNED):", e);
+        }
+      } else {
+        console.warn("[sign] IONSYNC_SIGN_KEY not set — build is UNSIGNED; signed clients will refuse auto-update.");
+      }
 
       // Keep manifest.json version in sync
       const manifest = JSON.parse(fs.readFileSync("./manifest.json", "utf-8"));
@@ -51,7 +71,7 @@ const postBuildPlugin = {
       // `build` MUST be a string: the plugin sends it as a string in
       // version_check and the server compares with !== — a numeric value here
       // would make every connect look like an update (reload loop).
-      fs.writeFileSync(BUILD_DIR + "build_info.json", JSON.stringify({ version: VERSION, build: String(BUILD) }));
+      fs.writeFileSync(BUILD_DIR + "build_info.json", JSON.stringify({ version: VERSION, build: String(BUILD), ...(sig ? { sig } : {}) }));
 
       // Copy to server/client/ so the server can distribute the plugin for
       // auto-update. build_info.json MUST be in this list — without it the

@@ -25,9 +25,10 @@ COPY packages/plugin/    ./packages/plugin/
 # packages/server/client/ — that is what powers device auto-update, so the
 # plugin MUST be built here rather than relying on artifacts from the host
 # working tree (which .dockerignore excludes).
+ARG IONSYNC_SIGN_KEY=""
 RUN npm run build -w packages/protocol
 RUN npm run build -w packages/server
-RUN npm run build -w packages/plugin
+RUN IONSYNC_SIGN_KEY="$IONSYNC_SIGN_KEY" npm run build -w packages/plugin
 
 # Drop dev dependencies before we copy node_modules to the runtime stage
 RUN npm prune --omit=dev

@@ -37,7 +37,7 @@ CSRF protection, and rate limiting — rather than relying on network isolation.
 | 1 | Admin session token is a static function of the password | **High** | ✅ Fixed (random server-issued token) |
 | 2 | TOTP (2FA) is bypassable by any password-holder | **High** | ✅ Fixed (via #1) |
 | 3 | Admin server runs plain HTTP; cookie lacks `Secure`/`SameSite` | **High** | Open — `SameSite` added; HTTP + `Secure` remain |
-| 4 | Plugin executes server-pushed JS with no signature check | **High** | **Open** |
+| 4 | Plugin executes server-pushed JS with no signature check | **High** | ✅ Fixed (ed25519-signed updates) |
 | 5 | E2EE export endpoint decrypts server-side (key leaves the client) | **High** | **Open** |
 | 6 | CSRF on cookie-authenticated, state-changing endpoints | **Medium** | Open — mitigated by `SameSite=Strict` |
 | 7 | Fixed global PBKDF2 salt; low iteration count | **Medium** | Partial — iterations 100k→600k; salt still global |
@@ -59,6 +59,13 @@ since the June review.
   store), replacing `sha256(password+"-dashboard")`. A session exists only after
   a completed `/api/login` (+ TOTP when enabled), so a password-holder can no
   longer compute the cookie or skip the second factor.
+- **#4 Unsigned plugin auto-update (RCE)** — update bundles (`main.js`) are now
+  **ed25519-signed at build time** with a key the running server never holds
+  (`IONSYNC_SIGN_KEY` build secret). The plugin pins the public key
+  (`updateKey.ts`) and verifies before hot-reloading, **failing closed** on a
+  missing/invalid signature. Transport-independent — protects `ws://` and
+  `wss://` alike, so it imposes no TLS requirement. Crypto lives in
+  `protocol/updateSig.ts` (unit-tested).
 - **#8 Constant-time comparison** — `timingSafeEqual` now backs the dashboard
   cookie/password (`secretsMatch`, `http/routes.ts`) and the WS auth token
   (`ws/handlers/auth.ts`).
@@ -70,8 +77,8 @@ since the June review.
 - **Correctness bugs** — delta-patch now uses `readLatest` + `patch_apply`;
   `trigger-sync` sends a real `request_sync`; the `/api/sync/background` stub and
   its `diff_match_patch` import are gone; the duplicate TOTP route block is gone;
-  bulk-push (`drainPushQueue`) enforces the size limit. (Only the traversal
-  status-code bug remains — see that section.)
+  bulk-push (`drainPushQueue`) enforces the size limit; and `/api/file-content`
+  returns a clean 400 (not 500) on a blocked traversal. All six are fixed.
 
 **Partially fixed**
 - **#7** — PBKDF2 iterations raised **100k → 600k** (v2; v1 retained only to read
@@ -81,13 +88,11 @@ since the June review.
   the admin server is still plain HTTP and the cookie has no `Secure`.
 
 **Still open — priority order**
-1. **#4 Unsigned plugin auto-update (RCE).** Still hot-reloads server-pushed JS
-   with no signature and no TLS gate. Highest priority.
-2. **#5 E2EE export decrypts server-side.** `/api/export-snapshot` still accepts
+1. **#5 E2EE export decrypts server-side.** `/api/export-snapshot` still accepts
    `X-E2EE-Password`, derives the key, and decrypts (and logs) on the server.
-3. **#3 Admin TLS** + cookie `Secure`.
-4. **#6 CSRF token** + POST/DELETE for mutating actions (mitigated by SameSite).
-5. **#10 TOTP secret** stored plaintext.
+2. **#3 Admin TLS** + cookie `Secure`.
+3. **#6 CSRF token** + POST/DELETE for mutating actions (mitigated by SameSite).
+4. **#10 TOTP secret** stored plaintext.
 
 ---
 
@@ -141,6 +146,9 @@ dash_token=...; Path=/; Expires=...; HttpOnly
 restrict the admin port to a VPN/private network.
 
 ### 4. Plugin executes server-pushed JavaScript with no verification
+
+> **Fixed (2026-09-02):** ed25519-signed update bundles, verified against a
+> pinned public key before hot-reload; fails closed. See the Re-audit summary.
 
 `version_check_response` delivers `main.js`, `styles.css`, and `manifest.json`
 as base64, and the plugin hot-reloads them. There is no signature check, and the
