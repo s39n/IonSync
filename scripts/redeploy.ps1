@@ -5,7 +5,7 @@ $NAS = "10.0.0.202"
 $USER = "Sean"
 $IMAGE = "ionsync"
 
-Set-Location $PSScriptRoot
+Set-Location "$PSScriptRoot\.."
 
 Write-Host "=== IonSync Redeploy ===" -ForegroundColor Cyan
 
