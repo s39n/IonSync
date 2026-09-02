@@ -14,6 +14,8 @@ import path from "node:path";
 interface BuildInfo {
   version: string;
   build: string;
+  /** base64 ed25519 signature of main.js, written by the signed build. */
+  sig?: string;
 }
 
 // Cached build info loaded once at startup
@@ -93,5 +95,5 @@ export function handleVersionCheck(
     }
   }
 
-  peer.send({ type: "version_check_response", needsUpdate: true, files, caps: SERVER_CAPS });
+  peer.send({ type: "version_check_response", needsUpdate: true, files, ...(serverBuild.sig ? { signature: serverBuild.sig } : {}), caps: SERVER_CAPS });
 }

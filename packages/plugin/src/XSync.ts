@@ -1,5 +1,5 @@
 import type { FileEntry, ServerMsg, ConflictListResponseMsg, ConflictContentResponseMsg, ConflictActionResponseMsg } from "@ionsync/protocol";
-import { collectFolderChildren, cascadeDeleteExceedsSafetyCap, computeOfflineDeletes } from "@ionsync/protocol";
+import { collectFolderChildren, cascadeDeleteExceedsSafetyCap, computeOfflineDeletes, verifyPluginBundle } from "@ionsync/protocol";
 import { Platform, type TAbstractFile } from "obsidian";
 import { WsManager, type UpdateInfo } from "./WsManager.js";
 import { Storage } from "./Storage.js";
@@ -7,6 +7,7 @@ import { XNotify, NotifyType, STATUS_WARN, STATUS_OK, STATUS_ERROR, STATUS_SYNC 
 import { XTimeouts } from "./XTimeouts.js";
 import { ExclusionFilter } from "./ExclusionFilter.js";
 import Utils from "./Utils.js";
+import { PLUGIN_UPDATE_PUBKEY } from "./updateKey.js";
 import type { IonSyncPlugin } from "./main.js";
 import { diff_match_patch } from "diff-match-patch";
 import { deriveKey, encryptToBytes, decryptFromBase64, isEncryptedBase64 } from "./Crypto.js";
@@ -1748,6 +1749,21 @@ export class XSync {
   }
 
   private async _onUpdateAvailable(update: UpdateInfo): Promise<void> {
+    // SECURITY (SECURITY.md #4): the plugin hot-reloads server-pushed JS with
+    // full vault + filesystem access. Never apply it without verifying it was
+    // signed by the pinned key — a rogue/MITM server over ws:// cannot forge the
+    // signature, and a missing or invalid one fails closed.
+    const main = update.files.find((f) => f.name === "main.js");
+    if (!main) {
+      this.plugin.log("[Update] rejected: bundle has no main.js");
+      return;
+    }
+    const bundle = Utils.fromBase64(main.content);
+    if (!verifyPluginBundle(bundle, update.signature, PLUGIN_UPDATE_PUBKEY)) {
+      this.plugin.log("[Update] REJECTED: missing/invalid signature — refusing to hot-reload server-pushed code");
+      this.xNotify.showNotification(STATUS_WARN, "Blocked an unsigned plugin update — not applied");
+      return;
+    }
     await this.storage.updatePlugin(update.files);
     this.xNotify.showNotification("#ffaa00", "Plugin updated — reloading…");
     await (this.plugin.app as any).plugins.disablePlugin("ion-sync");
