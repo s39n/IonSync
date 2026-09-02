@@ -138,6 +138,9 @@ export class XSync {
   // Trailing-pass timer for hot-applying a synced community-plugins.json (see _reloadCommunityPlugins).
   private _pluginReloadTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Debounce timer for a scope-setting change → full re-scan (see scheduleFullReconcile).
+  private _reconcileDebounce: ReturnType<typeof setTimeout> | null = null;
+
   private _applyingAdd(path: string): void {
     this._applyingPaths.set(path, (this._applyingPaths.get(path) ?? 0) + 1);
   }
@@ -314,6 +317,7 @@ export class XSync {
     for (const t of this._rawDebounce.values()) clearTimeout(t);
     this._rawDebounce.clear();
     if (this._pluginReloadTimer) { clearTimeout(this._pluginReloadTimer); this._pluginReloadTimer = null; }
+    if (this._reconcileDebounce) { clearTimeout(this._reconcileDebounce); this._reconcileDebounce = null; }
     if (this.configCheckInterval !== null) {
       window.clearInterval(this.configCheckInterval);
       this.configCheckInterval = null;
@@ -856,6 +860,25 @@ export class XSync {
       this.releaseWakeLock();
       this.xNotify.notifyStatus(this.ws.isConnected ? NotifyType.CONNECTED : NotifyType.NOT_CONNECTED);
     }
+  }
+
+  /**
+   * A sync-scope setting changed (Hidden files, a config/file-type toggle,
+   * keepConfigLocal, the exclusion list, or max file size). Force the next sync
+   * to re-scan the vault (computeTree via _reconcileUploads) so newly-INCLUDED
+   * files upload without an Obsidian restart, then kick a sync. Debounced so
+   * flipping several toggles — or typing in the exclusion box — coalesces to a
+   * single pass. Newly-EXCLUDED files already on the server are intentionally
+   * left as-is: computeOfflineDeletes skips excluded paths, so turning a category
+   * off stops future syncing without deleting existing copies from other devices.
+   */
+  scheduleFullReconcile(): void {
+    if (this._reconcileDebounce) clearTimeout(this._reconcileDebounce);
+    this._reconcileDebounce = setTimeout(() => {
+      this._reconcileDebounce = null;
+      this._needsFullReconcile = true;
+      if (this.ws.isConnected && this.plugin.settings.autoSync && !this.isSyncing) void this.sync();
+    }, 1500);
   }
 
   private async _onSyncDone(complete = true): Promise<void> {
