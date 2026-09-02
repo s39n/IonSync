@@ -32,6 +32,7 @@ export interface Config {
   cleanup: CleanupConfig;
   logs: { level: number };
   maxFileSizeMb: number;
+  backup: { intervalHours: number; retain: number };
 }
 
 const DEFAULTS: Omit<Config, "password" | "adminPort"> = {
@@ -43,6 +44,7 @@ const DEFAULTS: Omit<Config, "password" | "adminPort"> = {
   cleanup: { intervalSecs: 3600, versionsPerFile: 5, keepDeletedFilesSecs: 7 * 24 * 3600 },
   logs: { level: 3 },
   maxFileSizeMb: 50,
+  backup: { intervalHours: 24, retain: 7 },
 };
 
 export async function loadConfig(configPath?: string): Promise<Config> {
@@ -76,6 +78,16 @@ export function mergeConfig(raw: Record<string, unknown>): Config {
     ? envMax
     : (typeof raw["maxFileSizeMb"] === "number" && raw["maxFileSizeMb"] > 0 ? raw["maxFileSizeMb"] : DEFAULTS.maxFileSizeMb);
 
+  const backupRaw = (raw["backup"] as { intervalHours?: number; retain?: number } | undefined) ?? {};
+  const envInterval = process.env.BACKUP_INTERVAL_HOURS ? parseInt(process.env.BACKUP_INTERVAL_HOURS, 10) : NaN;
+  const envRetain = process.env.BACKUP_RETAIN ? parseInt(process.env.BACKUP_RETAIN, 10) : NaN;
+  const backup = {
+    intervalHours: Number.isFinite(envInterval) && envInterval > 0 ? envInterval
+      : (typeof backupRaw.intervalHours === "number" && backupRaw.intervalHours > 0 ? backupRaw.intervalHours : DEFAULTS.backup.intervalHours),
+    retain: Number.isFinite(envRetain) && envRetain > 0 ? envRetain
+      : (typeof backupRaw.retain === "number" && backupRaw.retain > 0 ? backupRaw.retain : DEFAULTS.backup.retain),
+  };
+
   const result: Config = {
     password: raw["password"],
     port,
@@ -91,6 +103,7 @@ export function mergeConfig(raw: Record<string, unknown>): Config {
     },
     logs: { level: logs.level ?? DEFAULTS.logs.level },
     maxFileSizeMb,
+    backup,
   };
 
   if (raw["tls"] && typeof raw["tls"] === "object") {

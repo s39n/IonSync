@@ -25,6 +25,16 @@ export default {
     keepDeletedFilesSecs: 7 * 24 * 3600,  // purge deleted files after 7 days
   },
 
+  // ── Backups ───────────────────────────────────────────────────────────────
+  // Automatic SQLite snapshots (VACUUM INTO) written to <dataDir>/backups/.
+  // A pre-migration snapshot is always taken on startup (a rollback point if a
+  // migration goes wrong); the settings below tune the periodic ones.
+  // Env overrides: BACKUP_INTERVAL_HOURS, BACKUP_RETAIN.
+  backup: {
+    intervalHours: 24,  // snapshot this often while running
+    retain: 7,          // keep this many of each kind (daily / pre-migrate)
+  },
+
   // ── Logging ───────────────────────────────────────────────────────────────
   logs: {
     level: 3,  // 0=silent  1=error  2=warn  3=info

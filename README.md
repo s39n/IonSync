@@ -40,7 +40,7 @@ docker compose up -d
 open http://localhost:3000/dashboard
 ```
 
-The server listens on port `3000` by default. Data (SQLite database + file versions) is stored in a Docker named volume so it survives container restarts.
+The server listens on port `3000` by default. Data (SQLite database + file versions) is stored in a Docker named volume so it survives container restarts. Automatic SQLite backups are written to `<dataDir>/backups/` (a `pre-migrate` snapshot on every startup, plus periodic `daily` snapshots via `VACUUM INTO`); tune them with the `backup` config block or the `BACKUP_INTERVAL_HOURS` / `BACKUP_RETAIN` env vars.
 
 ---
 
