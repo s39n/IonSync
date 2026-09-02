@@ -124,6 +124,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
             .onChange(async (v) => {
               (this.plugin.settings as any)[key] = v;
               await this.plugin.saveSettings();
+              this.plugin.xSync?.scheduleFullReconcile();
             })
         );
     };
@@ -137,7 +138,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
       )
       .addToggle((t) =>
         t.setValue(this.plugin.settings.keepConfigLocal)
-          .onChange(async (v) => { this.plugin.settings.keepConfigLocal = v; await this.plugin.saveSettings(); })
+          .onChange(async (v) => { this.plugin.settings.keepConfigLocal = v; await this.plugin.saveSettings(); this.plugin.xSync?.scheduleFullReconcile(); })
       );
 
     toggleSetting("Hidden files", "Files/folders starting with '.'", "syncHiddenFiles");
@@ -166,7 +167,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
         s.setLimits(1, 100, 1)
           .setValue(this.plugin.settings.maxFileSizeMB ?? 25)
           .setDynamicTooltip()
-          .onChange(async (v) => { this.plugin.settings.maxFileSizeMB = v; await this.plugin.saveSettings(); })
+          .onChange(async (v) => { this.plugin.settings.maxFileSizeMB = v; await this.plugin.saveSettings(); this.plugin.xSync?.scheduleFullReconcile(); })
       );
 
     // ── End-to-End Encryption ───────────────────────────────────────────────
@@ -259,7 +260,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
       .addTextArea((ta) =>
         ta.setPlaceholder("*.log\nsecrets/**")
           .setValue(this.plugin.settings.exclusionList)
-          .onChange(async (v) => { this.plugin.settings.exclusionList = v; await this.plugin.saveSettings(); })
+          .onChange(async (v) => { this.plugin.settings.exclusionList = v; await this.plugin.saveSettings(); this.plugin.xSync?.scheduleFullReconcile(); })
       )
       .settingEl.style.flexDirection = "column";
 
