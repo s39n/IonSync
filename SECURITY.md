@@ -1,6 +1,6 @@
 # Security Review — IonSync v2
 
-_Last reviewed: 2026-06-10. Scope: `packages/server`, `packages/plugin`, Docker
+_Last reviewed: 2026-06-10 · **re-audited 2026-09-02** (statuses below reflect current `main`; see the Re-audit summary). Scope: `packages/server`, `packages/plugin`, Docker
 deployment, and the admin dashboard. This document records the threat model,
 known issues, and recommended remediations._
 
@@ -32,19 +32,60 @@ CSRF protection, and rate limiting — rather than relying on network isolation.
 
 ## Severity summary
 
-| # | Issue | Severity | Status |
+| # | Issue | Severity | Status (2026-09-02) |
 |---|-------|----------|--------|
-| 1 | Admin session token is a static function of the password | **High** | Open |
-| 2 | TOTP (2FA) is bypassable by any password-holder | **High** | Open |
-| 3 | Admin server runs plain HTTP; cookie lacks `Secure`/`SameSite` | **High** | Open |
-| 4 | Plugin executes server-pushed JS with no signature check | **High** | Open |
-| 5 | E2EE export endpoint decrypts server-side (key leaves the client) | **High** | Open |
-| 6 | CSRF on cookie-authenticated, state-changing endpoints | **Medium** | Open |
-| 7 | Fixed global PBKDF2 salt; low iteration count | **Medium** | Open |
-| 8 | No constant-time comparison of secrets | **Medium** | Open |
-| 9 | No rate limiting / lockout on auth | **Medium** | Open |
+| 1 | Admin session token is a static function of the password | **High** | Open — mitigated (SameSite + timing-safe compare) |
+| 2 | TOTP (2FA) is bypassable by any password-holder | **High** | Open (blocked by #1) |
+| 3 | Admin server runs plain HTTP; cookie lacks `Secure`/`SameSite` | **High** | Open — `SameSite` added; HTTP + `Secure` remain |
+| 4 | Plugin executes server-pushed JS with no signature check | **High** | **Open** |
+| 5 | E2EE export endpoint decrypts server-side (key leaves the client) | **High** | **Open** |
+| 6 | CSRF on cookie-authenticated, state-changing endpoints | **Medium** | Open — mitigated by `SameSite=Strict` |
+| 7 | Fixed global PBKDF2 salt; low iteration count | **Medium** | Partial — iterations 100k→600k; salt still global |
+| 8 | No constant-time comparison of secrets | **Medium** | ✅ Fixed |
+| 9 | No rate limiting / lockout on auth | **Medium** | ✅ Fixed |
 | 10 | TOTP secret stored in plaintext | **Medium** | Open |
-| 11 | Long-lived AES-GCM key, no rotation | **Low** | Open |
+| 11 | Long-lived AES-GCM key, no rotation | **Low** | ✅ Addressed (re-encrypt/re-key shipped) |
+
+---
+
+## Re-audit summary (2026-09-02)
+
+Every item below was re-verified against current `main`. Substantial progress
+since the June review.
+
+**Fixed**
+- **#8 Constant-time comparison** — `timingSafeEqual` now backs the dashboard
+  cookie/password (`secretsMatch`, `http/routes.ts`) and the WS auth token
+  (`ws/handlers/auth.ts`).
+- **#9 Rate limiting** — `ConnectionRateLimiter` gates `/api/login` (per-IP,
+  429 on excess) and WS connections (`ws/rateLimit.ts`).
+- **#11 Key rotation** — a "Re-encrypt all files" action (Settings →
+  `triggerReEncrypt` → `Storage.bumpAllMtimesForReEncrypt`) is the re-key path
+  the fix asked for. The theoretical IV-collision bound is unchanged.
+- **Correctness bugs** — delta-patch now uses `readLatest` + `patch_apply`;
+  `trigger-sync` sends a real `request_sync`; the `/api/sync/background` stub and
+  its `diff_match_patch` import are gone; the duplicate TOTP route block is gone;
+  bulk-push (`drainPushQueue`) enforces the size limit. (Only the traversal
+  status-code bug remains — see that section.)
+
+**Partially fixed**
+- **#7** — PBKDF2 iterations raised **100k → 600k** (v2; v1 retained only to read
+  legacy blobs). The global fixed salt (`IonSync-AES-GCM-v1-salt`) remains, still
+  documented as an intentional cross-device trade-off.
+- **#3** — the cookie now carries `SameSite=Strict` (which also blunts #6), but
+  the admin server is still plain HTTP and the cookie has no `Secure`.
+
+**Still open — priority order**
+1. **#4 Unsigned plugin auto-update (RCE).** Still hot-reloads server-pushed JS
+   with no signature and no TLS gate. Highest priority.
+2. **#5 E2EE export decrypts server-side.** `/api/export-snapshot` still accepts
+   `X-E2EE-Password`, derives the key, and decrypts (and logs) on the server.
+3. **#1 Static admin session token** (`sha256(password+"-dashboard")`) — unblocks #2.
+4. **#2 TOTP bypass** (via #1).
+5. **#3 Admin TLS** + cookie `Secure`.
+6. **#6 CSRF token** + POST/DELETE for mutating actions (mitigated by SameSite).
+7. **#10 TOTP secret** stored plaintext.
+8. _(Low)_ `/api/file-content` returns **500** (not 400) on a blocked traversal.
 
 ---
 
@@ -198,21 +239,18 @@ and track encryption counts if vaults grow very large.
 These are not vulnerabilities but cause silent data loss or dead security
 features, and should be fixed or removed so the security posture is honest:
 
-- **Delta-patch mode is broken.** `ws/server.ts` calls `ctx.storage.read(...)`,
-  which does not exist on `Storage` (only `readLatest`/`readVersion`). `mode:
-  "patch"` always throws, is swallowed, and the edit is silently dropped. Either
-  implement it correctly or remove the branch.
-- **`trigger-sync` admin action is a no-op** — it sends `sync_done` to an idle
-  peer instead of initiating a sync, and can falsely signal completion.
-- **`/api/sync/background` is an empty stub** returning `{ ok: true }`. Remove it
-  (and the unused `diff_match_patch` import in `routes.ts`) or implement it.
-- **Duplicate TOTP route block** — `/api/totp/{status,generate,enable,disable}`
-  is registered twice; the second copy is dead. Remove it.
-- **File-size limit not enforced on bulk-sync push** (`drainPushQueue` reads and
-  pushes oversized files regardless of `maxFileSizeMb`).
-- **Crafted paths can 500 the server** — `/api/file-content` doesn't catch the
-  traversal exception thrown by `Storage.resolve` (traversal is correctly
-  blocked, but returns a 500 instead of a clean 400).
+- ✅ **Delta-patch mode** — **Fixed (2026-09):** `ws/server.ts` now reads via
+  `ctx.storage.readLatest` and applies with `diff_match_patch.patch_apply`.
+- ✅ **`trigger-sync` admin action** — **Fixed (2026-09):** sends `request_sync`
+  so the client actually runs a cursor catch-up.
+- ✅ **`/api/sync/background` stub** — **Fixed (2026-09):** endpoint and the
+  unused `diff_match_patch` import removed from `routes.ts`.
+- ✅ **Duplicate TOTP route block** — **Fixed (2026-09):** registered once.
+- ✅ **File-size limit on bulk-sync push** — **Fixed (2026-09):** `drainPushQueue`
+  (`ws/handlers/sync.ts`) skips files over `maxFileSizeMb`.
+- ❌ **Crafted paths can 500 the server** — **Still open (low):** `/api/file-content`
+  still doesn't catch the `Storage.resolve` traversal throw (blocked correctly,
+  but returns 500 instead of a clean 400).
 
 ---
 
