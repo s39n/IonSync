@@ -9,7 +9,7 @@
 		"typecheck": "tsc --noEmit",
 		"start": "node --max-old-space-size=4096 --enable-source-maps dist/index.js",
 		"dev": "tsx --max-old-space-size=4096 src/index.ts",
-		"test": "node --max-old-space-size=4096 --import tsx/esm --test --test-timeout=15000 test/sync.test.ts test/cleanup.test.ts test/seq.test.ts test/syncCursor.test.ts test/security.test.ts test/rename.test.ts test/binaryFrames.test.ts test/folderDelete.test.ts test/verify.test.ts test/attribution.test.ts test/offlineDeletes.test.ts test/conflicts.test.ts",
+		"test": "node --max-old-space-size=4096 --import tsx/esm --test --test-timeout=15000 test/sync.test.ts test/cleanup.test.ts test/seq.test.ts test/syncCursor.test.ts test/security.test.ts test/rename.test.ts test/binaryFrames.test.ts test/folderDelete.test.ts test/verify.test.ts test/attribution.test.ts test/offlineDeletes.test.ts test/conflicts.test.ts test/backup.test.ts",
 		"totp:reset": "tsx scripts/totp-reset.ts"
 	},
 	"dependencies": {

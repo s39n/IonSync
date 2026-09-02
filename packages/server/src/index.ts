@@ -10,6 +10,7 @@ import { createContext } from "./context.js";
 import { attachWebSocketServer } from "./ws/server.js";
 import { buildPublicRouter, buildAdminRouter } from "./http/routes.js";
 import { SyncCleanup } from "./cleanup/index.js";
+import { startBackupScheduler } from "./backup.js";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -41,11 +42,21 @@ const dbDir = path.join(dataBase, "db");
 const filesDir = path.join(dataBase, "files");
 const clientDir = path.join(config.appDir, "client");
 
-const db = new SyncDB(dbDir);
+const backupDir = path.join(dataBase, "backups");
+const db = new SyncDB(dbDir, { backupDir, retain: config.backup.retain });
 const storage = new Storage(filesDir);
 storage.init();
 
 const ctx = createContext(config, db, storage, clientDir);
+
+// Nightly DB snapshots (in addition to the pre-migration snapshot SyncDB takes
+// on startup). VACUUM INTO → data/backups/. Timer is unref'd so it never blocks
+// shutdown; see backup.ts.
+const stopBackups = startBackupScheduler(
+  (dir, tag) => db.snapshot(dir, tag),
+  backupDir,
+  { intervalMs: config.backup.intervalHours * 60 * 60 * 1000, retain: config.backup.retain },
+);
 
 // Patch console methods to feed into the in-memory log buffer (200 lines max).
 const MAX_LOG = 200;
@@ -127,6 +138,7 @@ function shutdown(): void {
   shuttingDown = true;
   console.log("Shutting down…");
   cleanup.stop();
+  stopBackups();
   adminServer.close();
   publicServer.close(() => {
     // Close the DB after the servers stop accepting work so in-flight

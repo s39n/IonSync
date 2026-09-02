@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import type { FileEntry, VersionEntry } from "@ionsync/protocol";
 import { runMigrations } from "./migrations.js";
+import { backupFilename, pruneBackups } from "../backup.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -81,9 +82,15 @@ function rowToFileEntry(row: DbFileRow): FileEntry {
 export class SyncDB {
   private db: Database.Database;
 
-  constructor(dbDir: string) {
+  private readonly dbPath: string;
+
+  constructor(dbDir: string, opts?: { backupDir?: string; retain?: number }) {
     fs.mkdirSync(dbDir, { recursive: true });
-    this.db = new Database(path.join(dbDir, "sync.db"));
+    this.dbPath = path.join(dbDir, "sync.db");
+    // Capture existence BEFORE opening — new Database() creates the file, so a
+    // fresh DB must not trigger a (pointless) pre-migration snapshot.
+    const preExisting = fs.existsSync(this.dbPath);
+    this.db = new Database(this.dbPath);
     this.db.pragma("journal_mode = WAL");
     // NORMAL durability is safe under WAL: a crash can lose at most the last
     // committed transaction (which the plugin will re-upload on next sync).
@@ -91,6 +98,18 @@ export class SyncDB {
     // noticeable latency during bulk syncs with many small files.
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma("foreign_keys = ON");
+    // Pre-migration rollback point: snapshot the DB as it is on disk BEFORE any
+    // migration runs, so a bad migration or startup logic can be rolled back
+    // (the failure mode behind both 2026 incidents). Best-effort; never blocks boot.
+    if (opts?.backupDir && preExisting) {
+      try {
+        const p = this.snapshot(opts.backupDir, "pre-migrate");
+        pruneBackups(opts.backupDir, "pre-migrate", opts.retain ?? 7);
+        console.log(`[backup] pre-migration snapshot -> ${path.basename(p)}`);
+      } catch (e) {
+        console.error("[backup] pre-migration snapshot failed:", e);
+      }
+    }
     runMigrations(this.db);
     this.repairSeqCounter();
   }
@@ -120,6 +139,18 @@ export class SyncDB {
    * already on rows and makes healthy clients look "ahead of the server". Runtime
    * client-watermark rollbacks are handled in the cursor handler. (Audit §3.5.)
    */
+  /**
+   * Consistent single-file DB snapshot via VACUUM INTO (synchronous, WAL-safe,
+   * compacted). Returns the snapshot path; the timestamped name never collides.
+   */
+  snapshot(destDir: string, tag: string): string {
+    fs.mkdirSync(destDir, { recursive: true });
+    const dest = path.join(destDir, backupFilename(tag));
+    // VACUUM INTO takes a string literal, not a bound parameter — escape quotes.
+    this.db.exec(`VACUUM INTO '${dest.replace(/'/g, "''")}'`);
+    return dest;
+  }
+
   repairSeqCounter(): void {
     const max = this.db
       .prepare<[], { m: number }>("SELECT COALESCE(MAX(seq), 0) AS m FROM files")
