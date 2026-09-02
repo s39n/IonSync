@@ -402,15 +402,22 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     let buf: Buffer | null;
     let resolvedMtime: number | undefined;
 
-    if (mtimeParam) {
-      const mtime = parseInt(mtimeParam, 10);
-      if (isNaN(mtime)) { res.status(400).json({ error: "Invalid mtime" }); return; }
-      buf = ctx.storage.readVersion(filePath, mtime);
-      resolvedMtime = mtime;
-    } else {
-      buf = ctx.storage.readLatest(filePath);
-      const versions = ctx.db.getVersions(filePath);
-      resolvedMtime = versions[0]?.mtime;
+    try {
+      if (mtimeParam) {
+        const mtime = parseInt(mtimeParam, 10);
+        if (isNaN(mtime)) { res.status(400).json({ error: "Invalid mtime" }); return; }
+        buf = ctx.storage.readVersion(filePath, mtime);
+        resolvedMtime = mtime;
+      } else {
+        buf = ctx.storage.readLatest(filePath);
+        const versions = ctx.db.getVersions(filePath);
+        resolvedMtime = versions[0]?.mtime;
+      }
+    } catch {
+      // Storage.resolve throws on a path-traversal attempt — a rejected request,
+      // not a server fault. Return a clean 400 rather than an uncaught 500.
+      res.status(400).json({ error: "Invalid path" });
+      return;
     }
 
     if (!buf) { res.status(404).json({ error: "File not found" }); return; }

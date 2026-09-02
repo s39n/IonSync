@@ -88,7 +88,6 @@ since the June review.
 3. **#3 Admin TLS** + cookie `Secure`.
 4. **#6 CSRF token** + POST/DELETE for mutating actions (mitigated by SameSite).
 5. **#10 TOTP secret** stored plaintext.
-6. _(Low)_ `/api/file-content` returns **500** (not 400) on a blocked traversal.
 
 ---
 
@@ -251,9 +250,8 @@ features, and should be fixed or removed so the security posture is honest:
 - ✅ **Duplicate TOTP route block** — **Fixed (2026-09):** registered once.
 - ✅ **File-size limit on bulk-sync push** — **Fixed (2026-09):** `drainPushQueue`
   (`ws/handlers/sync.ts`) skips files over `maxFileSizeMb`.
-- ❌ **Crafted paths can 500 the server** — **Still open (low):** `/api/file-content`
-  still doesn't catch the `Storage.resolve` traversal throw (blocked correctly,
-  but returns 500 instead of a clean 400).
+- ✅ **Crafted paths can 500 the server** — **Fixed (2026-09):** `/api/file-content`
+  now catches the `Storage.resolve` traversal throw and returns a clean 400.
 
 ---
 
