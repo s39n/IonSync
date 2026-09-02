@@ -598,10 +598,32 @@ describe("no-op resend suppression (echo storm)", () => {
 });
 
 describe("dashboard admin actions", () => {
-  function dashHeaders(): Record<string, string> {
-    const token = createHash("sha256").update(TEST_PASSWORD + "-dashboard").digest("hex");
+  // Log in for real and reuse the server-issued random session cookie. The
+  // token is no longer a deterministic function of the password (SECURITY.md #1).
+  async function dashHeaders(port: number): Promise<Record<string, string>> {
+    const r = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      headers: { "x-dashboard-password": TEST_PASSWORD },
+    });
+    const token = /dash_token=([^;]+)/.exec(r.headers.get("set-cookie") ?? "")?.[1] ?? "";
     return { Cookie: `dash_token=${token}` };
   }
+
+  it("rejects the legacy deterministic dash_token; only a real login is accepted (SECURITY.md #1/#2)", async () => {
+    const srv = await startTestServer();
+    // Pre-#1 cookie: sha256(password + "-dashboard"), which any password-holder
+    // could compute offline. It must now be rejected.
+    const legacy = createHash("sha256").update(TEST_PASSWORD + "-dashboard").digest("hex");
+    const denied = await fetch(`http://127.0.0.1:${srv.port}/api/logs`, {
+      headers: { Cookie: `dash_token=${legacy}` },
+    });
+    assert.equal(denied.status, 401, "legacy deterministic token must be rejected");
+    // A completed /api/login yields a working random session cookie.
+    const ok = await fetch(`http://127.0.0.1:${srv.port}/api/logs`, {
+      headers: await dashHeaders(srv.port),
+    });
+    assert.equal(ok.status, 200, "a real login session must be accepted");
+    await srv.stop();
+  });
 
   it("trigger-sync asks the client to actually resync, instead of a bare sync_done", async () => {
     const srv = await startTestServer();
@@ -613,7 +635,7 @@ describe("dashboard admin actions", () => {
     assert.ok(peer, "peer should be registered after auth");
 
     const res = await fetch(`http://127.0.0.1:${srv.port}/api/action/trigger-sync/${peer!.id}`, {
-      headers: dashHeaders(),
+      headers: await dashHeaders(srv.port),
     });
     assert.equal(res.status, 200);
 
@@ -656,7 +678,7 @@ describe("dashboard admin actions", () => {
 
     const res = await fetch(
       `http://127.0.0.1:${srv.port}/api/delete-file/${encodeURIComponent(PATH)}`,
-      { method: "DELETE", headers: dashHeaders() }
+      { method: "DELETE", headers: await dashHeaders(srv.port) }
     );
     assert.equal(res.status, 200);
 
@@ -701,7 +723,7 @@ describe("dashboard admin actions", () => {
 
     const res = await fetch(`http://127.0.0.1:${srv.port}/api/delete-folder`, {
       method: "POST",
-      headers: { ...dashHeaders(), "Content-Type": "application/json" },
+      headers: { ...(await dashHeaders(srv.port)), "Content-Type": "application/json" },
       body: JSON.stringify({ prefix: "Projects" }),
     });
     assert.equal(res.status, 200);
@@ -732,7 +754,7 @@ describe("dashboard admin actions", () => {
     const srv = await startTestServer();
     const ac = new AbortController();
     const res = await fetch(`http://127.0.0.1:${srv.port}/api/events`, {
-      headers: dashHeaders(),
+      headers: await dashHeaders(srv.port),
       signal: ac.signal,
     });
     assert.equal(res.status, 200);

@@ -34,8 +34,8 @@ CSRF protection, and rate limiting — rather than relying on network isolation.
 
 | # | Issue | Severity | Status (2026-09-02) |
 |---|-------|----------|--------|
-| 1 | Admin session token is a static function of the password | **High** | Open — mitigated (SameSite + timing-safe compare) |
-| 2 | TOTP (2FA) is bypassable by any password-holder | **High** | Open (blocked by #1) |
+| 1 | Admin session token is a static function of the password | **High** | ✅ Fixed (random server-issued token) |
+| 2 | TOTP (2FA) is bypassable by any password-holder | **High** | ✅ Fixed (via #1) |
 | 3 | Admin server runs plain HTTP; cookie lacks `Secure`/`SameSite` | **High** | Open — `SameSite` added; HTTP + `Secure` remain |
 | 4 | Plugin executes server-pushed JS with no signature check | **High** | **Open** |
 | 5 | E2EE export endpoint decrypts server-side (key leaves the client) | **High** | **Open** |
@@ -54,6 +54,11 @@ Every item below was re-verified against current `main`. Substantial progress
 since the June review.
 
 **Fixed**
+- **#1 / #2 Admin session token & TOTP bypass** — the admin cookie is now a
+  random, server-issued token (kept only as a SHA-256 + expiry in an in-memory
+  store), replacing `sha256(password+"-dashboard")`. A session exists only after
+  a completed `/api/login` (+ TOTP when enabled), so a password-holder can no
+  longer compute the cookie or skip the second factor.
 - **#8 Constant-time comparison** — `timingSafeEqual` now backs the dashboard
   cookie/password (`secretsMatch`, `http/routes.ts`) and the WS auth token
   (`ws/handlers/auth.ts`).
@@ -80,12 +85,10 @@ since the June review.
    with no signature and no TLS gate. Highest priority.
 2. **#5 E2EE export decrypts server-side.** `/api/export-snapshot` still accepts
    `X-E2EE-Password`, derives the key, and decrypts (and logs) on the server.
-3. **#1 Static admin session token** (`sha256(password+"-dashboard")`) — unblocks #2.
-4. **#2 TOTP bypass** (via #1).
-5. **#3 Admin TLS** + cookie `Secure`.
-6. **#6 CSRF token** + POST/DELETE for mutating actions (mitigated by SameSite).
-7. **#10 TOTP secret** stored plaintext.
-8. _(Low)_ `/api/file-content` returns **500** (not 400) on a blocked traversal.
+3. **#3 Admin TLS** + cookie `Secure`.
+4. **#6 CSRF token** + POST/DELETE for mutating actions (mitigated by SameSite).
+5. **#10 TOTP secret** stored plaintext.
+6. _(Low)_ `/api/file-content` returns **500** (not 400) on a blocked traversal.
 
 ---
 

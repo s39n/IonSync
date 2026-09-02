@@ -76,7 +76,33 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     "frame-ancestors 'none'",
   ].join("; ");
 
-  const DASH_TOKEN = sha256(ctx.config.password + "-dashboard");
+  // Random, server-issued admin sessions. Replaces the old deterministic
+  // dash_token = sha256(password + "-dashboard"), which any password-holder
+  // could compute offline (SECURITY.md #1) and use to skip TOTP entirely (#2).
+  // A session now exists only after a completed /api/login (+ TOTP when
+  // enabled). Tokens are 256-bit random; we keep only their SHA-256 + an
+  // expiry, so the in-memory store never holds a usable token. Sessions live in
+  // memory: a server restart (e.g. a deploy) invalidates them and the admin
+  // logs in again — an intentional trade-off that also makes them revocable.
+  const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  const sessions = new Map<string, number>(); // sha256(token) -> expiresAt (ms)
+
+  function issueSessionToken(): string {
+    const now = Date.now();
+    for (const [h, exp] of sessions) if (exp <= now) sessions.delete(h); // sweep expired
+    const token = randomBytes(32).toString("base64url");
+    sessions.set(sha256(token), now + SESSION_TTL_MS);
+    return token;
+  }
+
+  function sessionValid(token: string): boolean {
+    if (!token) return false;
+    const h = sha256(token);
+    const exp = sessions.get(h);
+    if (exp === undefined) return false;
+    if (exp <= Date.now()) { sessions.delete(h); return false; }
+    return true;
+  }
 
   // Per-IP throttle for the login endpoints. The WS side has had this from the
   // start; without it the HTTP login was an unthrottled brute-force oracle.
@@ -101,12 +127,13 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   }
 
   function grantSession(res: Response, extra: Record<string, unknown> = {}): void {
-    const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toUTCString();
+    const token = issueSessionToken();
+    const expires = new Date(Date.now() + SESSION_TTL_MS).toUTCString();
     // SameSite=Strict: the cookie authorises destructive admin actions (factory
     // reset, delete, purge); without it any web page the admin visits could
     // fire cross-site requests at these endpoints (CSRF).
     res
-      .setHeader("Set-Cookie", `dash_token=${DASH_TOKEN}; Path=/; Expires=${expires}; HttpOnly; SameSite=Strict`)
+      .setHeader("Set-Cookie", `dash_token=${token}; Path=/; Expires=${expires}; HttpOnly; SameSite=Strict`)
       .status(200)
       .json({ ok: true, ...extra });
   }
@@ -121,7 +148,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   }
 
   function checkAuth(req: Request, res: Response): boolean {
-    if (!secretsMatch(getDashCookie(req) ?? "", DASH_TOKEN)) {
+    if (!sessionValid(getDashCookie(req) ?? "")) {
       res.status(401).json({ error: "Unauthorized" });
       return false;
     }
