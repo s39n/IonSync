@@ -625,6 +625,16 @@ describe("dashboard admin actions", () => {
     await srv.stop();
   });
 
+  it("returns 400 (not 500) on a path-traversal attempt (SECURITY.md correctness)", async () => {
+    const srv = await startTestServer();
+    const res = await fetch(
+      `http://127.0.0.1:${srv.port}/api/file-content?path=${encodeURIComponent("../../etc/passwd")}`,
+      { headers: await dashHeaders(srv.port) }
+    );
+    assert.equal(res.status, 400);
+    await srv.stop();
+  });
+
   it("trigger-sync asks the client to actually resync, instead of a bare sync_done", async () => {
     const srv = await startTestServer();
     const client = connectClient(srv.port);
