@@ -39,7 +39,7 @@ CSRF protection, and rate limiting — rather than relying on network isolation.
 | 3 | Admin server runs plain HTTP; cookie lacks `Secure`/`SameSite` | **High** | ✅ Fixed (`SameSite` + optional TLS + conditional `Secure`) |
 | 4 | Plugin executes server-pushed JS with no signature check | **High** | ✅ Fixed (ed25519-signed updates) |
 | 5 | E2EE export endpoint decrypts server-side (key leaves the client) | **High** | ✅ Fixed (client-side decrypt + ZIP) |
-| 6 | CSRF on cookie-authenticated, state-changing endpoints | **Medium** | Open — mitigated by `SameSite=Strict` |
+| 6 | CSRF on cookie-authenticated, state-changing endpoints | **Medium** | ✅ Fixed (`SameSite` + per-session CSRF token; mutations off GET) |
 | 7 | Fixed global PBKDF2 salt; low iteration count | **Medium** | Partial — iterations 100k→600k; salt still global |
 | 8 | No constant-time comparison of secrets | **Medium** | ✅ Fixed |
 | 9 | No rate limiting / lockout on auth | **Medium** | ✅ Fixed |
@@ -86,8 +86,7 @@ since the June review.
   documented as an intentional cross-device trade-off.
 
 **Still open — priority order**
-1. **#6 CSRF token** + POST/DELETE for mutating actions (mitigated by SameSite).
-2. **#10 TOTP secret** stored plaintext.
+1. **#10 TOTP secret** stored plaintext.
 
 ---
 
@@ -194,16 +193,32 @@ restore streaming for very large exports if ever needed.
 
 ## Medium severity
 
-### 6. CSRF on cookie-authenticated, state-changing endpoints
+### 6. CSRF on cookie-authenticated, state-changing endpoints — ✅ Fixed
 
-Authentication is cookie-based with no anti-CSRF token and no `SameSite` flag,
-and several state-changing operations are exposed over **GET** (e.g.
-`/api/action/:action/:peerId`, which disconnects a peer). A malicious page the
-operator visits while logged in can drive these endpoints.
+**Was:** cookie-based auth with no anti-CSRF token and no `SameSite`, and a
+state-changing operation exposed over **GET** (`/api/action/:action/:peerId`,
+which disconnects a peer / triggers a sync) — reachable by a cross-site
+`<img>`/navigation, and the rest by a cross-site form/fetch riding the cookie.
 
-**Fix:** add `SameSite=Strict` (issue #3), require all mutating actions to be
-POST/DELETE, and add a CSRF token (double-submit cookie or per-session token in
-a header).
+**Fixed — three layers:**
+- `SameSite=Strict` on the session cookie (shipped with #1/#2) — the primary
+  defence: the browser won't attach the cookie to a cross-site request at all.
+- **Mutations off GET:** `/api/action/...` moved from GET to **POST**, so no
+  state change is reachable by a bare cross-site navigation or image load. The
+  other mutating endpoints were already POST/DELETE/PATCH.
+- **Per-session CSRF token** (defence-in-depth). Each session gets a second
+  random secret bound to it server-side. The login response returns it (and
+  `GET /api/csrf` re-issues it to a reloaded dashboard that holds the cookie but
+  not the token). A router-level guard rejects any non-safe method (POST/PUT/
+  PATCH/DELETE) whose `X-CSRF-Token` header doesn't match the session's token
+  (constant-time compare), exempting only the pre-session login pair. The
+  dashboard wraps `fetch` once to attach the header to every mutating call.
+  Because the token never rides a cookie, a cross-site page cannot read it to
+  forge the header — even if `SameSite` were ever weakened or bypassed.
+
+Regression tests: `test/csrf.test.ts` (missing/wrong/valid token → 403/403/pass,
+the action route is POST-only, `GET /api/csrf` auth-gated) and the existing
+admin-action tests now log in for the CSRF token.
 
 ### 7. Fixed global PBKDF2 salt; low iteration count
 

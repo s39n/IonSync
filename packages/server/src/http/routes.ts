@@ -84,23 +84,37 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   // memory: a server restart (e.g. a deploy) invalidates them and the admin
   // logs in again — an intentional trade-off that also makes them revocable.
   const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-  const sessions = new Map<string, number>(); // sha256(token) -> expiresAt (ms)
+  // sha256(token) -> { expiresAt, csrf }. The CSRF token is a second random
+  // secret bound to the session: the auth cookie proves "a logged-in browser
+  // sent this", the CSRF header proves "our own dashboard JS sent this". A
+  // cross-site page can (with a weak SameSite, or a future same-site hole) ride
+  // the cookie, but it can never read this token to set the header.
+  const sessions = new Map<string, { expiresAt: number; csrf: string }>();
 
-  function issueSessionToken(): string {
+  function issueSessionToken(): { token: string; csrf: string } {
     const now = Date.now();
-    for (const [h, exp] of sessions) if (exp <= now) sessions.delete(h); // sweep expired
+    for (const [h, s] of sessions) if (s.expiresAt <= now) sessions.delete(h); // sweep expired
     const token = randomBytes(32).toString("base64url");
-    sessions.set(sha256(token), now + SESSION_TTL_MS);
-    return token;
+    const csrf = randomBytes(32).toString("base64url");
+    sessions.set(sha256(token), { expiresAt: now + SESSION_TTL_MS, csrf });
+    return { token, csrf };
   }
 
   function sessionValid(token: string): boolean {
     if (!token) return false;
     const h = sha256(token);
-    const exp = sessions.get(h);
-    if (exp === undefined) return false;
-    if (exp <= Date.now()) { sessions.delete(h); return false; }
+    const s = sessions.get(h);
+    if (s === undefined) return false;
+    if (s.expiresAt <= Date.now()) { sessions.delete(h); return false; }
     return true;
+  }
+
+  /** The CSRF token bound to a still-valid session, or undefined. */
+  function csrfForToken(token: string): string | undefined {
+    if (!token) return undefined;
+    const s = sessions.get(sha256(token));
+    if (s === undefined || s.expiresAt <= Date.now()) return undefined;
+    return s.csrf;
   }
 
   // Per-IP throttle for the login endpoints. The WS side has had this from the
@@ -126,7 +140,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   }
 
   function grantSession(req: Request, res: Response, extra: Record<string, unknown> = {}): void {
-    const token = issueSessionToken();
+    const { token, csrf } = issueSessionToken();
     const expires = new Date(Date.now() + SESSION_TTL_MS).toUTCString();
     // SameSite=Strict: the cookie authorises destructive admin actions (factory
     // reset, delete, purge); without it any web page the admin visits could
@@ -139,7 +153,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     res
       .setHeader("Set-Cookie", `dash_token=${token}; Path=/; Expires=${expires}; HttpOnly; SameSite=Strict${secure}`)
       .status(200)
-      .json({ ok: true, ...extra });
+      .json({ ok: true, csrf, ...extra });
   }
 
   function getDashCookie(req: Request): string | undefined {
@@ -158,6 +172,42 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     }
     return true;
   }
+
+  // ── CSRF guard (SECURITY.md #6) ─────────────────────────────────────────────
+  // SameSite=Strict is the primary defence; this is defence-in-depth. Every
+  // state-changing request (anything but a safe method) must carry an
+  // X-CSRF-Token header matching the token bound to its session. GET/HEAD/
+  // OPTIONS are exempt (they must stay side-effect-free — enforced by keeping
+  // mutations off GET), and so is the login pair, which runs before a session
+  // (and CSRF token) exists and is guarded by the password + one-time TOTP
+  // bridge token instead.
+  const CSRF_EXEMPT_PATHS = new Set(["/api/login", "/api/totp/verify-login"]);
+  router.use((req, res, next) => {
+    const method = req.method.toUpperCase();
+    if (method === "GET" || method === "HEAD" || method === "OPTIONS") { next(); return; }
+    if (CSRF_EXEMPT_PATHS.has(req.path)) { next(); return; }
+    const cookie = getDashCookie(req) ?? "";
+    if (!sessionValid(cookie)) { res.status(401).json({ error: "Unauthorized" }); return; }
+    const header = req.headers["x-csrf-token"];
+    const provided = Array.isArray(header) ? header[0] ?? "" : header ?? "";
+    const expected = csrfForToken(cookie);
+    if (!expected || !provided || !secretsMatch(provided, expected)) {
+      res.status(403).json({ error: "Invalid or missing CSRF token" });
+      return;
+    }
+    next();
+  });
+
+  // Hand the current session its bound CSRF token. The HttpOnly auth cookie
+  // authenticates the request; the dashboard calls this on load (when it holds
+  // a cookie but not the token, e.g. after a refresh) and sends the value back
+  // as X-CSRF-Token on every mutating request.
+  router.get("/api/csrf", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const csrf = csrfForToken(getDashCookie(req) ?? "");
+    if (!csrf) { res.status(401).json({ error: "Unauthorized" }); return; }
+    res.json({ csrf });
+  });
 
   // Dashboard HTML — served with a fresh script nonce stamped into every
   // <script> tag so the CSP can drop 'unsafe-inline' for scripts entirely.
@@ -326,7 +376,10 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
 
   // ── Peer actions ──────────────────────────────────────────────────────────
 
-  router.get("/api/action/:action/:peerId", (req, res) => {
+  // POST (not GET): this changes peer state (disconnect / trigger-sync), so it
+  // must not be reachable by a cross-site <img>/navigation. The CSRF guard above
+  // also requires a matching X-CSRF-Token on this route.
+  router.post("/api/action/:action/:peerId", (req, res) => {
     if (!checkAuth(req, res)) return;
     const { action, peerId } = req.params as { action: string; peerId: string };
     const target = ctx.peers.get(peerId);

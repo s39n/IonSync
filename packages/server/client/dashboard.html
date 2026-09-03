@@ -808,6 +808,33 @@ const S = { peers: [], devices: [], files: [], authed: false };
 let pollTimer = null;
 let allFiles = [];
 
+// ── CSRF (SECURITY.md #6) ────────────────────────────────────────────────────
+// A session-bound token, captured from the login response or /api/csrf on a
+// reload. Every state-changing request must carry it as X-CSRF-Token; the
+// server rejects mutations without a match. We wrap fetch() once so every
+// mutating call — through api() or raw — is covered without per-call edits.
+let csrfToken = null;
+const _rawFetch = window.fetch.bind(window);
+window.fetch = (input, init = {}) => {
+  const method = (init.method || (input && typeof input === 'object' && input.method) || 'GET').toUpperCase();
+  const url = typeof input === 'string' ? input : (input && input.url) || '';
+  const sameOrigin = url.startsWith('/') || url.startsWith(location.origin);
+  if (csrfToken && sameOrigin && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+    const headers = new Headers((init && init.headers) || (input && typeof input === 'object' && input.headers) || {});
+    headers.set('X-CSRF-Token', csrfToken);
+    init = { ...init, headers };
+  }
+  return _rawFetch(input, init);
+};
+// Fetch the CSRF token for an existing session (used on reload, when the cookie
+// is present but the token isn't). Uses the raw fetch — it's a plain GET.
+async function loadCsrf() {
+  try {
+    const r = await _rawFetch('/api/csrf');
+    if (r.ok) csrfToken = (await r.json()).csrf;
+  } catch {}
+}
+
 // ── Auth ───────────────────────────────────────────────────────────────────
 let _pendingTempToken = null;
 
@@ -832,6 +859,7 @@ async function login() {
     const r = await fetch('/api/login', { headers: { 'X-Dashboard-Password': pw } });
     if (r.ok) {
       const data = await r.json();
+      if (data.csrf) csrfToken = data.csrf; // no-TOTP path grants the session here
       if (data.requireTotp) {
         // 2FA is enabled — show the TOTP step
         _pendingTempToken = data.tempToken;
@@ -871,6 +899,7 @@ async function submitTotpLogin() {
     });
     if (r.ok) {
       const data = await r.json();
+      if (data.csrf) csrfToken = data.csrf; // session granted → capture its CSRF token
       if (data.usedRecoveryCode) {
         toast(
           `Recovery code used. ${data.codesRemaining} code${data.codesRemaining === 1 ? '' : 's'} remaining — generate new ones in Security settings.`,
@@ -934,6 +963,7 @@ async function tryRestoreSession() {
   try {
     const r = await fetch('/api/peers');
     if (r.ok) {
+      await loadCsrf(); // cookie is valid but we don't hold the token yet
       S.authed = true;
       document.getElementById('login').style.display = 'none';
       document.getElementById('app').classList.add('visible');
@@ -1353,7 +1383,7 @@ async function resetServer(btn) {
 async function peerAction(action, peerId, btn) {
   btn.disabled = true;
   try {
-    await api(`/api/action/${action}/${encodeURIComponent(peerId)}`);
+    await api(`/api/action/${action}/${encodeURIComponent(peerId)}`, { method: 'POST' });
     toast(`Done: ${action}`, 'success');
     await loadPeers();
   } catch (e) {

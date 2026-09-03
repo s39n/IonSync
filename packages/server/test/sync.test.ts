@@ -605,7 +605,10 @@ describe("dashboard admin actions", () => {
       headers: { "x-dashboard-password": TEST_PASSWORD },
     });
     const token = /dash_token=([^;]+)/.exec(r.headers.get("set-cookie") ?? "")?.[1] ?? "";
-    return { Cookie: `dash_token=${token}` };
+    // The login response carries the session-bound CSRF token; every mutating
+    // request needs it as X-CSRF-Token (SECURITY.md #6). Harmless on GETs.
+    const body = (await r.json().catch(() => ({}))) as { csrf?: string };
+    return { Cookie: `dash_token=${token}`, "X-CSRF-Token": body.csrf ?? "" };
   }
 
   it("rejects the legacy deterministic dash_token; only a real login is accepted (SECURITY.md #1/#2)", async () => {
@@ -645,6 +648,7 @@ describe("dashboard admin actions", () => {
     assert.ok(peer, "peer should be registered after auth");
 
     const res = await fetch(`http://127.0.0.1:${srv.port}/api/action/trigger-sync/${peer!.id}`, {
+      method: "POST",
       headers: await dashHeaders(srv.port),
     });
     assert.equal(res.status, 200);

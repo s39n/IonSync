@@ -31,15 +31,17 @@ function encryptAsPlugin(plaintext: string, password: string, version = 2): Buff
   return Buffer.concat([magic, iv, ct, tag]);
 }
 
-/** Log in (no TOTP configured in tests) and return the "dash_token=…" cookie. */
-async function login(port: number): Promise<string> {
+/** Log in (no TOTP configured in tests) → the "dash_token=…" cookie + CSRF token. */
+async function login(port: number): Promise<{ cookie: string; csrf: string }> {
   const r = await fetch(`http://127.0.0.1:${port}/api/login`, {
     headers: { "x-dashboard-password": TEST_PASSWORD },
   });
   assert.equal(r.status, 200, "login should succeed");
   const setCookie = r.headers.get("set-cookie");
   assert.ok(setCookie, "login should set a session cookie");
-  return setCookie.split(";")[0]!; // "dash_token=<token>"
+  const body = (await r.json()) as { csrf?: string };
+  assert.ok(body.csrf, "login should return a CSRF token");
+  return { cookie: setCookie.split(";")[0]!, csrf: body.csrf }; // "dash_token=<token>"
 }
 
 test("export-selected returns ciphertext and never decrypts server-side", async () => {
@@ -51,7 +53,7 @@ test("export-selected returns ciphertext and never decrypts server-side", async 
     const mtime = Date.now();
     ts.ctx.storage.write("Secret.md", mtime, enc);
 
-    const cookie = await login(ts.port);
+    const { cookie, csrf } = await login(ts.port);
 
     // Deliberately send the old, now-ignored X-E2EE-Password header: even when
     // handed the passphrase, the server must NOT decrypt.
@@ -60,6 +62,7 @@ test("export-selected returns ciphertext and never decrypts server-side", async 
       headers: {
         "Content-Type": "application/json",
         "Cookie": cookie,
+        "X-CSRF-Token": csrf,
         "X-E2EE-Password": pw,
       },
       body: JSON.stringify({ paths: ["Secret.md"] }),
@@ -106,7 +109,7 @@ test("export-selected rejects an unauthenticated request", async () => {
 test("export-snapshot returns a JSON manifest, not a ZIP", async () => {
   const ts = await startTestServer();
   try {
-    const cookie = await login(ts.port);
+    const { cookie } = await login(ts.port);
     const asOf = new Date(Date.now() + 60_000).toISOString();
     const r = await fetch(
       `http://127.0.0.1:${ts.port}/api/export-snapshot?date=${encodeURIComponent(asOf)}`,
