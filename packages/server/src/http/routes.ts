@@ -222,6 +222,14 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     res.json({ csrf });
   });
 
+  // The per-install E2EE salt (SECURITY.md #7) so the dashboard can derive the
+  // v3 key to decrypt exports/previews in the browser. The salt is not secret
+  // (a salt never is); auth-gated only because the dashboard already is.
+  router.get("/api/e2ee-salt", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    res.json({ salt: ctx.db.getOrCreateE2eeSalt() });
+  });
+
   // Dashboard HTML — served with a fresh script nonce stamped into every
   // <script> tag so the CSP can drop 'unsafe-inline' for scripts entirely.
   router.get("/dashboard", (_req, res) => {

@@ -2167,9 +2167,23 @@ const E2EE_PBKDF2_SALT = new TextEncoder().encode('IonSync-AES-GCM-v1-salt');
 
 // Iteration count is pinned to the format version stamped in the magic header
 // ("IONENCv<N>"), so files written by any plugin build stay decryptable:
-//   v1 -> 100 000 iterations (legacy)   v2 -> 600 000 iterations (current)
-const E2EE_ITERATIONS_BY_VERSION = { 1: 100_000, 2: 600_000 };
+//   v1 -> 100 000 iterations (legacy)   v2 -> 600 000 iterations (global salt)
+//   v3 -> 600 000 iterations (per-install salt, SECURITY.md #7)
+const E2EE_ITERATIONS_BY_VERSION = { 1: 100_000, 2: 600_000, 3: 600_000 };
 const _e2eeKeyCache = new Map(); // `${version}\0${pw}` -> CryptoKey
+
+// v3 derives the key with a per-install random salt (not the fixed global one).
+// The salt isn't secret; the server exposes it at /api/e2ee-salt. Fetched once
+// and cached the first time a v3 blob needs decrypting.
+let _e2eeInstallSalt = null; // Uint8Array
+async function ensureE2eeInstallSalt() {
+  if (_e2eeInstallSalt) return;
+  const r = await api('/api/e2ee-salt');
+  const { salt } = await r.json();
+  if (salt && /^[0-9a-f]+$/i.test(salt) && salt.length % 2 === 0) {
+    _e2eeInstallSalt = Uint8Array.from(salt.match(/../g).map(h => parseInt(h, 16)));
+  }
+}
 
 // Reads the version digit from the 8-byte magic prefix "IONENCv", or null.
 function e2eeReadVersion(bytes) {
@@ -2182,11 +2196,17 @@ function e2eeReadVersion(bytes) {
 async function e2eeDeriveKey(pw, version) {
   const iters = E2EE_ITERATIONS_BY_VERSION[version];
   if (!iters) throw new Error('Unsupported E2EE format version ' + version);
+  let salt = E2EE_PBKDF2_SALT;
+  if (version >= 3) {
+    await ensureE2eeInstallSalt();
+    if (!_e2eeInstallSalt) throw new Error('Per-install encryption salt unavailable — reconnect and retry');
+    salt = _e2eeInstallSalt;
+  }
   const ck = version + '\0' + pw;
   if (_e2eeKeyCache.has(ck)) return _e2eeKeyCache.get(ck);
   const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveKey']);
   const key = await crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt: E2EE_PBKDF2_SALT, iterations: iters, hash: 'SHA-256' },
+    { name: 'PBKDF2', salt: salt, iterations: iters, hash: 'SHA-256' },
     km, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
   );
   _e2eeKeyCache.set(ck, key);

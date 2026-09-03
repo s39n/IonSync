@@ -52,3 +52,23 @@ test("auth_ok carries a well-formed per-install salt, stable across reconnects",
     await ts.stop();
   }
 });
+
+test("/api/e2ee-salt hands the salt to an authed dashboard, 401 otherwise", async () => {
+  const ts = await startTestServer();
+  try {
+    const denied = await fetch(`http://127.0.0.1:${ts.port}/api/e2ee-salt`);
+    assert.equal(denied.status, 401, "no session → unauthorized");
+
+    const login = await fetch(`http://127.0.0.1:${ts.port}/api/login`, {
+      headers: { "x-dashboard-password": TEST_PASSWORD },
+    });
+    const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0]!;
+    const r = await fetch(`http://127.0.0.1:${ts.port}/api/e2ee-salt`, { headers: { Cookie: cookie } });
+    assert.equal(r.status, 200);
+    const { salt } = (await r.json()) as { salt: string };
+    assert.match(salt, /^[0-9a-f]{32}$/);
+    assert.equal(salt, ts.ctx.db.getOrCreateE2eeSalt(), "dashboard gets the same salt the plugin does");
+  } finally {
+    await ts.stop();
+  }
+});
