@@ -125,14 +125,19 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     loginLimiter.recordAuthFailure(req.socket.remoteAddress ?? "unknown");
   }
 
-  function grantSession(res: Response, extra: Record<string, unknown> = {}): void {
+  function grantSession(req: Request, res: Response, extra: Record<string, unknown> = {}): void {
     const token = issueSessionToken();
     const expires = new Date(Date.now() + SESSION_TTL_MS).toUTCString();
     // SameSite=Strict: the cookie authorises destructive admin actions (factory
     // reset, delete, purge); without it any web page the admin visits could
     // fire cross-site requests at these endpoints (CSRF).
+    // Secure: added when the request arrived over HTTPS — either the admin
+    // server terminates TLS itself (adminTls) or a trusted proxy did and set
+    // X-Forwarded-Proto (trustProxy). Conditional, so a plain-HTTP LAN setup
+    // still receives a usable cookie instead of one the browser silently drops.
+    const secure = req.secure ? "; Secure" : "";
     res
-      .setHeader("Set-Cookie", `dash_token=${token}; Path=/; Expires=${expires}; HttpOnly; SameSite=Strict`)
+      .setHeader("Set-Cookie", `dash_token=${token}; Path=/; Expires=${expires}; HttpOnly; SameSite=Strict${secure}`)
       .status(200)
       .json({ ok: true, ...extra });
   }
@@ -189,7 +194,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
       res.status(200).json({ requireTotp: true, tempToken });
     } else {
       // No TOTP — grant session immediately
-      grantSession(res);
+      grantSession(req, res);
     }
   });
 
@@ -210,7 +215,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
 
     // Try TOTP first
     if (verifyTOTP(totpSecret, code.replace(/\s/g, ""))) {
-      grantSession(res);
+      grantSession(req, res);
       return;
     }
 
@@ -225,7 +230,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
         // Consume the code — it can only be used once
         const remaining = hashes.filter((_, i) => i !== idx);
         ctx.db.setSetting("totp_recovery_codes", JSON.stringify(remaining));
-        grantSession(res, { usedRecoveryCode: true, codesRemaining: remaining.length });
+        grantSession(req, res, { usedRecoveryCode: true, codesRemaining: remaining.length });
         return;
       }
     }

@@ -9,11 +9,30 @@ export default {
   port: 3000,
   host: "0.0.0.0",
 
-  // TLS — uncomment to enable HTTPS/WSS
+  // TLS for the public sync server — uncomment to enable HTTPS/WSS
   // tls: {
   //   key:  "/path/to/privkey.pem",
   //   cert: "/path/to/fullchain.pem",
   // },
+
+  // ── Admin dashboard security ───────────────────────────────────────────────
+  // The dashboard cookie authorises destructive actions, so protect it in transit.
+  // Two ways to serve the dashboard over HTTPS (either one marks the cookie Secure):
+  //
+  //   (a) Native TLS — give the dashboard its own cert (self-signed is fine on a LAN):
+  //   adminTls: {
+  //     key:  "/certs/dashboard-key.pem",
+  //     cert: "/certs/dashboard-cert.pem",
+  //   },
+  //
+  //   (b) Behind a reverse proxy (Caddy/nginx/Traefik) that terminates TLS —
+  //   trust its X-Forwarded-Proto so the cookie is marked Secure. Enable this
+  //   ONLY when such a proxy is actually in front (else a client could spoof it).
+  //   Env override: TRUST_PROXY=1
+  // trustProxy: true,
+  //
+  // Left unset, the dashboard stays on plain HTTP — fine for a loopback/LAN-only
+  // deployment (the default adminHost is 127.0.0.1).
 
   // ── Storage ───────────────────────────────────────────────────────────────
   // dataDir: "data",   // relative to the server package root

@@ -47,6 +47,9 @@ export async function startTestServer(
   const ctx = createContext(config, db, storage, clientDir);
 
   const app = express();
+  // Mirror index.ts: honour X-Forwarded-Proto from a trusted proxy so req.secure
+  // is set and the session cookie is marked Secure.
+  if (config.trustProxy) app.set("trust proxy", true);
   app.use(buildRouter(ctx));
   const server = http.createServer(app);
   const wss = attachWebSocketServer(ctx, server);

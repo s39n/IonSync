@@ -27,6 +27,22 @@ export interface Config {
   /** Port for the admin/dashboard server. Defaults to port + 1. */
   adminPort: number;
   tls?: TlsConfig;
+  /**
+   * Optional TLS for the admin/dashboard server. When set, the dashboard is
+   * served over HTTPS and the session cookie is marked `Secure`. Independent of
+   * `tls` (which is for the public sync server) so the dashboard can use a
+   * local/self-signed cert. Leave unset to keep the dashboard on plain HTTP.
+   */
+  adminTls?: TlsConfig;
+  /**
+   * Trust `X-Forwarded-*` headers from a front proxy. Enable this ONLY when the
+   * dashboard sits behind a reverse proxy that terminates TLS (Caddy/nginx/
+   * Traefik): it lets the server see the real client scheme (`X-Forwarded-Proto`)
+   * so the session cookie is marked `Secure` even though the app itself speaks
+   * plain HTTP to the proxy. Never enable it on a directly-exposed server — a
+   * client could then spoof the header. Default: false.
+   */
+  trustProxy: boolean;
   appDir: string;
   dataDir: string;
   cleanup: CleanupConfig;
@@ -39,6 +55,7 @@ const DEFAULTS: Omit<Config, "password" | "adminPort"> = {
   port: 3000,
   host: "0.0.0.0",
   adminHost: "127.0.0.1",
+  trustProxy: false,
   appDir: process.cwd(),
   dataDir: "data",
   cleanup: { intervalSecs: 3600, versionsPerFile: 5, keepDeletedFilesSecs: 7 * 24 * 3600 },
@@ -94,6 +111,11 @@ export function mergeConfig(raw: Record<string, unknown>): Config {
     host: typeof raw["host"] === "string" ? raw["host"] : DEFAULTS.host,
     adminHost: typeof raw["adminHost"] === "string" ? raw["adminHost"] : DEFAULTS.adminHost,
     adminPort: typeof raw["adminPort"] === "number" ? raw["adminPort"] : port + 1,
+    trustProxy: typeof raw["trustProxy"] === "boolean"
+      ? raw["trustProxy"]
+      : process.env.TRUST_PROXY === "1" || process.env.TRUST_PROXY === "true"
+        ? true
+        : DEFAULTS.trustProxy,
     appDir: typeof raw["appDir"] === "string" ? raw["appDir"] : DEFAULTS.appDir,
     dataDir: typeof raw["dataDir"] === "string" ? raw["dataDir"] : DEFAULTS.dataDir,
     cleanup: {
@@ -108,6 +130,10 @@ export function mergeConfig(raw: Record<string, unknown>): Config {
 
   if (raw["tls"] && typeof raw["tls"] === "object") {
     result.tls = raw["tls"] as TlsConfig;
+  }
+
+  if (raw["adminTls"] && typeof raw["adminTls"] === "object") {
+    result.adminTls = raw["adminTls"] as TlsConfig;
   }
 
   return result;

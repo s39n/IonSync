@@ -80,12 +80,16 @@ publicApp.use(buildPublicRouter(ctx));
 
 const adminApp = express();
 adminApp.disable("x-powered-by");
+// Behind a TLS-terminating reverse proxy, trust X-Forwarded-Proto so req.secure
+// reflects the real client scheme and the session cookie is marked Secure.
+// Off by default — only safe when a trusted proxy sits in front (see config).
+if (config.trustProxy) adminApp.set("trust proxy", true);
 adminApp.use(buildAdminRouter(ctx));
 
 // ── HTTP / HTTPS servers ──────────────────────────────────────────────────────
 
 let publicServer: http.Server | https.Server;
-let adminServer: http.Server;
+let adminServer: http.Server | https.Server;
 
 // 1. Setup Public Server (For the tunnel)
 if (config.tls) {
@@ -97,8 +101,15 @@ if (config.tls) {
   publicServer = http.createServer(publicApp);
 }
 
-// 2. Setup Admin Server (Always local HTTP)
-adminServer = http.createServer(adminApp);
+// 2. Setup Admin Server — HTTPS when adminTls is configured, else plain HTTP.
+if (config.adminTls) {
+  adminServer = https.createServer(
+    { key: fs.readFileSync(config.adminTls.key), cert: fs.readFileSync(config.adminTls.cert) },
+    adminApp
+  );
+} else {
+  adminServer = http.createServer(adminApp);
+}
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 
@@ -127,7 +138,13 @@ adminServer.listen(config.adminPort, config.adminHost, () => {
   const exposure = config.adminHost === "127.0.0.1" || config.adminHost === "localhost"
     ? "localhost only"
     : `bound to ${config.adminHost} — reachable from the network`;
-  console.log(`[Admin] Dashboard on http://${config.adminHost}:${config.adminPort}/dashboard (${exposure})`);
+  const scheme = config.adminTls ? "https" : "http";
+  const secureNote = config.adminTls
+    ? " — session cookie is Secure"
+    : config.trustProxy
+      ? " — Secure cookie when reached over HTTPS via the trusted proxy"
+      : "";
+  console.log(`[Admin] Dashboard on ${scheme}://${config.adminHost}:${config.adminPort}/dashboard (${exposure})${secureNote}`);
 });
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────

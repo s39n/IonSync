@@ -112,6 +112,21 @@ ports:
 
 The server will use `wss://` when TLS is configured. Update the plugin connection URL accordingly.
 
+The `tls` block above secures the **public sync** server. The **admin dashboard**
+runs on a separate port and is plain HTTP by default (fine when it's bound to
+loopback/LAN). To protect its session cookie in transit, serve it over HTTPS one
+of two ways — either marks the cookie `Secure`:
+
+```js
+// config.js — (a) native TLS for the dashboard (self-signed is fine on a LAN)
+adminTls: { key: "/certs/dash-key.pem", cert: "/certs/dash-cert.pem" },
+
+// …or (b) behind a TLS-terminating reverse proxy (Caddy/nginx/Traefik):
+trustProxy: true,   // trusts X-Forwarded-Proto — enable ONLY behind such a proxy
+```
+
+`trustProxy` can also be set with the `TRUST_PROXY=1` environment variable.
+
 ---
 
 ## Manual setup (without Docker)

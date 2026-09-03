@@ -36,7 +36,7 @@ CSRF protection, and rate limiting — rather than relying on network isolation.
 |---|-------|----------|--------|
 | 1 | Admin session token is a static function of the password | **High** | ✅ Fixed (random server-issued token) |
 | 2 | TOTP (2FA) is bypassable by any password-holder | **High** | ✅ Fixed (via #1) |
-| 3 | Admin server runs plain HTTP; cookie lacks `Secure`/`SameSite` | **High** | Open — `SameSite` added; HTTP + `Secure` remain |
+| 3 | Admin server runs plain HTTP; cookie lacks `Secure`/`SameSite` | **High** | ✅ Fixed (`SameSite` + optional TLS + conditional `Secure`) |
 | 4 | Plugin executes server-pushed JS with no signature check | **High** | ✅ Fixed (ed25519-signed updates) |
 | 5 | E2EE export endpoint decrypts server-side (key leaves the client) | **High** | ✅ Fixed (client-side decrypt + ZIP) |
 | 6 | CSRF on cookie-authenticated, state-changing endpoints | **Medium** | Open — mitigated by `SameSite=Strict` |
@@ -84,13 +84,10 @@ since the June review.
 - **#7** — PBKDF2 iterations raised **100k → 600k** (v2; v1 retained only to read
   legacy blobs). The global fixed salt (`IonSync-AES-GCM-v1-salt`) remains, still
   documented as an intentional cross-device trade-off.
-- **#3** — the cookie now carries `SameSite=Strict` (which also blunts #6), but
-  the admin server is still plain HTTP and the cookie has no `Secure`.
 
 **Still open — priority order**
-1. **#3 Admin TLS** + cookie `Secure`.
-2. **#6 CSRF token** + POST/DELETE for mutating actions (mitigated by SameSite).
-3. **#10 TOTP secret** stored plaintext.
+1. **#6 CSRF token** + POST/DELETE for mutating actions (mitigated by SameSite).
+2. **#10 TOTP secret** stored plaintext.
 
 ---
 
@@ -126,22 +123,33 @@ is every synced device.
 can only be obtained by completing the full login flow (including TOTP), and the
 second factor becomes meaningful.
 
-### 3. Admin server runs plain HTTP; cookie lacks `Secure`/`SameSite`
+### 3. Admin server runs plain HTTP; cookie lacks `Secure`/`SameSite` — ✅ Fixed
 
-Only the public/WebSocket server can be configured with TLS. The admin server
-(`adminServer = http.createServer(...)`) is always plain HTTP, so the password
-(sent in the `X-Dashboard-Password` header) and the session cookie travel in
-cleartext. The cookie is also set without `Secure` or `SameSite`:
+**Was:** only the public/WebSocket server could use TLS. The admin server was
+always plain HTTP, so the password (`X-Dashboard-Password` header) and the
+session cookie travelled in cleartext, and the cookie was set without `Secure`
+or `SameSite`.
 
-```
-dash_token=...; Path=/; Expires=...; HttpOnly
-```
+**Fixed:**
+- `SameSite=Strict` was added (see #1/#2), which also blunts CSRF (#6).
+- The admin server now terminates TLS itself when `adminTls: { key, cert }` is
+  set in config — the same optional `https.createServer` treatment the public
+  server already had, but independent of `tls` so the dashboard can use a
+  local/self-signed cert. Left unset, the dashboard stays on plain HTTP (no
+  change for a loopback/LAN deployment).
+- The session cookie gains `Secure` **conditionally**, based on `req.secure` —
+  true when the admin server terminated TLS (`adminTls`) or when a trusted
+  reverse proxy did and forwarded `X-Forwarded-Proto: https` (enable
+  `trustProxy: true` only behind such a proxy). This covers both deployment
+  models — native TLS or a Caddy/nginx/Traefik front — without a forced HTTPS
+  requirement that would break a plain-HTTP LAN dashboard by making the browser
+  silently drop the cookie.
 
-**Fix:** since the dashboard is exposed remotely, terminate TLS in front of it
-(reverse proxy such as Caddy/nginx, or give the admin server its own
-`https.createServer` using the existing `tls` config). Add `Secure` and
-`SameSite=Strict` to the cookie. If a plaintext deployment is ever unavoidable,
-restrict the admin port to a VPN/private network.
+So a homelab user can keep plain HTTP on a private network, put the dashboard
+behind a TLS proxy, or give it its own cert — and in every TLS case the cookie
+is marked `Secure`. Regression test: `test/adminCookie.test.ts` asserts `Secure`
+appears over HTTPS (trusted proxy), is absent over plain HTTP, and that a
+**spoofed** `X-Forwarded-Proto` is ignored unless `trustProxy` is set.
 
 ### 4. Plugin executes server-pushed JavaScript with no verification
 
