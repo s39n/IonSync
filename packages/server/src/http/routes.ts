@@ -2,21 +2,20 @@ import express, { type Request, type Response } from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { timingSafeEqual, randomBytes } from "node:crypto";
-import archiver from "archiver";
 import { ConnectionRateLimiter } from "../ws/rateLimit.js";
 import type { SyncContext } from "../context.js";
 import type { FileEntry } from "@ionsync/protocol";
 import { sha256 } from "../crypto.js";
-import { isE2eeEncrypted, makeE2eeDecryptor } from "../e2ee.js";
+import { isE2eeEncrypted } from "../e2ee.js";
 import { broadcastToPeers } from "../ws/handlers/sync.js";
 import { verifyTOTP, generateSecret, totpUri, createPendingToken, consumePendingToken,
   generateRecoveryCodes, formatRecoveryCode, normalizeRecoveryCode, hashRecoveryCode } from "../totp.js";
 import { pushActivity } from "../context.js";
 
-// E2EE helpers live in ../e2ee.js (shared, version-aware). The dashboard
-// export/preview routes use makeE2eeDecryptor(password), which derives one key
-// per format version and caches it, so a bulk export pays PBKDF2 once per
-// version rather than once per file.
+// E2EE helpers live in ../e2ee.js (shared, version-aware). The server only
+// *detects* encryption (isE2eeEncrypted) for the dashboard's lock icon and
+// export manifest — it never decrypts. E2EE files are decrypted in the browser
+// with the vault key, so the passphrase never leaves the client.
 
 // ── 1. PUBLIC ROUTER (Exposed to the Tunnel) ────────────────────────────────
 
@@ -700,80 +699,35 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     const asOfMs = new Date(dateParam).getTime();
     if (isNaN(asOfMs)) { res.status(400).json({ error: "Invalid date" }); return; }
 
-    // Optional E2EE password — if provided, encrypted files are decrypted on
-    // the fly before being added to the ZIP so the export is plaintext.
-    const e2eePw = String(req.headers["x-e2ee-password"] ?? "").trim();
-    const decryptE2ee = e2eePw ? makeE2eeDecryptor(e2eePw) : null;
-    if (decryptE2ee) console.log("[export] E2EE password supplied — files will be decrypted in ZIP");
-
     const snapFiles = ctx.db.getSnapshotFiles(asOfMs);
-    const dateLabel = new Date(asOfMs).toISOString().slice(0, 10);
 
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Disposition", `attachment; filename="ionsync-snapshot-${dateLabel}.zip"`);
-
-    const archive = archiver("zip", { zlib: { level: 6 } });
-
-    archive.on("error", (err) => {
-      console.error("[export] archiver error:", err);
-    });
-
-    archive.on("finish", () => {
-      console.log(`[export] ZIP complete — ${archive.pointer()} bytes (${snapFiles.length} entries considered)`);
-    });
-
-    // Stop reading files if the client disconnects mid-download.
-    res.on("close", () => {
-      if (!res.writableFinished) {
-        try { archive.abort(); } catch { /* already finalized */ }
+    // Return the stored bytes verbatim (base64). Encrypted files stay encrypted
+    // — the browser decrypts them with the vault key and assembles the ZIP, so
+    // the passphrase and plaintext never touch the server.
+    const files: Array<{ path: string; mtime: number; encrypted: boolean; content: string }> = [];
+    for (const { path: filePath, mtime } of snapFiles) {
+      try {
+        const buf = ctx.storage.readVersion(filePath, mtime);
+        if (!buf) continue; // no stored version — skip
+        files.push({
+          path: filePath,
+          mtime,
+          encrypted: isE2eeEncrypted(buf),
+          content: buf.toString("base64"),
+        });
+      } catch (e) {
+        console.warn(`[export] skipping "${filePath}": ${e}`);
       }
-    });
+    }
 
-    archive.pipe(res);
-
-    // Stream ONE entry at a time: the next file is appended when archiver
-    // fires "entry" for the previous one. The old loop appended every file's
-    // Buffer up front, so a 50k-file export held the whole vault's content in
-    // archiver's internal queue. Plain files are appended as lazy read
-    // streams; only E2EE files that must be decrypted are buffered (AES-GCM
-    // needs the full blob), and never more than one at a time.
-    let idx = 0;
-    const appendNext = (): void => {
-      while (idx < snapFiles.length) {
-        const { path: filePath, mtime } = snapFiles[idx++]!;
-        try {
-          const prefix = ctx.storage.readVersionPrefix(filePath, mtime, 8);
-          if (!prefix) continue; // no stored version — skip
-
-          if (decryptE2ee && isE2eeEncrypted(prefix)) {
-            const buf = ctx.storage.readVersion(filePath, mtime);
-            if (!buf) continue;
-            let finalBuf = buf;
-            try {
-              finalBuf = decryptE2ee(buf);
-            } catch {
-              console.warn(`[export] decryption failed for "${filePath}" — wrong key? Including encrypted.`);
-            }
-            archive.append(finalBuf, { name: filePath, date: new Date(mtime) });
-          } else {
-            const stream = ctx.storage.openVersionStream(filePath, mtime);
-            if (!stream) continue;
-            archive.append(stream, { name: filePath, date: new Date(mtime) });
-          }
-          return; // wait for "entry" before appending the next file
-        } catch (e) {
-          console.warn(`[export] skipping "${filePath}": ${e}`);
-        }
-      }
-      void archive.finalize();
-    };
-    archive.on("entry", appendNext);
-    appendNext();
+    res.json({ files });
   });
 
-  // Export a ZIP of specific files (latest version of each).
+  // Export specific files (latest version of each) as a client-side ZIP.
   // POST /api/export-selected   body: { paths: string[] }
-  // Optional header X-E2EE-Password for on-the-fly decryption.
+  // Returns JSON: { files: Array<{ path, mtime, encrypted, content: base64 }> }.
+  // Encrypted entries are returned exactly as stored; the browser decrypts them
+  // with the vault key — the server never receives the passphrase.
   router.post("/api/export-selected", express.json(), (req, res) => {
     if (!checkAuth(req, res)) return;
 
@@ -783,53 +737,26 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
       return;
     }
 
-    const e2eePw = String(req.headers["x-e2ee-password"] ?? "").trim();
-    const decryptE2ee = e2eePw ? makeE2eeDecryptor(e2eePw) : null;
-
-    const timestamp = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "-");
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Disposition", `attachment; filename="ionsync-export-${timestamp}.zip"`);
-
-    const archive = archiver("zip", { zlib: { level: 6 } });
-    archive.on("error", (err) => console.error("[export-selected] archiver error:", err));
-    res.on("close", () => {
-      if (!res.writableFinished) {
-        try { archive.abort(); } catch { /* already finalized */ }
-      }
-    });
-    archive.pipe(res);
-
-    // One entry in flight at a time — see export-snapshot above for rationale.
     const pathList = (paths as unknown[]).map(String);
-    let idx = 0;
-    const appendNext = (): void => {
-      while (idx < pathList.length) {
-        const filePath = pathList[idx++]!;
-        try {
-          const mtime = ctx.storage.latestVersionMtime(filePath);
-          if (mtime === null) continue; // no stored version — skip
-
-          const prefix = ctx.storage.readVersionPrefix(filePath, mtime, 8);
-          if (prefix && decryptE2ee && isE2eeEncrypted(prefix)) {
-            const buf = ctx.storage.readVersion(filePath, mtime);
-            if (!buf) continue;
-            let finalBuf = buf;
-            try { finalBuf = decryptE2ee(buf); } catch { /* wrong key — include encrypted */ }
-            archive.append(finalBuf, { name: filePath });
-          } else {
-            const stream = ctx.storage.openVersionStream(filePath, mtime);
-            if (!stream) continue;
-            archive.append(stream, { name: filePath });
-          }
-          return;
-        } catch (e) {
-          console.warn(`[export-selected] skipping "${filePath}": ${e}`);
-        }
+    const files: Array<{ path: string; mtime: number; encrypted: boolean; content: string }> = [];
+    for (const filePath of pathList) {
+      try {
+        const mtime = ctx.storage.latestVersionMtime(filePath);
+        if (mtime === null) continue; // no stored version — skip
+        const buf = ctx.storage.readVersion(filePath, mtime);
+        if (!buf) continue;
+        files.push({
+          path: filePath,
+          mtime,
+          encrypted: isE2eeEncrypted(buf),
+          content: buf.toString("base64"),
+        });
+      } catch (e) {
+        console.warn(`[export-selected] skipping "${filePath}": ${e}`);
       }
-      void archive.finalize();
-    };
-    archive.on("entry", appendNext);
-    appendNext();
+    }
+
+    res.json({ files });
   });
 
   // ── TOTP management ──────────────────────────────────────────────────────

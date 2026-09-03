@@ -38,7 +38,7 @@ CSRF protection, and rate limiting — rather than relying on network isolation.
 | 2 | TOTP (2FA) is bypassable by any password-holder | **High** | ✅ Fixed (via #1) |
 | 3 | Admin server runs plain HTTP; cookie lacks `Secure`/`SameSite` | **High** | Open — `SameSite` added; HTTP + `Secure` remain |
 | 4 | Plugin executes server-pushed JS with no signature check | **High** | ✅ Fixed (ed25519-signed updates) |
-| 5 | E2EE export endpoint decrypts server-side (key leaves the client) | **High** | **Open** |
+| 5 | E2EE export endpoint decrypts server-side (key leaves the client) | **High** | ✅ Fixed (client-side decrypt + ZIP) |
 | 6 | CSRF on cookie-authenticated, state-changing endpoints | **Medium** | Open — mitigated by `SameSite=Strict` |
 | 7 | Fixed global PBKDF2 salt; low iteration count | **Medium** | Partial — iterations 100k→600k; salt still global |
 | 8 | No constant-time comparison of secrets | **Medium** | ✅ Fixed |
@@ -88,11 +88,9 @@ since the June review.
   the admin server is still plain HTTP and the cookie has no `Secure`.
 
 **Still open — priority order**
-1. **#5 E2EE export decrypts server-side.** `/api/export-snapshot` still accepts
-   `X-E2EE-Password`, derives the key, and decrypts (and logs) on the server.
-2. **#3 Admin TLS** + cookie `Secure`.
-3. **#6 CSRF token** + POST/DELETE for mutating actions (mitigated by SameSite).
-4. **#10 TOTP secret** stored plaintext.
+1. **#3 Admin TLS** + cookie `Secure`.
+2. **#6 CSRF token** + POST/DELETE for mutating actions (mitigated by SameSite).
+3. **#10 TOTP secret** stored plaintext.
 
 ---
 
@@ -162,18 +160,27 @@ signature before applying. At minimum, refuse to apply auto-updates over a
 non-TLS (`ws://`) connection, and surface an explicit user confirmation before
 hot-reloading new plugin code.
 
-### 5. E2EE export endpoint decrypts server-side
+### 5. E2EE export endpoint decrypts server-side — ✅ Fixed
 
-`/api/export-snapshot` accepts an `X-E2EE-Password` header, derives the AES key
-on the server, and decrypts file content into the ZIP (logging the derivation).
-This defeats the end-to-end property: the passphrase and plaintext both pass
-through the server. The dashboard _preview_ path decrypts in-browser (correct);
-only the export path is affected.
+**Was:** `/api/export-snapshot` and `/api/export-selected` accepted an
+`X-E2EE-Password` header, derived the AES key on the server, and decrypted file
+content into a server-built ZIP (logging the derivation) — the passphrase and
+plaintext both passed through the server, defeating the end-to-end property.
 
-**Fix:** build the ZIP and decrypt entirely client-side in the browser (the
-dashboard already has the WebCrypto code for preview). The server should only
-ever return ciphertext for E2EE files. Remove the `X-E2EE-Password` handling and
-the associated logging.
+**Fixed:** both routes now return a JSON manifest of the stored bytes
+(`{ files: [{ path, mtime, encrypted, content(base64) }] }`) and **never
+decrypt**. Encrypted files come back exactly as stored (the `IONENCv…` blob);
+the dashboard loads JSZip (already CSP-allowed) and decrypts each E2EE entry
+in-browser with the vault key via the same `e2eeDecryptB64` used by preview,
+then assembles the ZIP client-side. The `X-E2EE-Password` header and all
+server-side decryption/logging are removed, so the passphrase never leaves the
+browser. Regression test: `test/exportSecurity.test.ts` asserts the server
+returns ciphertext byte-for-byte even when handed the passphrase.
+
+_Trade-off:_ the manifest carries all selected file bytes as base64 in one
+response (the browser then zips them), rather than the previous streamed ZIP.
+Fine for personal vaults; a future manifest-then-fetch-per-file path could
+restore streaming for very large exports if ever needed.
 
 ---
 

@@ -2404,44 +2404,83 @@ function loadScript(src) {
   });
 }
 
+// ── Client-side ZIP export ──────────────────────────────────────────────────
+//
+// The server returns each file's stored bytes as base64 (encrypted files stay
+// encrypted — the passphrase never leaves the browser). We decrypt E2EE entries
+// here with the vault key and assemble the ZIP with JSZip, loaded on demand from
+// cdnjs (allowed by the dashboard CSP's script-src).
+const JSZIP_SRC = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+
+function b64ToBytes(b64) {
+  return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+}
+
+// files: [{ path, mtime, encrypted, content(base64) }]. Returns a small summary
+// so the caller can tell the user how many E2EE files were (or weren't) decrypted.
+async function buildExportZip(files, filename) {
+  await loadScript(JSZIP_SRC);
+  if (typeof JSZip === 'undefined') throw new Error('ZIP library failed to load');
+
+  const zip = new JSZip();
+  const pw = getE2eePassword();
+  let encrypted = 0, undecrypted = 0;
+
+  for (const f of files) {
+    let bytes;
+    if (f.encrypted) {
+      encrypted++;
+      if (pw && crypto?.subtle) {
+        try { bytes = new Uint8Array(await e2eeDecryptB64(f.content, pw)); }
+        catch { bytes = b64ToBytes(f.content); undecrypted++; }  // wrong key — keep ciphertext
+      } else {
+        bytes = b64ToBytes(f.content); undecrypted++;            // no key — keep ciphertext
+      }
+    } else {
+      bytes = b64ToBytes(f.content);
+    }
+    zip.file(f.path, bytes, f.mtime ? { date: new Date(f.mtime) } : undefined);
+  }
+
+  const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 10_000);
+
+  return { total: files.length, encrypted, undecrypted };
+}
+
+function exportToastMsg(r) {
+  if (r.encrypted === 0) return `Downloaded ${r.total} file${r.total !== 1 ? 's' : ''}`;
+  if (r.undecrypted === 0) return `Downloaded ${r.total} file${r.total !== 1 ? 's' : ''} (${r.encrypted} decrypted)`;
+  return `Downloaded ${r.total} — ${r.undecrypted} still encrypted (enter the vault key to decrypt)`;
+}
+
 async function exportSnapshot(btn) {
   const dateInput = document.getElementById('snapshot-date').value;
   if (!dateInput) { toast('Pick a snapshot date first', 'error'); return; }
 
   const origText = btn.textContent;
   btn.disabled = true;
-  btn.textContent = 'Downloading…';
+  btn.textContent = 'Preparing…';
 
   try {
     const asOf = dateInput + 'T23:59:59.999';
-    const url = '/api/export-snapshot?date=' + encodeURIComponent(asOf);
+    const r = await api('/api/export-snapshot?date=' + encodeURIComponent(asOf));
+    const { files } = await r.json();
+    if (!files || !files.length) { toast('No files in that snapshot', 'error'); return; }
 
-    // Include the E2EE password as a header so the server can decrypt on the
-    // fly. If no password is set the ZIP will contain the raw encrypted blobs.
-    const headers = {};
-    const e2eePw = getE2eePassword();
-    if (e2eePw) headers['X-E2EE-Password'] = e2eePw;
-
-    const r = await fetch(url, { headers });
-    if (!r.ok) throw new Error(`Server error ${r.status}`);
-
-    const blob = await r.blob();
-    const blobUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = blobUrl;
-    a.download = 'ionsync-snapshot-' + dateInput + '.zip';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 10_000);
-
-    toast(e2eePw ? 'Export downloaded (decrypted)' : 'Export downloaded', 'success');
+    btn.textContent = 'Zipping…';
+    const summary = await buildExportZip(files, 'ionsync-snapshot-' + dateInput + '.zip');
+    toast(exportToastMsg(summary), 'success');
   } catch (e) {
     toast('Export failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origText;
   }
-
-  btn.disabled = false;
-  btn.textContent = origText;
 }
 
 // ── Version history ──────────────────────────────────────────────────────────────────────────────
@@ -2721,25 +2760,17 @@ function dbToggleFile(path, checked) {
 async function dbDownloadZip() {
   if (!dbSelected.size) return;
   const paths = [...dbSelected];
-  const e2eePw = document.getElementById('global-e2ee-pw')?.value || '';
   try {
-    const headers = { 'Content-Type': 'application/json' };
-    if (e2eePw) headers['X-E2EE-Password'] = e2eePw;
-    const r = await fetch('/api/export-selected', {
+    const r = await api('/api/export-selected', {
       method: 'POST',
-      headers,
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ paths }),
-      credentials: 'include',
     });
-    if (!r.ok) { toast('Export failed', 'error'); return; }
-    const blob = await r.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
+    const { files } = await r.json();
+    if (!files || !files.length) { toast('Nothing to export', 'error'); return; }
     const ts = new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', '-');
-    a.href = url; a.download = `ionsync-export-${ts}.zip`;
-    document.body.appendChild(a); a.click();
-    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
-    toast(`Downloading ${paths.length} file${paths.length !== 1 ? 's' : ''} as ZIP`, 'success');
+    const summary = await buildExportZip(files, `ionsync-export-${ts}.zip`);
+    toast(exportToastMsg(summary), 'success');
   } catch (e) {
     toast('Export failed: ' + e.message, 'error');
   }
@@ -2837,25 +2868,17 @@ async function filesDeleteSelected() {
 async function filesDownloadZip() {
   if (!filesSelected.size) return;
   const paths = [...filesSelected];
-  const e2eePw = document.getElementById('global-e2ee-pw')?.value || '';
   try {
-    const headers = { 'Content-Type': 'application/json' };
-    if (e2eePw) headers['X-E2EE-Password'] = e2eePw;
-    const r = await fetch('/api/export-selected', {
+    const r = await api('/api/export-selected', {
       method: 'POST',
-      headers,
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ paths }),
-      credentials: 'include',
     });
-    if (!r.ok) { toast('Export failed', 'error'); return; }
-    const blob = await r.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
+    const { files } = await r.json();
+    if (!files || !files.length) { toast('Nothing to export', 'error'); return; }
     const ts = new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', '-');
-    a.href = url; a.download = `ionsync-export-${ts}.zip`;
-    document.body.appendChild(a); a.click();
-    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
-    toast(`Downloading ${paths.length} file${paths.length !== 1 ? 's' : ''} as ZIP`, 'success');
+    const summary = await buildExportZip(files, `ionsync-export-${ts}.zip`);
+    toast(exportToastMsg(summary), 'success');
   } catch (e) {
     toast('Export failed: ' + e.message, 'error');
   }
