@@ -242,7 +242,11 @@ in settings, which is only enabled once a salt has been received. *Reading* v3
 needs only the salt; *writing* v3 needs the explicit opt-in — so a device that
 hasn't been updated never meets a v3 blob it can't read. Existing v1/v2 files
 remain readable forever (the version byte selects the salt), and "Re-encrypt all
-files" migrates them to v3 after the opt-in. Verified end-to-end: v2 and v3
+files" migrates them to v3 after the opt-in. (The upload handler's echo-storm
+guard makes an explicit exception for a re-key: a re-upload with the same
+plaintext SHA-1 but a different ciphertext format version is stored rather than
+dropped — without it the migration of an already-encrypted note would silently
+no-op. See `isNoopResend` and `test/reEncrypt.test.ts`.) Verified end-to-end: v2 and v3
 round-trip, a v3 blob is rejected under the wrong salt, old v2 blobs still
 decrypt with a v3 salt loaded, and v3 derivation fails closed when no salt is
 present. Salt distribution is covered by `test/e2eeSalt.test.ts` (well-formed,

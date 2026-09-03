@@ -3,7 +3,7 @@ import type { SyncContext } from "../../context.js";
 import { pushActivity } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 import { broadcastToPeers, checkSyncDone } from "./sync.js";
-import { isE2eeEncrypted } from "../../e2ee.js";
+import { isE2eeEncrypted, e2eeVersion } from "../../e2ee.js";
 import crypto from "node:crypto";
 
 /**
@@ -104,18 +104,27 @@ export function isEmptyUpload(buf: Buffer): boolean {
  * and broadcast the note straight back to the device that's actively editing
  * it — echo amplification (the July 2026 conflict-copy storm).
  *
- * One exception: an E2EE upload over a plaintext-stored head is the encryption
- * *upgrade* path (plugin re-uploads the same plaintext sha as ciphertext) and
- * must be stored. Conversely a plaintext resend over a ciphertext head is
- * skipped — which also prevents accidental encryption downgrades.
+ * Two exceptions where the plaintext sha is unchanged but the bytes must still
+ * be stored:
+ *   - E2EE upload over a plaintext-stored head — the encryption *upgrade* path
+ *     (plugin re-uploads the same plaintext sha as ciphertext).
+ *   - E2EE upload whose ciphertext FORMAT VERSION differs from the stored head
+ *     (e.g. v2 global salt → v3 per-install salt, SECURITY.md #7) — the re-key
+ *     migration. Without this the "Re-encrypt all files" re-upload of an
+ *     already-encrypted note is dropped and the note never moves to v3.
+ * Conversely a plaintext resend over a ciphertext head is skipped — which also
+ * prevents accidental encryption downgrades.
  */
-function isNoopResend(ctx: SyncContext, file: FileEntry, isE2EE: boolean): boolean {
+function isNoopResend(ctx: SyncContext, file: FileEntry, isE2EE: boolean, uploadBuf: Buffer): boolean {
   if (file.action !== "active" || file.fileType !== "file" || !file.sha1) return false;
   const head = ctx.db.getFile(file.path);
   if (!head || head.action !== "active" || head.sha1 !== file.sha1) return false;
   if (isE2EE) {
     const headBuf = ctx.storage.readLatest(file.path);
     if (!headBuf || !isE2eeEncrypted(headBuf)) return false; // plaintext→ciphertext upgrade: store it
+    // Re-key: same plaintext, but the stored ciphertext is a different format
+    // version — store it so the migration actually replaces the blob.
+    if (e2eeVersion(headBuf) !== e2eeVersion(uploadBuf)) return false;
   }
   return true;
 }
@@ -186,7 +195,7 @@ export function handleFileUpload(
     }
     // No-op resend of the current head: drop it before it touches the DB or
     // any peer. See isNoopResend — this is the echo-amplification cut.
-    if (!isRejected && decision === "accept" && isNoopResend(ctx, file, isE2EE)) {
+    if (!isRejected && decision === "accept" && isNoopResend(ctx, file, isE2EE, buf)) {
       logInfo(ctx, `[file_data] no-op resend of ${file.path} (sha unchanged) — dropped, no broadcast`);
       clearUploadContent(msg);
       advanceUploadQueue(peer, file.path);
