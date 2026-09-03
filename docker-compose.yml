@@ -4,6 +4,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # ed25519 private key that signs the plugin auto-update bundle.
+        # Set as a build-time secret on the Dockhand stack (never committed).
+        # Empty when unset -> unsigned build (signed clients refuse to update).
+        IONSYNC_SIGN_KEY: ${IONSYNC_SIGN_KEY:-}
     ports:
       - "${IONSYNC_PORT:-3000}:3000"
       - "${IONSYNC_DASH:-3001}:3001"
