@@ -10,6 +10,7 @@ import { isE2eeEncrypted } from "../e2ee.js";
 import { broadcastToPeers } from "../ws/handlers/sync.js";
 import { verifyTOTP, generateSecret, totpUri, createPendingToken, consumePendingToken,
   generateRecoveryCodes, formatRecoveryCode, normalizeRecoveryCode, hashRecoveryCode } from "../totp.js";
+import { sealTotpSecret, openTotpSecret } from "../totpSecret.js";
 import { pushActivity } from "../context.js";
 
 // E2EE helpers live in ../e2ee.js (shared, version-aware). The server only
@@ -173,6 +174,18 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     return true;
   }
 
+  // TOTP secret at rest (SECURITY.md #10): sealed with a key derived from the
+  // admin password + per-install salt, so a leaked DB/backup can't clone the 2FA
+  // seed. Reads tolerate a legacy plaintext secret (openTotpSecret passes it
+  // through) until the startup migration or the next enable re-seals it.
+  function readTotpSecret(): string | null {
+    const stored = ctx.db.getSetting("totp_secret");
+    return stored ? openTotpSecret(stored, ctx.config.password, ctx.db.getOrCreateE2eeSalt()) : null;
+  }
+  function writeTotpSecret(plain: string): void {
+    ctx.db.setSetting("totp_secret", sealTotpSecret(plain, ctx.config.password, ctx.db.getOrCreateE2eeSalt()));
+  }
+
   // ── CSRF guard (SECURITY.md #6) ─────────────────────────────────────────────
   // SameSite=Strict is the primary defence; this is defence-in-depth. Every
   // state-changing request (anything but a safe method) must carry an
@@ -260,7 +273,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
       return;
     }
 
-    const totpSecret = ctx.db.getSetting("totp_secret");
+    const totpSecret = readTotpSecret();
     if (!totpSecret) { res.status(401).json({ error: "2FA not configured" }); return; }
 
     // Try TOTP first
@@ -848,7 +861,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     }
     const rawCodes = generateRecoveryCodes();
     const hashes = rawCodes.map(hashRecoveryCode);
-    ctx.db.setSetting("totp_secret", secret);
+    writeTotpSecret(secret);
     ctx.db.setSetting("totp_recovery_codes", JSON.stringify(hashes));
     res.json({ ok: true, recoveryCodes: rawCodes.map(formatRecoveryCode) });
   });
@@ -856,7 +869,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   // Disable TOTP — requires the current TOTP code as confirmation.
   router.post("/api/totp/disable", express.json(), (req, res) => {
     if (!checkAuth(req, res)) return;
-    const totpSecret = ctx.db.getSetting("totp_secret");
+    const totpSecret = readTotpSecret();
     if (!totpSecret) { res.json({ ok: true }); return; } // already disabled
     const { code } = req.body as { code?: string };
     if (!code) { res.status(400).json({ error: "Missing code" }); return; }

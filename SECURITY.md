@@ -43,7 +43,7 @@ CSRF protection, and rate limiting — rather than relying on network isolation.
 | 7 | Fixed global PBKDF2 salt; low iteration count | **Medium** | ✅ Fixed (600k iters + opt-in per-install salt, format v3) |
 | 8 | No constant-time comparison of secrets | **Medium** | ✅ Fixed |
 | 9 | No rate limiting / lockout on auth | **Medium** | ✅ Fixed |
-| 10 | TOTP secret stored in plaintext | **Medium** | Open |
+| 10 | TOTP secret stored in plaintext | **Medium** | ✅ Fixed (sealed at rest, AES-GCM under a password-derived key) |
 | 11 | Long-lived AES-GCM key, no rotation | **Low** | ✅ Addressed (re-encrypt/re-key shipped) |
 
 ---
@@ -80,8 +80,10 @@ since the June review.
   bulk-push (`drainPushQueue`) enforces the size limit; and `/api/file-content`
   returns a clean 400 (not 500) on a blocked traversal. All six are fixed.
 
-**Still open — priority order**
-1. **#10 TOTP secret** stored plaintext.
+**Still open**
+
+None — every item in this document has been fixed or addressed. Remaining
+hardening is opportunistic (e.g. Argon2id in place of PBKDF2), not an open gap.
 
 ---
 
@@ -267,14 +269,31 @@ lockout. The single shared password is freely brute-forceable.
 **Fix:** add IP-based rate limiting and exponential backoff on failed
 `/api/login` attempts and failed WS auth; consider a temporary lockout.
 
-### 10. TOTP secret stored in plaintext
+### 10. TOTP secret stored in plaintext — ✅ Fixed
 
-`totp_secret` is stored unencrypted in the settings table. A database read fully
-compromises 2FA.
+**Was:** `totp_secret` was stored unencrypted in the settings table, so anyone
+who read the SQLite file — or one of the automated backups — could clone the
+authenticator. (The backups feature makes this concrete: a snapshot copied
+off-box would have carried the plaintext seed.)
 
-**Fix:** encrypt the TOTP secret at rest with a key derived from the server
-password (or a dedicated server key), or accept the risk explicitly given the
-DB already holds all file content.
+**Fixed:** the seed is now sealed at rest (`src/totpSecret.ts`) with AES-256-GCM
+under a key derived (PBKDF2-SHA256, 200k) from the **admin password** — which the
+running server already holds — plus the per-install salt, domain-separated from
+E2EE use. The stored form is `base64(MAGIC + IV + ciphertext + tag)`. A leaked DB
+or backup no longer exposes the seed; an attacker would also need the admin
+password, at which point the second factor is already moot.
+
+- Enable seals the secret (`writeTotpSecret`); login/verify and disable read it
+  back through `readTotpSecret` (existence checks in `/api/login` and
+  `/api/totp/status` work directly on the opaque blob).
+- **Backward compatible:** `openTotpSecret` returns a value lacking the magic
+  verbatim, so a pre-existing plaintext secret keeps working, and a one-time
+  startup migration in `index.ts` re-seals it (idempotent; sealed secrets are
+  skipped).
+
+Tests (`test/totpSecret.test.ts`): round-trip, fresh IV per seal, legacy
+plaintext passthrough, and authentication failure on a wrong password, wrong
+salt, or tampered ciphertext.
 
 ---
 

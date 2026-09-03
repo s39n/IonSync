@@ -11,6 +11,7 @@ import { attachWebSocketServer } from "./ws/server.js";
 import { buildPublicRouter, buildAdminRouter } from "./http/routes.js";
 import { SyncCleanup } from "./cleanup/index.js";
 import { startBackupScheduler } from "./backup.js";
+import { sealTotpSecret, isSealed } from "./totpSecret.js";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -48,6 +49,17 @@ const storage = new Storage(filesDir);
 storage.init();
 
 const ctx = createContext(config, db, storage, clientDir);
+
+// One-time migration (SECURITY.md #10): seal a legacy plaintext TOTP secret at
+// rest so a leaked DB or backup can't clone the 2FA seed. Idempotent — sealed
+// secrets are skipped. Runs before the servers accept traffic.
+{
+  const storedTotp = db.getSetting("totp_secret");
+  if (storedTotp && !isSealed(storedTotp)) {
+    db.setSetting("totp_secret", sealTotpSecret(storedTotp, config.password, db.getOrCreateE2eeSalt()));
+    console.log("[migrate] sealed the TOTP secret at rest");
+  }
+}
 
 // Nightly DB snapshots (in addition to the pre-migration snapshot SyncDB takes
 // on startup). VACUUM INTO → data/backups/. Timer is unref'd so it never blocks
