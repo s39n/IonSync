@@ -69,7 +69,9 @@ export function handleAuth(ctx: SyncContext, peer: SyncPeer, msg: AuthMsg): void
     if (clean) ctx.db.setDeviceName(msg.deviceId, clean);
   }
 
-  peer.send({ type: "auth_ok" });
+  // Hand the device the per-install E2EE salt (format v3+, SECURITY.md #7).
+  // Generated once and stored, so it is stable for the vault's life; not secret.
+  peer.send({ type: "auth_ok", e2eeSalt: ctx.db.getOrCreateE2eeSalt() });
 
   log(ctx, `[auth] device "${msg.deviceId}" authenticated (peer ${peer.id})`);
 }

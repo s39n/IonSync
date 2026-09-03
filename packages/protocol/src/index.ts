@@ -250,6 +250,13 @@ export interface ChallengeMsg {
 
 export interface AuthOkMsg {
   type: "auth_ok";
+  /**
+   * Per-install random salt (hex) for E2EE key derivation, format v3+. Stable
+   * for the life of the vault, shared to every device so they derive the same
+   * key; not secret. Absent from older servers — clients then stay on the v1/v2
+   * global salt. See SECURITY.md #7.
+   */
+  e2eeSalt?: string;
 }
 
 export interface AuthErrorMsg {

@@ -236,6 +236,10 @@ export class WsManager {
         await this._handleChallenge(msg.nonce);
         break;
       case "auth_ok":
+        // Persist the per-install E2EE salt if the server sent one (SECURITY.md
+        // #7). Fire-and-forget: it only enables v3 reads/writes and never blocks
+        // the handshake. Older servers omit it and we stay on the global salt.
+        if (msg.e2eeSalt) void this.plugin.applyE2eeSalt(msg.e2eeSalt);
         // Advertise binary_frames so the server can push file content as binary
         // frames to us. The server gates on this per-peer; an old server ignores
         // the field and we fall back to base64 (serverCaps stays empty).

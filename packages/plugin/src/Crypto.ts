@@ -52,7 +52,8 @@ export const WRITE_VERSION = 2;
  */
 const ITERATIONS_BY_VERSION: Record<number, number> = {
   1: 100_000, // legacy
-  2: 600_000, // current — OWASP 2023 floor for PBKDF2-SHA256
+  2: 600_000, // global fixed salt
+  3: 600_000, // per-install random salt (SECURITY.md #7)
 };
 
 /** 8-byte binary magic for the current WRITE_VERSION ("IONENCv2"). */
@@ -89,6 +90,51 @@ const PBKDF2_SALT = new TextEncoder().encode("IonSync-AES-GCM-v1-salt");
 // cache holds no raw key material.
 const keyCache = new Map<string, Promise<CryptoKey>>();
 
+// ── Per-install salt (SECURITY.md #7) ────────────────────────────────────────
+// Format v3 derives the key with a random per-install salt instead of the fixed
+// global one, defeating precomputation and cross-install key reuse. The salt is
+// received from the server (auth_ok) and persisted by the plugin, so v3 content
+// decrypts offline and independent of the server after first receipt.
+let _installSalt: Uint8Array<ArrayBuffer> | null = null;
+
+/** Set (or clear) the per-install salt. Clears cached keys since v3 keys change. */
+export function setInstallSalt(hex: string | null): void {
+  _installSalt = hex ? hexToBytes(hex) : null;
+  keyCache.clear();
+}
+
+/** True once a per-install salt is available (v3 can be read/written). */
+export function hasInstallSalt(): boolean {
+  return _installSalt !== null;
+}
+
+// The format version NEW content is written at. Stays 2 (global salt) until the
+// plugin explicitly opts into v3 AND a salt is present — so shipping v3 support
+// changes nothing until the user enables it, and a device that hasn't upgraded
+// never meets a v3 blob it cannot read.
+let _writeVersion = 2;
+
+/** Choose the version new content is encrypted at (2 = global salt, 3 = per-install). */
+export function setWriteVersion(v: number): void { _writeVersion = v; }
+export function getWriteVersion(): number { return _writeVersion; }
+
+function hexToBytes(hex: string): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(hex.length >> 1);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return out;
+}
+
+/** The PBKDF2 salt for a format version: v3+ uses the per-install salt. */
+function saltForVersion(version: number): Uint8Array<ArrayBuffer> {
+  if (version >= 3) {
+    if (!_installSalt) {
+      throw new Error("IonSync E2EE: per-install salt unavailable for v3 derivation");
+    }
+    return _installSalt;
+  }
+  return PBKDF2_SALT;
+}
+
 /**
  * Derives an AES-256-GCM CryptoKey from an encryption password using PBKDF2.
  * `version` selects the iteration count; it defaults to the current
@@ -118,7 +164,7 @@ export async function deriveKey(
     return crypto.subtle.deriveKey(
       {
         name: "PBKDF2",
-        salt: PBKDF2_SALT,
+        salt: saltForVersion(version),
         iterations,
         hash: "SHA-256",
       },
@@ -144,8 +190,13 @@ export async function deriveKey(
  */
 export async function encryptToBytes(
   key: CryptoKey,
-  plaintext: BufferSource
+  plaintext: BufferSource,
+  version: number = getWriteVersion()
 ): Promise<Uint8Array> {
+  // The magic must match the version the KEY was derived at (the caller derives
+  // via _getEncryptionKey at getWriteVersion()), or decrypt would pick the wrong
+  // salt/iterations. Both read getWriteVersion(), which is stable between them.
+  const magic = magicForVersion(version);
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
   const ciphertext = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv },
@@ -153,12 +204,10 @@ export async function encryptToBytes(
     plaintext
   );
 
-  const out = new Uint8Array(
-    E2EE_MAGIC.length + IV_BYTES + ciphertext.byteLength
-  );
-  out.set(E2EE_MAGIC, 0);
-  out.set(iv, E2EE_MAGIC.length);
-  out.set(new Uint8Array(ciphertext), E2EE_MAGIC.length + IV_BYTES);
+  const out = new Uint8Array(magic.length + IV_BYTES + ciphertext.byteLength);
+  out.set(magic, 0);
+  out.set(iv, magic.length);
+  out.set(new Uint8Array(ciphertext), magic.length + IV_BYTES);
   return out;
 }
 

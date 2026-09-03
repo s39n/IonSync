@@ -10,7 +10,7 @@ import Utils from "./Utils.js";
 import { PLUGIN_UPDATE_PUBKEY } from "./updateKey.js";
 import type { IonSyncPlugin } from "./main.js";
 import { diff_match_patch } from "diff-match-patch";
-import { deriveKey, encryptToBytes, decryptFromBase64, isEncryptedBase64 } from "./Crypto.js";
+import { deriveKey, encryptToBytes, decryptFromBase64, isEncryptedBase64, getWriteVersion } from "./Crypto.js";
 
 interface DeleteQueueEntry {
   metadata: Partial<FileEntry>;
@@ -172,6 +172,7 @@ export class XSync {
   // only re-derive when the password changes.
   private _e2eeKey: CryptoKey | null = null;
   private _e2eeKeyPassword = "";
+  private _e2eeKeyVersion = 0;
 
   private async _getEncryptionKey(): Promise<CryptoKey | null> {
     const { encryptionEnabled } = this.plugin.settings;
@@ -179,13 +180,19 @@ export class XSync {
     if (!encryptionEnabled || !encryptionPassword) {
       this._e2eeKey = null;
       this._e2eeKeyPassword = "";
+      this._e2eeKeyVersion = 0;
       return null;
     }
-    if (this._e2eeKey && this._e2eeKeyPassword === encryptionPassword) {
+    // Derive at the current write version so the key's salt/iterations match the
+    // magic encryptToBytes stamps. Re-derive when the version flips (v2↔v3) too,
+    // not just on a password change.
+    const version = getWriteVersion();
+    if (this._e2eeKey && this._e2eeKeyPassword === encryptionPassword && this._e2eeKeyVersion === version) {
       return this._e2eeKey;
     }
-    this._e2eeKey = await deriveKey(encryptionPassword);
+    this._e2eeKey = await deriveKey(encryptionPassword, version);
     this._e2eeKeyPassword = encryptionPassword;
+    this._e2eeKeyVersion = version;
     return this._e2eeKey;
   }
 

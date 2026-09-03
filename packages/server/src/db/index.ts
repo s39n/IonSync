@@ -4,6 +4,7 @@ import { runMigrations } from "./migrations.js";
 import { backupFilename, pruneBackups } from "../backup.js";
 import fs from "node:fs";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 
 interface DbFileRow {
   path: string;
@@ -710,6 +711,23 @@ export class SyncDB {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`
       )
       .run(key, value);
+  }
+
+  /**
+   * The per-install E2EE salt (hex) for key-derivation format v3+ (SECURITY.md
+   * #7). Generated once, on first request, and stored — so it is STABLE for the
+   * life of the vault (a changing salt would strand every v3 ciphertext). Not a
+   * secret: a salt only needs to be unique per install, which defeats
+   * precomputation against the old fixed global salt and cross-install key
+   * reuse. Handed to every device in `auth_ok`; devices persist their own copy,
+   * so decryption never depends on the server after first receipt.
+   */
+  getOrCreateE2eeSalt(): string {
+    const existing = this.getSetting("e2ee_salt");
+    if (existing) return existing;
+    const salt = randomBytes(16).toString("hex");
+    this.setSetting("e2ee_salt", salt);
+    return salt;
   }
 
   deleteSetting(key: string): void {

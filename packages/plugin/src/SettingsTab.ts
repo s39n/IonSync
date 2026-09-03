@@ -229,11 +229,32 @@ export class IonSyncSettingsTab extends PluginSettingTab {
         "Store it in a password manager before enabling."
       );
 
+      const hasSalt = !!this.plugin.settings.e2eeInstallSalt;
+      new Setting(containerEl)
+        .setName("Per-install encryption salt (v3)")
+        .setDesc(
+          "Derive the key with a random salt unique to this server instead of the shared " +
+          "built-in salt — stronger against precomputation and cross-install key reuse. " +
+          "Turn this on ONLY after every device is updated to a build that supports v3, then " +
+          "use “Re-encrypt all files” below to migrate existing content. Older files stay " +
+          "readable either way." +
+          (hasSalt ? "" : " (Waiting for the salt — connect to the server once to receive it.)")
+        )
+        .addToggle((t) =>
+          t.setValue(this.plugin.settings.e2eeWriteV3)
+            .setDisabled(!hasSalt && !this.plugin.settings.e2eeWriteV3)
+            .onChange(async (v) => {
+              await this.plugin.enableE2eeV3(v);
+              this.display();
+            })
+        );
+
       new Setting(containerEl)
         .setName("Re-encrypt all files")
         .setDesc(
           "Force every file to be re-uploaded as encrypted. Use this if some files " +
-          "were synced before E2EE was enabled and are still stored in plaintext on the server."
+          "were synced before E2EE was enabled and are still stored in plaintext on the server." +
+          " Also migrates existing files to the per-install salt (v3) once it is enabled above."
         )
         .addButton((btn) => {
           btn.setButtonText("Re-encrypt all files now")

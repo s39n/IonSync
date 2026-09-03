@@ -1,6 +1,7 @@
 import { Plugin, Platform, TFile } from "obsidian";
 import { XSync } from "./XSync.js";
 import { IonSyncSettingsTab } from "./SettingsTab.js";
+import { setInstallSalt, setWriteVersion, hasInstallSalt } from "./Crypto.js";
 
 // Stamped by the esbuild post-build plugin — lets you confirm in the dev console
 // (Ctrl+Shift+I) which build is actually running after a rebuild/redeploy.
@@ -63,6 +64,20 @@ export interface PluginSettings {
    * in plaintext until they are next modified and re-uploaded.
    */
   encryptionEnabled: boolean;
+
+  /**
+   * Per-install E2EE salt (hex), received from the server in auth_ok and cached
+   * here so v3 content decrypts offline, independent of the server (SECURITY.md
+   * #7). Undefined until first received.
+   */
+  e2eeInstallSalt?: string;
+  /**
+   * Opt-in to writing new E2EE content at format v3 (per-install salt). Default
+   * false: shipping v3 support changes nothing until the user turns this on,
+   * AFTER every device is updated (an older device can't read v3). Reading v3
+   * needs only the salt, not this flag.
+   */
+  e2eeWriteV3: boolean;
 
   // ── Cursor sync state (phase 2) ───────────────────────────────────────────
   /**
@@ -127,6 +142,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
   exclusionList: "",
   maxFileSizeMB: 25,
   encryptionEnabled: false,
+  e2eeWriteV3: false,
   lastSyncedSeq: 0,
   lastSyncedEndpoint: "",
   bootstrapComplete: false,
@@ -304,6 +320,45 @@ export class IonSyncPlugin extends Plugin {
       delete (this.settings as any).encryptionPassword;
       await this.saveData(this.settings);
     }
+
+    // Restore E2EE v3 state (SECURITY.md #7): the cached per-install salt lets
+    // v3 content decrypt offline, before the first server connect; the write
+    // version only moves to v3 when the user has explicitly opted in AND a salt
+    // is present.
+    if (this.settings.e2eeInstallSalt) setInstallSalt(this.settings.e2eeInstallSalt);
+    if (this.settings.e2eeWriteV3 && this.settings.e2eeInstallSalt) setWriteVersion(3);
+  }
+
+  /**
+   * Store the per-install E2EE salt handed to us by the server in auth_ok.
+   * Pin-on-first-use: once we hold a salt we keep it (a server that lost and
+   * regenerated its DB could otherwise present a different salt and strand our
+   * v3 content); we only warn on a mismatch. If the user has already opted into
+   * v3, activate the write version now that a salt is available.
+   */
+  async applyE2eeSalt(hex: string): Promise<void> {
+    if (!/^[0-9a-f]{32}$/i.test(hex)) return;
+    if (this.settings.e2eeInstallSalt) {
+      if (this.settings.e2eeInstallSalt.toLowerCase() !== hex.toLowerCase()) {
+        console.warn("[IonSync] server presented a different E2EE salt than the one on file — keeping the stored salt");
+      }
+      return;
+    }
+    this.settings.e2eeInstallSalt = hex.toLowerCase();
+    setInstallSalt(this.settings.e2eeInstallSalt);
+    if (this.settings.e2eeWriteV3) setWriteVersion(3);
+    await this.saveData(this.settings);
+  }
+
+  /**
+   * Turn per-install-salt encryption (v3) on/off for NEW writes. Only takes
+   * effect once a salt is present. Enabling should be done after every device
+   * is updated; trigger a server-side re-encrypt afterwards to migrate old data.
+   */
+  async enableE2eeV3(on: boolean): Promise<void> {
+    this.settings.e2eeWriteV3 = on;
+    setWriteVersion(on && hasInstallSalt() ? 3 : 2);
+    await this.saveData(this.settings);
   }
 
   async saveSettings(): Promise<void> {

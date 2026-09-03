@@ -40,7 +40,7 @@ CSRF protection, and rate limiting — rather than relying on network isolation.
 | 4 | Plugin executes server-pushed JS with no signature check | **High** | ✅ Fixed (ed25519-signed updates) |
 | 5 | E2EE export endpoint decrypts server-side (key leaves the client) | **High** | ✅ Fixed (client-side decrypt + ZIP) |
 | 6 | CSRF on cookie-authenticated, state-changing endpoints | **Medium** | ✅ Fixed (`SameSite` + per-session CSRF token; mutations off GET) |
-| 7 | Fixed global PBKDF2 salt; low iteration count | **Medium** | Partial — iterations 100k→600k; salt still global |
+| 7 | Fixed global PBKDF2 salt; low iteration count | **Medium** | ✅ Fixed (600k iters + opt-in per-install salt, format v3) |
 | 8 | No constant-time comparison of secrets | **Medium** | ✅ Fixed |
 | 9 | No rate limiting / lockout on auth | **Medium** | ✅ Fixed |
 | 10 | TOTP secret stored in plaintext | **Medium** | Open |
@@ -79,11 +79,6 @@ since the June review.
   its `diff_match_patch` import are gone; the duplicate TOTP route block is gone;
   bulk-push (`drainPushQueue`) enforces the size limit; and `/api/file-content`
   returns a clean 400 (not 500) on a blocked traversal. All six are fixed.
-
-**Partially fixed**
-- **#7** — PBKDF2 iterations raised **100k → 600k** (v2; v1 retained only to read
-  legacy blobs). The global fixed salt (`IonSync-AES-GCM-v1-salt`) remains, still
-  documented as an intentional cross-device trade-off.
 
 **Still open — priority order**
 1. **#10 TOTP secret** stored plaintext.
@@ -220,17 +215,40 @@ Regression tests: `test/csrf.test.ts` (missing/wrong/valid token → 403/403/pas
 the action route is POST-only, `GET /api/csrf` auth-gated) and the existing
 admin-action tests now log in for the CSRF token.
 
-### 7. Fixed global PBKDF2 salt; low iteration count
+### 7. Fixed global PBKDF2 salt; low iteration count — ✅ Fixed
 
-E2EE key derivation uses a fixed application-wide salt
-(`"IonSync-AES-GCM-v1-salt"`) at 100,000 iterations. The same password produces
-the same key for every user and vault, enabling precomputation and cross-vault
-key reuse. The fixed salt is documented as intentional (devices must derive a
-common key), but the trade-off should be explicit.
+**Was:** E2EE key derivation used a fixed application-wide salt
+(`"IonSync-AES-GCM-v1-salt"`) at 100,000 iterations. The same password produced
+the same key for every install and vault, enabling precomputation against the
+known salt and cross-install key reuse.
 
-**Fix:** generate a random per-vault salt once, distribute it across devices
-during the password handshake, and store it alongside the encrypted data. Raise
-iterations (≥600k for PBKDF2-SHA256) or move to Argon2id.
+**Fixed in two parts:**
+- **Iterations 100k → 600k** (OWASP 2023 floor for PBKDF2-SHA256). The count is
+  pinned per format version (v1=100k legacy, v2/v3=600k) so old ciphertext stays
+  decryptable — the key is re-derived on decrypt using the version stamped in the
+  blob's magic.
+- **Per-install random salt (format v3), opt-in.** The server generates a random
+  16-byte salt once (`db.getOrCreateE2eeSalt`, stored in settings, stable for the
+  vault's life; not secret) and hands it to every device in `auth_ok`. The plugin
+  persists it locally, so v3 content decrypts offline and independent of the
+  server after first receipt. v3 derives the key with this salt instead of the
+  global one, defeating precomputation and cross-install reuse.
+
+**Safe rollout.** Shipping the v3-capable build changes nothing on its own:
+`WRITE_VERSION` stays 2 until the user turns on "Per-install encryption salt (v3)"
+in settings, which is only enabled once a salt has been received. *Reading* v3
+needs only the salt; *writing* v3 needs the explicit opt-in — so a device that
+hasn't been updated never meets a v3 blob it can't read. Existing v1/v2 files
+remain readable forever (the version byte selects the salt), and "Re-encrypt all
+files" migrates them to v3 after the opt-in. Verified end-to-end: v2 and v3
+round-trip, a v3 blob is rejected under the wrong salt, old v2 blobs still
+decrypt with a v3 salt loaded, and v3 derivation fails closed when no salt is
+present. Salt distribution is covered by `test/e2eeSalt.test.ts` (well-formed,
+delivered on auth, identical across reconnects).
+
+_Note:_ the global salt (`IonSync-AES-GCM-v1-salt`) is retained solely to read
+pre-v3 (v1/v2) blobs; all new derivation for opted-in installs uses the random
+per-install salt.
 
 ### 8. No constant-time comparison of secrets
 
