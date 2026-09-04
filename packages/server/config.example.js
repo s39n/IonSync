@@ -1,4 +1,4 @@
-// AnySocket Sync Server v2 — example config
+// IonSync Server — example config
 // Copy this file to config.js and fill in your settings.
 
 export default {
