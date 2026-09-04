@@ -92,6 +92,17 @@ const postBuildPlugin = {
         }
       }
 
+      // Mirror manifest.json + versions.json to the repo ROOT. Obsidian's
+      // community-plugin submission and BRAT both read manifest.json from the
+      // repository root to discover the plugin id/version; this is a monorepo
+      // (source lives in packages/plugin/), so copy them up to keep root in sync.
+      const REPO_ROOT = path.join(__dirname, "..", "..") + path.sep;
+      for (const file of ["manifest.json", "versions.json"]) {
+        if (fs.existsSync(BUILD_DIR + file)) {
+          fs.copyFileSync(BUILD_DIR + file, REPO_ROOT + file);
+        }
+      }
+
       // Copy to local Obsidian vault for dev convenience (optional path)
       const LOCAL_VAULT = process.env.OBSIDIAN_PLUGIN_DIR || "";
       if (LOCAL_VAULT && fs.existsSync(LOCAL_VAULT)) {
