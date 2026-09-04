@@ -4,7 +4,7 @@
 	"version": "2.0.0",
 	"minAppVersion": "1.11.4",
 	"description": "Self-hosted vault synchronization",
-	"author": "Andrei Vaduva",
-	"authorUrl": "https://github.com/lynxaegon",
+	"author": "Sean Richards",
+	"authorUrl": "https://github.com/s39n",
 	"isDesktopOnly": false
 }
