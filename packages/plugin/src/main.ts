@@ -72,12 +72,20 @@ export interface PluginSettings {
    */
   e2eeInstallSalt?: string;
   /**
-   * Opt-in to writing new E2EE content at format v3 (per-install salt). Default
-   * false: shipping v3 support changes nothing until the user turns this on,
-   * AFTER every device is updated (an older device can't read v3). Reading v3
-   * needs only the salt, not this flag.
+   * Write new E2EE content at format v3 (per-install salt). Now defaults to
+   * true: v3 has shipped and every device auto-updated, so new content uses the
+   * stronger per-install salt as soon as the device holds it. The write path
+   * self-gates on salt presence — a device without the salt keeps writing v2
+   * (readable everywhere) until it receives one, so nothing is stranded.
+   * Reading v3 needs only the salt, not this flag. Can still be turned off.
    */
   e2eeWriteV3: boolean;
+  /**
+   * One-time guard for the v3-default flip (see loadSettings). Applies the new
+   * default exactly once to installs that predate it, and never re-overrides a
+   * user who later turns v3 off.
+   */
+  e2eeV3DefaultApplied?: boolean;
 
   // ── Cursor sync state (phase 2) ───────────────────────────────────────────
   /**
@@ -142,7 +150,8 @@ const DEFAULT_SETTINGS: PluginSettings = {
   exclusionList: "",
   maxFileSizeMB: 25,
   encryptionEnabled: false,
-  e2eeWriteV3: false,
+  e2eeWriteV3: true,
+  e2eeV3DefaultApplied: false,
   lastSyncedSeq: 0,
   lastSyncedEndpoint: "",
   bootstrapComplete: false,
@@ -308,6 +317,18 @@ export class IonSyncPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     const saved = (await this.loadData()) as Partial<PluginSettings & { password?: string; encryptionPassword?: string }> | null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, saved ?? {});
+
+    // One-time: v3 (per-install salt) is now the default. Installs that predate
+    // it have e2eeWriteV3:false persisted — flip them to true exactly once so
+    // they start writing v3 as soon as they hold the salt. The write path still
+    // self-gates on salt presence (a device without the salt keeps writing v2),
+    // so this strands nothing. Guarded by e2eeV3DefaultApplied so a user who
+    // later turns v3 off stays off.
+    if (!this.settings.e2eeV3DefaultApplied) {
+      this.settings.e2eeWriteV3 = true;
+      this.settings.e2eeV3DefaultApplied = true;
+      await this.saveData(this.settings);
+    }
 
     // One-time migration: move plaintext secrets from data.json into the keychain.
     if (saved?.password) {
