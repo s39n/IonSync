@@ -28,7 +28,7 @@ export class Storage {
   /** IndexedDB backing when USE_INDEXEDDB is on and available; null = json path. */
   private idb: IndexStore | null = null;
   private aborted = false;
-  private saveTimeout: ReturnType<typeof setTimeout> | null = null;
+  private saveTimeout: number | null = null;
   private deleteQueueData: Record<string, { metadata: Partial<FileEntry>; timestamp: number }> = {};
 
   constructor(private app: App, private settings: PluginSettings, private pluginDir: string) {
@@ -161,7 +161,7 @@ export class Storage {
 
   private async saveMetadata(): Promise<void> {
     if (this.saveTimeout) {
-      clearTimeout(this.saveTimeout);
+      window.clearTimeout(this.saveTimeout);
       this.saveTimeout = null;
     }
     await this.fsInternal.write("data/metadata.json", JSON.stringify(this.metadata));
@@ -179,7 +179,7 @@ export class Storage {
     // seconds after the download *starts*, so metadata is checkpointed every ~2s
     // regardless of how many more files are still coming.
     if (!this.saveTimeout) {
-      this.saveTimeout = setTimeout(() => {
+      this.saveTimeout = window.setTimeout(() => {
         this.saveTimeout = null;
         void this.saveMetadata();
       }, 2_000);
@@ -238,7 +238,7 @@ export class Storage {
 
   async flushMetadata(): Promise<void> {
     if (this.idb) return; // per-record IndexedDB writes are already durable
-    if (this.saveTimeout) { clearTimeout(this.saveTimeout); this.saveTimeout = null; }
+    if (this.saveTimeout) { window.clearTimeout(this.saveTimeout); this.saveTimeout = null; }
     await this.saveMetadata();
   }
 

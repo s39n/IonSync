@@ -73,7 +73,13 @@ export interface FileEventMsg {
 /** Client uploading a file to the server. Content is base64-encoded. */
 export interface FileDataUploadMsg {
   type: "file_data";
-  mode: "apply";
+  /**
+   * "apply" — a full-file upload. "patch" — a diff-match-patch delta against
+   * the client's last-synced base (same message shape; `content` carries the
+   * patch text). The server stitches a "patch" against the current head and
+   * then processes it exactly like an "apply" (see ws/server.ts).
+   */
+  mode: "apply" | "patch";
   file: FileEntry;
   /** base64-encoded file content; empty string for folders or deleted files */
   content: string;

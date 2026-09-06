@@ -15,7 +15,7 @@ export class ActivityLogModal extends Modal {
     contentEl.empty();
 
     // Header row: title + a "Copy all" button.
-    const header = contentEl.createEl("div");
+    const header = contentEl.createDiv();
     header.style.cssText = "display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;";
     header.createEl("h2", { text: "Activity Log" }).style.margin = "0";
 
@@ -23,7 +23,7 @@ export class ActivityLogModal extends Modal {
     copyBtn.onclick = () => { void this._copyAll(); };
 
     // A white "log sheet" panel — paper-like regardless of the Obsidian theme.
-    this.sheetEl = contentEl.createEl("div");
+    this.sheetEl = contentEl.createDiv();
     this.sheetEl.style.cssText = [
       "max-height:400px",
       "overflow-y:auto",
@@ -72,12 +72,12 @@ export class ActivityLogModal extends Modal {
 
     this.sheetEl.empty();
     if (log.length === 0) {
-      const empty = this.sheetEl.createEl("div", { text: "No activity yet." });
+      const empty = this.sheetEl.createDiv({ text: "No activity yet." });
       empty.style.cssText = "color:#888;font-style:italic;";
       return;
     }
     for (const entry of log) {
-      const line = this.sheetEl.createEl("div", { text: entry });
+      const line = this.sheetEl.createDiv({ text: entry });
       // Faint ruled line between entries, like a printed log sheet.
       line.style.cssText = "padding:2px 0;border-bottom:1px dashed #ececec;";
     }

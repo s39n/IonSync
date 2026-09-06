@@ -9,10 +9,10 @@ export class IonSyncSettingsTab extends PluginSettingTab {
   override display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "IonSync" });
+    ;
 
     // ── Connection ──────────────────────────────────────────────────────────
-    containerEl.createEl("h3", { text: "Connection" });
+    new Setting(containerEl).setName("Connection").setHeading();
 
     new Setting(containerEl)
       .setName("Server host")
@@ -67,7 +67,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
       );
 
     // ── Sync behaviour ──────────────────────────────────────────────────────
-    containerEl.createEl("h3", { text: "Sync" });
+    new Setting(containerEl).setName("Sync").setHeading();
 
     new Setting(containerEl)
       .setName("Enable sync")
@@ -113,7 +113,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
       );
 
     // ── What to sync ────────────────────────────────────────────────────────
-    containerEl.createEl("h3", { text: "What to sync" });
+    new Setting(containerEl).setName("What to sync").setHeading();
 
     const toggleSetting = (name: string, desc: string, key: keyof typeof this.plugin.settings) => {
       new Setting(containerEl)
@@ -122,7 +122,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
         .addToggle((t) =>
           t.setValue(this.plugin.settings[key] as boolean)
             .onChange(async (v) => {
-              (this.plugin.settings as any)[key] = v;
+              (this.plugin.settings as unknown as Record<string, boolean>)[key] = v;
               await this.plugin.saveSettings();
               this.plugin.xSync?.scheduleFullReconcile();
             })
@@ -171,7 +171,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
       );
 
     // ── End-to-End Encryption ───────────────────────────────────────────────
-    containerEl.createEl("h3", { text: "End-to-End Encryption" });
+    new Setting(containerEl).setName("End-to-End Encryption").setHeading();
 
     new Setting(containerEl)
       .setName("Enable E2EE")
@@ -217,7 +217,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
           return t;
         });
 
-      const warn = containerEl.createEl("div");
+      const warn = containerEl.createDiv();
       warn.style.cssText =
         "border: 1px solid var(--color-orange); border-radius: 6px; " +
         "padding: 10px 14px; margin: 4px 0 12px; font-size: 12px; " +
@@ -267,7 +267,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
               btn.setDisabled(true);
               await this.plugin.xSync.triggerReEncrypt();
               btn.setButtonText("Done — syncing now");
-              setTimeout(() => {
+              window.setTimeout(() => {
                 btn.setButtonText("Re-encrypt all files now");
                 btn.setDisabled(false);
               }, 4000);
@@ -276,7 +276,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
     }
 
     // ── Exclusion list ──────────────────────────────────────────────────────
-    containerEl.createEl("h3", { text: "Exclusion list" });
+    new Setting(containerEl).setName("Exclusion list").setHeading();
     containerEl.createEl("p", { text: "One glob pattern per line. Lines starting with # are comments." });
 
     new Setting(containerEl)
@@ -288,7 +288,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
       .settingEl.style.flexDirection = "column";
 
     // ── Support ─────────────────────────────────────────────────────────────
-    const supportEl = containerEl.createEl("div");
+    const supportEl = containerEl.createDiv();
     supportEl.style.cssText =
       "margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--background-modifier-border); text-align: center;";
     const coffeeLink = supportEl.createEl("a", {

@@ -133,7 +133,7 @@ export class VersionHistoryModal extends Modal {
         await navigator.clipboard.writeText(text);
         new Notice("Copied to clipboard");
         copyBtn.textContent = "Copied ✓";
-        setTimeout(() => { copyBtn.textContent = "Copy"; copyBtn.disabled = false; }, 2000);
+        window.setTimeout(() => { copyBtn.textContent = "Copy"; copyBtn.disabled = false; }, 2000);
       } catch (e) {
         new Notice(`Copy failed: ${e instanceof Error ? e.message : String(e)}`);
         copyBtn.textContent = "Copy";
@@ -185,8 +185,10 @@ export class FilesHistoryModal extends SuggestModal<string> {
     super.onOpen();
     try {
       const resp = await this.plugin.xSync.listVersionHistory("/");
+      // A path of "/" returns a directory listing whose entries carry a `path`
+      // (not the per-file VersionEntry shape); read it defensively.
       this.files = resp.versions
-        .map((v: any) => (v as any).path as string)
+        .map((v) => (v as { path?: string }).path ?? "")
         .filter(Boolean);
     } catch {
       this.files = [];
@@ -198,7 +200,7 @@ export class FilesHistoryModal extends SuggestModal<string> {
   }
 
   override renderSuggestion(filePath: string, el: HTMLElement): void {
-    el.createEl("div", { text: filePath });
+    el.createDiv({ text: filePath });
   }
 
   override async onChooseSuggestion(filePath: string): Promise<void> {

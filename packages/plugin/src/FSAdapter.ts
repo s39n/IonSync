@@ -1,4 +1,5 @@
 import { normalizePath, TFile, type App, TFolder } from "obsidian";
+import Utils from "./Utils.js";
 
 export class FSAdapter {
   constructor(private app: App, private basePath: string) {}
@@ -24,14 +25,14 @@ export class FSAdapter {
       
       // FIX: ENOTDIR Collision handling. 
       if (existing instanceof TFile) {
-        console.log(`[IonSync] Collision: ${cur} is a file but needs to be a folder. Removing file.`);
+        // ENOTDIR collision: cur is a file but must become a folder. Remove it.
         try { 
           // Delete via Obsidian API so the internal cache is immediately updated
           await this.app.fileManager.trashFile(existing); 
-          await new Promise(r => setTimeout(r, 50)); // Allow cache to settle
-        } catch (e) {
+          await new Promise(r => window.setTimeout(r, 50)); // Allow cache to settle
+        } catch {
           // Fallback to native delete
-          try { await this.app.vault.adapter.remove(cur); } catch (err) {}
+          try { await this.app.vault.adapter.remove(cur); } catch { /* best-effort cleanup */ }
         }
       }
 
@@ -40,8 +41,8 @@ export class FSAdapter {
       if (!(abstract instanceof TFolder)) {
         try {
           await this.app.vault.createFolder(cur);
-        } catch (e) {
-          try { await this.app.vault.adapter.mkdir(cur); } catch(err) {}
+        } catch {
+          try { await this.app.vault.adapter.mkdir(cur); } catch { /* folder may already exist */ }
         }
       }
     }
@@ -61,15 +62,15 @@ export class FSAdapter {
     try {
       // PRIMARY FAST PATH: Avoids I/O race conditions resulting in 0-byte blank files
       await this.app.vault.adapter.write(p, data, opts);
-    } catch (writeErr: any) {
-      const msg = String(writeErr?.message || writeErr || "");
+    } catch (writeErr: unknown) {
+      const msg = Utils.errorMessage(writeErr);
       
       // Mobile/SAF Fallback Trigger
       if (!msg.includes("FILE_NOTCREATED") && !msg.includes("ENOENT") && !msg.includes("file not found")) {
          if (!(await this.app.vault.adapter.exists(p))) {
            // Proceed to fallback
          } else {
-           throw writeErr;
+           throw Utils.toError(writeErr);
          }
       }
       
@@ -80,16 +81,16 @@ export class FSAdapter {
         } else {
           await this.app.vault.create(p, data);
         }
-      } catch (createErr: any) {
-        const createMsg = String(createErr?.message || createErr || "");
-        if (createMsg && !createMsg.includes("already exist")) throw createErr;
+      } catch (createErr: unknown) {
+        const createMsg = Utils.errorMessage(createErr);
+        if (createMsg && !createMsg.includes("already exist")) throw Utils.toError(createErr);
       }
       
       // Apply mtime as a secondary step for mobile
       if (mtime) {
         // Delay to prevent the OS file-handle race condition
-        await new Promise(r => setTimeout(r, 100));
-        try { await this.app.vault.adapter.write(p, data, opts); } catch {}
+        await new Promise(r => window.setTimeout(r, 100));
+        try { await this.app.vault.adapter.write(p, data, opts); } catch { /* mtime re-apply is best-effort */ }
       }
     }
   }
@@ -106,7 +107,7 @@ export class FSAdapter {
     
     try {
       await this.app.vault.adapter.writeBinary(p, data, opts);
-    } catch (writeErr: any) {
+    } catch {
       try {
         const file = this.app.vault.getAbstractFileByPath(p);
         if (file instanceof TFile) {
@@ -114,14 +115,14 @@ export class FSAdapter {
         } else {
           await this.app.vault.createBinary(p, data);
         }
-      } catch (createErr: any) {
-        const createMsg = String(createErr?.message || createErr || "");
-        if (createMsg && !createMsg.includes("already exist")) throw createErr;
+      } catch (createErr: unknown) {
+        const createMsg = Utils.errorMessage(createErr);
+        if (createMsg && !createMsg.includes("already exist")) throw Utils.toError(createErr);
       }
       
       if (mtime) {
-        await new Promise(r => setTimeout(r, 100));
-        try { await this.app.vault.adapter.writeBinary(p, data, opts); } catch {}
+        await new Promise(r => window.setTimeout(r, 100));
+        try { await this.app.vault.adapter.writeBinary(p, data, opts); } catch { /* mtime re-apply is best-effort */ }
       }
     }
   }

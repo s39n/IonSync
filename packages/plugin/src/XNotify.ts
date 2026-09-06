@@ -1,4 +1,6 @@
 import { Menu, Notice, Platform, type MenuItem } from "obsidian";
+import { VersionHistoryModal, FilesHistoryModal, ActivityLogModal, ConflictsModal } from "./modals/index.js";
+import { appInternals } from "./obsidian-internals.js";
 import type { XSync } from "./XSync.js";
 
 export const STATUS_OK = "#4caf50";
@@ -26,11 +28,11 @@ export class XNotify {
   private mobileIcon: HTMLElement | null = null;
   private mobileBadge: HTMLElement | null = null;
 
-  private msgTimeout: ReturnType<typeof setTimeout> | null = null;
-  private pendingNoticeTimeout: ReturnType<typeof setTimeout> | null = null;
+  private msgTimeout: number | null = null;
+  private pendingNoticeTimeout: number | null = null;
   /** Safety net that stops the mobile spinner if a sync ends without a clean
    *  summary (e.g. a missed sync_done). */
-  private _spinWatchdog: ReturnType<typeof setTimeout> | null = null;
+  private _spinWatchdog: number | null = null;
   private lastNoticeType: string | null = null;
   private _pendingCount = 0;
 
@@ -46,26 +48,25 @@ export class XNotify {
     el.addClass("ionsync-status-bar");
     el.setAttr("title", "IonSync");
 
-    const wrap = el.createEl("span");
-    wrap.style.cssText = "vertical-align:middle;display:inline-flex;align-items:center;";
-    this.statusBarIcon = wrap.createEl("span");
+    const wrap = el.createSpan({ cls: "ionsync-icon-wrap" });
+    this.statusBarIcon = wrap.createSpan();
     this.statusBarIcon.style.cssText = `padding-right:4px;color:${STATUS_ERROR};`;
-    this.statusBarIcon.innerHTML = this.xSync.plugin.getSVGIcon();
-    this.statusBarMsg = wrap.createEl("span");
-    this.statusBarMsg.style.display = "none";
+    this.statusBarIcon.append(this.xSync.plugin.buildSVGIcon());
+    this.statusBarMsg = wrap.createSpan();
+    this.statusBarMsg.hide();
 
     el.onClickEvent((evt) => this.showMenu(evt));
 
     // MOBILE: Create the floating corner icon with the notification badge
     if (Platform.isMobile) {
-      this.mobileIndicator = document.body.createEl("div");
+      this.mobileIndicator = document.body.createDiv();
       this.mobileIndicator.addClass("ionsync-mobile-status");
       
-      this.mobileIcon = this.mobileIndicator.createEl("span");
+      this.mobileIcon = this.mobileIndicator.createSpan();
       this.mobileIcon.style.cssText = `color:${STATUS_ERROR}; display:flex; align-items:center; justify-content:center;`;
-      this.mobileIcon.innerHTML = this.xSync.plugin.getSVGIcon();
+      this.mobileIcon.append(this.xSync.plugin.buildSVGIcon());
       
-      this.mobileBadge = this.mobileIndicator.createEl("div");
+      this.mobileBadge = this.mobileIndicator.createDiv();
       this.mobileBadge.addClass("ionsync-mobile-badge");
       
       this.mobileIndicator.addEventListener("click", (e) => this.showMenu(e as MouseEvent));
@@ -73,8 +74,6 @@ export class XNotify {
   }
 
   private showMenu(evt: MouseEvent): void {
-    // Dynamic import to avoid circular references at module load time
-    const { VersionHistoryModal, FilesHistoryModal, ActivityLogModal, ConflictsModal } = require("./modals/index.js") as typeof import("./modals/index.js");
     const menu = new Menu();
     const plugin = this.xSync.plugin;
     const connected = this.xSync.ws.isConnected;
@@ -127,8 +126,9 @@ export class XNotify {
     menu.addSeparator();
     menu.addItem((i) =>
       i.setTitle("Settings").setIcon("settings").onClick(() => {
-        (plugin.app as any).setting?.open();
-        (plugin.app as any).setting?.openTabById("ion-sync");
+        const setting = appInternals(plugin.app).setting;
+        setting?.open?.();
+        setting?.openTabById?.("ion-sync");
       })
     );
     menu.showAtMouseEvent(evt);
@@ -161,9 +161,9 @@ export class XNotify {
     this._currentStatusLabel = text;
     this.statusBarMsg.innerText = text;
     if (this.statusBarItem) this.statusBarItem.setAttr("title", `IonSync — ${text}`);
-    if (this.msgTimeout !== null) { clearTimeout(this.msgTimeout); this.msgTimeout = null; }
+    if (this.msgTimeout !== null) { window.clearTimeout(this.msgTimeout); this.msgTimeout = null; }
     if (!keep) {
-      this.msgTimeout = setTimeout(() => {
+      this.msgTimeout = window.setTimeout(() => {
         this.msgTimeout = null;
         const fallback = this._pendingCount > 0
           ? `${this._pendingCount} remaining`
@@ -200,7 +200,7 @@ export class XNotify {
     if (!this.statusBarMsg) return;
     const text = `${NotifyType.SYNCING} ${detail}`;
     this._currentStatusLabel = text;
-    if (this.msgTimeout !== null) { clearTimeout(this.msgTimeout); this.msgTimeout = null; }
+    if (this.msgTimeout !== null) { window.clearTimeout(this.msgTimeout); this.msgTimeout = null; }
     this.statusBarMsg.innerText = text;
     if (this.statusBarItem) this.statusBarItem.setAttr("title", `IonSync — ${text}`);
     // Only spin during an actual sync session. A live single-file push from
@@ -216,8 +216,8 @@ export class XNotify {
   /** (Re)arms a timeout that force-stops the spinner if no progress arrives for
    *  a while and we are no longer syncing — covers a missed sync_done. */
   private _armSpinWatchdog(): void {
-    if (this._spinWatchdog !== null) clearTimeout(this._spinWatchdog);
-    this._spinWatchdog = setTimeout(() => {
+    if (this._spinWatchdog !== null) window.clearTimeout(this._spinWatchdog);
+    this._spinWatchdog = window.setTimeout(() => {
       this._spinWatchdog = null;
       if (!this.xSync.isSyncing) this.mobileIndicator?.removeClass("syncing");
     }, 10_000);
@@ -226,7 +226,7 @@ export class XNotify {
   /** Stops the mobile spinner and cancels its watchdog. */
   private _stopSpin(): void {
     this.mobileIndicator?.removeClass("syncing");
-    if (this._spinWatchdog !== null) { clearTimeout(this._spinWatchdog); this._spinWatchdog = null; }
+    if (this._spinWatchdog !== null) { window.clearTimeout(this._spinWatchdog); this._spinWatchdog = null; }
   }
 
   setSyncSummary(up: number, down: number): void {
@@ -275,7 +275,7 @@ export class XNotify {
           // The connection blipped back within the threshold — cancel the
           // pending "Connection lost" notice and show nothing for CONNECTED.
           if (this.pendingNoticeTimeout !== null) {
-            clearTimeout(this.pendingNoticeTimeout);
+            window.clearTimeout(this.pendingNoticeTimeout);
             this.pendingNoticeTimeout = null;
           }
         } else if (level > 0) {
@@ -306,16 +306,15 @@ export class XNotify {
   }
 
   showNotification(color: string, text: string, delay = 0): void {
-    clearTimeout(this.pendingNoticeTimeout!);
-    this.pendingNoticeTimeout = setTimeout(() => {
+    window.clearTimeout(this.pendingNoticeTimeout!);
+    this.pendingNoticeTimeout = window.setTimeout(() => {
       this.pendingNoticeTimeout = null;
-      const el = new Notice("", 4_000).noticeEl;
-      const wrap = el.createEl("span");
-      wrap.style.cssText = "vertical-align:middle;display:inline-flex;align-items:center;";
-      const icon = wrap.createEl("span");
+      const el = new Notice("", 4_000).messageEl;
+      const wrap = el.createSpan({ cls: "ionsync-icon-wrap" });
+      const icon = wrap.createSpan();
       icon.style.cssText = `padding-right:4px;color:${color};`;
-      icon.innerHTML = this.xSync.plugin.getSVGIcon();
-      wrap.createEl("span", { text });
+      icon.append(this.xSync.plugin.buildSVGIcon());
+      wrap.createSpan({ text });
     }, delay);
   }
 
@@ -326,9 +325,9 @@ export class XNotify {
   }
 
   cleanup(): void {
-    if (this.msgTimeout !== null) { clearTimeout(this.msgTimeout); this.msgTimeout = null; }
-    if (this.pendingNoticeTimeout !== null) { clearTimeout(this.pendingNoticeTimeout); this.pendingNoticeTimeout = null; }
-    if (this._spinWatchdog !== null) { clearTimeout(this._spinWatchdog); this._spinWatchdog = null; }
+    if (this.msgTimeout !== null) { window.clearTimeout(this.msgTimeout); this.msgTimeout = null; }
+    if (this.pendingNoticeTimeout !== null) { window.clearTimeout(this.pendingNoticeTimeout); this.pendingNoticeTimeout = null; }
+    if (this._spinWatchdog !== null) { window.clearTimeout(this._spinWatchdog); this._spinWatchdog = null; }
     if (this.mobileIndicator) { this.mobileIndicator.remove(); this.mobileIndicator = null; }
   }
 }

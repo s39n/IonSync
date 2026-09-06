@@ -96,12 +96,24 @@ class Utils {
     return bytes;
   }
 
+  /** Extract a human-readable message from an unknown thrown value. */
+  errorMessage(e: unknown): string {
+    if (e instanceof Error) return e.message;
+    if (typeof e === "string") return e;
+    return e == null ? "" : String(e);
+  }
+
+  /** Normalise an unknown thrown value into an Error for safe re-throwing. */
+  toError(e: unknown): Error {
+    return e instanceof Error ? e : new Error(this.errorMessage(e));
+  }
+
   /** Returns a debounced version of fn that fires after delay ms of silence. */
   debounce<T extends unknown[]>(fn: (...args: T) => void, delay: number): (...args: T) => void {
-    let timer: ReturnType<typeof setTimeout> | null = null;
+    let timer: number | null = null;
     return (...args: T) => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => { timer = null; fn(...args); }, delay);
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(() => { timer = null; fn(...args); }, delay);
     };
   }
 

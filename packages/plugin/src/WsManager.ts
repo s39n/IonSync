@@ -57,7 +57,7 @@ export class WsManager {
   private listeners: Listener[] = [];
   private reconnectDelay = 1_000;
   private readonly MAX_RECONNECT_DELAY = 30_000;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectTimer: number | null = null;
   private mobileVisibilityListener?: () => void;
 
   private get settings(): PluginSettings { return this.plugin.settings; }
@@ -294,7 +294,7 @@ export class WsManager {
     if (!this.isEnabled) return;
     this._cancelReconnect();
     const ms = delay ?? this.reconnectDelay;
-    this.reconnectTimer = setTimeout(() => {
+    this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
       if (this.isEnabled) this._openSocket();
     }, ms);
@@ -302,6 +302,6 @@ export class WsManager {
   }
 
   private _cancelReconnect(): void {
-    if (this.reconnectTimer !== null) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    if (this.reconnectTimer !== null) { window.clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
   }
 }

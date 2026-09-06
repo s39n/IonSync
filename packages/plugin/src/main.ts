@@ -333,12 +333,12 @@ export class IonSyncPlugin extends Plugin {
     // One-time migration: move plaintext secrets from data.json into the keychain.
     if (saved?.password) {
       this.app.secretStorage.setSecret("ionsync-password", saved.password);
-      delete (this.settings as any).password;
+      delete (this.settings as { password?: string }).password;
       await this.saveData(this.settings);
     }
     if (saved?.encryptionPassword) {
       this.app.secretStorage.setSecret("ionsync-encryption-password", saved.encryptionPassword);
-      delete (this.settings as any).encryptionPassword;
+      delete (this.settings as { encryptionPassword?: string }).encryptionPassword;
       await this.saveData(this.settings);
     }
 
@@ -410,13 +410,52 @@ export class IonSyncPlugin extends Plugin {
 
   log(...args: unknown[]): void {
     if (this.settings.debug) {
+      // eslint-disable-next-line no-console -- gated debug logger; single sink for verbose diagnostics
       console.log("[IonSync]", ...args);
     }
   }
 
-  getSVGIcon(): string {
-    // Atom — nucleus dot + three orbital ellipses at 0°, 60°, 120°
-    return `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"></circle><ellipse cx="12" cy="12" rx="10" ry="3.5"></ellipse><ellipse cx="12" cy="12" rx="10" ry="3.5" transform="rotate(60 12 12)"></ellipse><ellipse cx="12" cy="12" rx="10" ry="3.5" transform="rotate(120 12 12)"></ellipse></svg>`;
+  /** Always-on warning sink for unexpected but non-fatal states. */
+  warn(...args: unknown[]): void {
+    // eslint-disable-next-line no-console -- single, intentional warning sink for the plugin
+    console.warn("[IonSync]", ...args);
+  }
+
+  /** Always-on error sink. */
+  error(...args: unknown[]): void {
+    // eslint-disable-next-line no-console -- single, intentional error sink for the plugin
+    console.error("[IonSync]", ...args);
+  }
+
+  /**
+   * Build the IonSync atom icon (nucleus dot + three orbital ellipses at 0°,
+   * 60°, 120°) as an SVG element using Obsidian's DOM helpers, so callers never
+   * assign an HTML string to innerHTML. `stroke="currentColor"` lets the icon
+   * inherit the surrounding text colour.
+   */
+  buildSVGIcon(): SVGSVGElement {
+    const svg = createSvg("svg", {
+      attr: {
+        xmlns: "http://www.w3.org/2000/svg",
+        width: "16",
+        height: "16",
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "1.75",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      },
+    });
+    svg.createSvg("circle", {
+      attr: { cx: "12", cy: "12", r: "1.5", fill: "currentColor", stroke: "none" },
+    });
+    for (const rotation of [0, 60, 120]) {
+      const attr: Record<string, string> = { cx: "12", cy: "12", rx: "10", ry: "3.5" };
+      if (rotation) attr.transform = `rotate(${rotation} 12 12)`;
+      svg.createSvg("ellipse", { attr });
+    }
+    return svg;
   }
 }
 

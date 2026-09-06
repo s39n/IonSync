@@ -1,0 +1,235 @@
+/* ── Version History Modal ──────────────────────────────────────────────── */
+
+.ion-version-history-modal .ion-file-path {
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+  word-break: break-all;
+}
+
+.ion-version-history-modal .ion-loading {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.ion-version-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.ion-version-row {
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.ion-version-row:last-child {
+  border-bottom: none;
+}
+
+.ion-version-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  gap: 10px;
+}
+
+.ion-version-row:first-child .ion-version-header {
+  background: var(--background-secondary-alt);
+}
+
+.ion-version-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.ion-version-num {
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 24px;
+}
+
+.ion-version-date {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.ion-badge-latest {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--background-modifier-hover);
+  color: var(--interactive-accent);
+}
+
+.ion-version-sha {
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.ion-version-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ion-btn {
+  padding: 4px 11px;
+  border-radius: 5px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.12s;
+}
+
+.ion-btn:hover:not(:disabled) {
+  background: var(--background-modifier-hover);
+}
+
+.ion-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ion-btn.ion-btn-primary {
+  background: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.ion-btn.ion-btn-primary:hover:not(:disabled) {
+  background: var(--interactive-accent-hover);
+  border-color: var(--interactive-accent-hover);
+}
+
+.ion-preview-area {
+  margin: 0 14px 12px;
+  border: 2px solid var(--interactive-accent);
+  border-radius: 6px;
+  background: var(--background-primary);
+  overflow: hidden;
+}
+
+.ion-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--background-secondary-alt);
+  border-bottom: 1px solid var(--background-modifier-border);
+  gap: 10px;
+}
+
+.ion-preview-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--interactive-accent);
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+}
+
+.ion-preview-version-info {
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: right;
+}
+
+.ion-preview-content {
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 12px;
+  color: var(--text-normal);
+}
+
+/* ── Floating Mobile Status Icon ──────────────────────────────────────────── */
+
+/* Floating Mobile Status Icon */
+.ionsync-mobile-status {
+  position: fixed;
+  bottom: 80px; /* Sits just above the mobile keyboard/toolbar */
+  right: 20px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background-color: var(--background-secondary-alt);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  cursor: pointer;
+  transition: all 0.2s ease-in-out;
+  opacity: 0.85;
+}
+ 
+.ionsync-mobile-status svg {
+  width: 22px;
+  height: 22px;
+}
+
+.ionsync-mobile-status:active {
+  transform: scale(0.9);
+  opacity: 1;
+}
+
+/* Spinning animation while syncing */
+.ionsync-mobile-status.syncing svg {
+  animation: ionsync-spin 1.5s linear infinite;
+}
+
+@keyframes ionsync-spin {
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+/* Mobile Notification Badge (Pending Count) */
+.ionsync-mobile-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  background-color: var(--color-red);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 12px;
+  padding: 2px 6px;
+  min-width: 20px;
+  text-align: center;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  pointer-events: none; /* Let taps pass through to the main button */
+  display: none; /* Hidden when count is 0 */
+  z-index: 10000;
+}
+
+.ionsync-mobile-badge.visible {
+  display: block;
+}
+
+/* Inline wrapper for the status-bar / notice icon + label (replaces inline styles). */
+.ionsync-icon-wrap {
+  vertical-align: middle;
+  display: inline-flex;
+  align-items: center;
+}
