@@ -25,6 +25,12 @@ packages/server/data/
 docker-build-output.txt
 _tmp_*
 
+# Lint analysis scratch (not part of the project)
+eslint-baseline.txt
+eslint-b2.txt
+eslint-report.json
+scripts-lint-analyze.mjs
+
 # Docker env file (contains password)
 .env
 
