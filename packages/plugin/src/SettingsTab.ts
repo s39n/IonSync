@@ -233,11 +233,13 @@ export class IonSyncSettingsTab extends PluginSettingTab {
       new Setting(containerEl)
         .setName("Per-install encryption salt (v3)")
         .setDesc(
-          "Derive the key with a random salt unique to this server instead of the shared " +
-          "built-in salt — stronger against precomputation and cross-install key reuse. " +
-          "Turn this on ONLY after every device is updated to a build that supports v3, then " +
-          "use “Re-encrypt all files” below to migrate existing content. Older files stay " +
-          "readable either way." +
+          "On by default. Derives the key with a random salt unique to this server instead " +
+          "of the shared built-in salt — stronger against precomputation and cross-install " +
+          "key reuse. Each device switches to it automatically once it has received the salt " +
+          "from the server (connect once); until then it keeps writing the older v2 format, " +
+          "which every device can still read. Use “Re-encrypt all files” below to migrate " +
+          "existing content to v3. Turn this off only if you must keep writing v2 for a " +
+          "device that can't be updated." +
           (hasSalt ? "" : " (Waiting for the salt — connect to the server once to receive it.)")
         )
         .addToggle((t) =>
