@@ -6,7 +6,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace=packages/protocol && npm run build --workspace=packages/server",
+    "build": "npm run build --workspace=packages/protocol && npm run build --workspace=packages/plugin && npm run build --workspace=packages/server",
     "test": "npm test --workspace=packages/server",
     "typecheck": "npm run typecheck --workspace=packages/protocol && npm run typecheck --workspace=packages/server",
     "lint": "eslint ."

@@ -3,7 +3,7 @@
 	"name": "IonSync",
 	"version": "2.0.3",
 	"minAppVersion": "1.11.4",
-	"description": "Self-hosted vault synchronization",
+	"description": "Self-hosted vault synchronization for your notes.",
 	"author": "Sean Richards",
 	"authorUrl": "https://github.com/s39n",
 	"isDesktopOnly": false

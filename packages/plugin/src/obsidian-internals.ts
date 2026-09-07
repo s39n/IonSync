@@ -6,15 +6,6 @@
  */
 import type { App, Vault, EventRef, TAbstractFile } from "obsidian";
 
-/** `app.plugins` — the community-plugin manager (enable/disable/manifests). */
-export interface InternalPluginsApi {
-  enablePlugin(id: string): Promise<void>;
-  disablePlugin(id: string): Promise<void>;
-  loadManifests?(): Promise<void>;
-  enabledPlugins?: Set<string>;
-  manifests?: Record<string, unknown>;
-}
-
 /** `app.customCss` — live theme/snippet reloading. */
 export interface InternalCustomCssApi {
   requestLoadTheme?(): void;
@@ -28,7 +19,6 @@ export interface InternalSettingApi {
 }
 
 interface AppInternals {
-  plugins: InternalPluginsApi;
   customCss?: InternalCustomCssApi;
   setting?: InternalSettingApi;
 }
