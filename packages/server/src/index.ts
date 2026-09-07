@@ -26,6 +26,7 @@ if (!fs.existsSync(configPath)) {
 }
 
  
+// eslint-disable-next-line no-unsanitized/method -- `configPath` is the server operator's own config.js, resolved from a trusted local path (env/cwd), never web input; this is a Node server, not a browser context.
 const rawConfig = (await import(configPath)) as Record<string, unknown>;
 const config = mergeConfig((rawConfig["default"] ?? rawConfig) as Record<string, unknown>);
 
