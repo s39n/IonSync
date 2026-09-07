@@ -181,18 +181,20 @@ export class FilesHistoryModal extends SuggestModal<string> {
     this.setPlaceholder("Search files…");
   }
 
-  override async onOpen(): Promise<void> {
-    super.onOpen();
-    try {
-      const resp = await this.plugin.xSync.listVersionHistory("/");
-      // A path of "/" returns a directory listing whose entries carry a `path`
-      // (not the per-file VersionEntry shape); read it defensively.
-      this.files = resp.versions
-        .map((v) => (v as { path?: string }).path ?? "")
-        .filter(Boolean);
-    } catch {
-      this.files = [];
-    }
+  override onOpen(): void {
+    void super.onOpen();
+    void (async () => {
+      try {
+        const resp = await this.plugin.xSync.listVersionHistory("/");
+        // A path of "/" returns a directory listing whose entries carry a `path`
+        // (not the per-file VersionEntry shape); read it defensively.
+        this.files = resp.versions
+          .map((v) => (v as { path?: string }).path ?? "")
+          .filter(Boolean);
+      } catch {
+        this.files = [];
+      }
+    })();
   }
 
   override getSuggestions(query: string): string[] {
@@ -203,7 +205,7 @@ export class FilesHistoryModal extends SuggestModal<string> {
     el.createDiv({ text: filePath });
   }
 
-  override async onChooseSuggestion(filePath: string): Promise<void> {
+  override onChooseSuggestion(filePath: string): void {
     new VersionHistoryModal(this.plugin, filePath).open();
   }
 }

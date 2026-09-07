@@ -104,21 +104,21 @@ export class XNotify {
         .onClick(async () => { plugin.settings.autoSync = !autoSync; await plugin.saveSettings(); })
     );
     if (connected) {
-      menu.addItem((i) => i.setTitle("Sync Now").setIcon("sync").onClick(() => { void this.xSync.sync(); }));
+      menu.addItem((i) => i.setTitle("Sync now").setIcon("sync").onClick(() => { void this.xSync.sync(); }));
     }
     menu.addSeparator();
     const activeFile = plugin.app.workspace.getActiveFile();
     if (activeFile) {
       menu.addItem((i) =>
-        i.setTitle("File Version History").setIcon("history")
+        i.setTitle("File version history").setIcon("history")
           .onClick(() => { new VersionHistoryModal(plugin, activeFile.path).open(); })
       );
     }
     menu.addItem((i) =>
-      i.setTitle("Trash Viewer").setIcon("trash").onClick(() => { new FilesHistoryModal(plugin, true).open(); })
+      i.setTitle("Trash viewer").setIcon("trash").onClick(() => { new FilesHistoryModal(plugin, true).open(); })
     );
     menu.addItem((i) =>
-      i.setTitle("Activity Log").setIcon("list").onClick(() => { new ActivityLogModal(plugin).open(); })
+      i.setTitle("Activity log").setIcon("list").onClick(() => { new ActivityLogModal(plugin).open(); })
     );
     menu.addItem((i) =>
       i.setTitle("Conflicts").setIcon("swords").onClick(() => { new ConflictsModal(plugin).open(); })

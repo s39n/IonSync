@@ -776,7 +776,7 @@ export class SyncDB {
       }
       return files.length;
     })();
-    return result as number;
+    return result;
   }
 
   /**

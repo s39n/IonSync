@@ -25,9 +25,9 @@ if (!fs.existsSync(configPath)) {
   process.exit(1);
 }
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const rawConfig = await import(configPath);
-const config = mergeConfig(rawConfig.default ?? rawConfig);
+ 
+const rawConfig = (await import(configPath)) as Record<string, unknown>;
+const config = mergeConfig((rawConfig["default"] ?? rawConfig) as Record<string, unknown>);
 
 // ── Logging ───────────────────────────────────────────────────────────────────
 

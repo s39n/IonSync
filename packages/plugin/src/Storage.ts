@@ -247,7 +247,7 @@ export class Storage {
   async loadDeleteQueue(): Promise<Record<string, { metadata: Partial<FileEntry>; timestamp: number }>> {
     try {
       const raw = await this.fsInternal.read("data/delete-queue.json");
-      if (raw) this.deleteQueueData = JSON.parse(raw);
+      if (raw) this.deleteQueueData = JSON.parse(raw) as Record<string, { metadata: Partial<FileEntry>; timestamp: number }>;
     } catch {
       this.deleteQueueData = {};
     }

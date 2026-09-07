@@ -83,7 +83,8 @@ class Utils {
   /** Converts a Uint8Array or string to a base64 string */
   toBase64(data: Uint8Array | string): string {
     if (typeof data === "string") {
-      return btoa(unescape(encodeURIComponent(data)));
+      // Encode to UTF-8 bytes then to a binary string (replaces deprecated unescape()).
+      return btoa(bytesToBinaryString(new TextEncoder().encode(data)));
     }
     return btoa(bytesToBinaryString(data));
   }
@@ -101,11 +102,10 @@ class Utils {
     if (e instanceof Error) return e.message;
     if (typeof e === "string") return e;
     if (e == null) return "";
-    if (typeof e === "object") {
-      try { return JSON.stringify(e); } catch { return "[unstringifiable error]"; }
-    }
-    // Primitive (number, boolean, bigint, symbol) — safe to coerce.
-    return String(e as number | boolean | bigint | symbol);
+    if (typeof e === "number" || typeof e === "boolean" || typeof e === "bigint") return String(e);
+    if (typeof e === "symbol") return e.toString();
+    if (typeof e === "function") return "[function]";
+    try { return JSON.stringify(e); } catch { return "[unstringifiable error]"; }
   }
 
   /** Normalise an unknown thrown value into an Error for safe re-throwing. */

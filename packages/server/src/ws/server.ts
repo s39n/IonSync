@@ -76,7 +76,10 @@ export function attachWebSocketServer(
       }
     }, 5_000);
 
-    // ✅ Changed to async to support reading the current file for Delta Patching
+    // Async to support reading the current file for delta patching. The ws
+    // library tolerates an async listener and every throw is caught in the
+    // try/catch below, so the returned promise never goes unhandled.
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises -- see comment above
     ws.on("message", async (raw: Buffer, isBinary: boolean) => {
       let msg: ClientMsg;
       try {
@@ -183,7 +186,7 @@ export function attachWebSocketServer(
                 content: Buffer.from(newText, "utf-8").toString("base64"),
               });
             } catch (err) {
-              pushLog(ctx, `[Delta] Failed to patch ${rawMsg.file?.path}: ${err}`);
+              pushLog(ctx, `[Delta] Failed to patch ${rawMsg.file?.path}: ${err instanceof Error ? err.message : String(err)}`);
               // Recover by pulling the full file rather than leaving the path stuck.
               peer.pendingUploads.add(rawMsg.file.path);
               peer.send({ type: "file_event_result", path: rawMsg.file.path, result: "client_newer" });

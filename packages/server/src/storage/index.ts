@@ -224,15 +224,6 @@ export class Storage {
 
     const moved: Array<{ oldPath: string; newPath: string }> = [];
 
-    const walk = (dir: string): void => {
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory() && !entry.name.startsWith("v_")) {
-          walk(full);
-        }
-      }
-    };
-
     // Collect all vault-path directories under fromDir (leaf dirs contain v_* files)
     const collectLeafDirs = (dir: string, rel: string): void => {
       const entries = fs.readdirSync(dir, { withFileTypes: true });

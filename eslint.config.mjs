@@ -60,6 +60,9 @@ export default [
       // Server logging is legitimate; the wrapper only re-emits no-console here.
       "obsidianmd/rule-custom-message": "off",
       "no-console": "off",
+      // The server loads its own config file via dynamic import() from a
+      // path.resolve'd local path — a Node pattern, not a browser XSS sink.
+      "no-unsanitized/method": "off",
     },
   },
 ];
