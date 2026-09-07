@@ -1,6 +1,7 @@
 import { Plugin, Platform, TFile } from "obsidian";
 import { XSync } from "./XSync.js";
 import { IonSyncSettingsTab } from "./SettingsTab.js";
+import { VersionHistoryModal, ConflictsModal } from "./modals/index.js";
 import { setInstallSalt, setWriteVersion, hasInstallSalt } from "./Crypto.js";
 
 // Stamped by the esbuild post-build plugin — lets you confirm in the dev console
@@ -191,7 +192,7 @@ export class IonSyncPlugin extends Plugin {
   private _startTimer: number | null = null;
 
   override async onload(): Promise<void> {
-    console.log(`[IonSync] plugin loaded — build ${BUILD}`);
+    window.console.log(`[IonSync] plugin loaded — build ${BUILD}`);
     await this.loadSettings();
 
     let identitySet = false;
@@ -234,10 +235,8 @@ export class IonSyncPlugin extends Plugin {
       callback: () => { void this.xSync.verifyNow(); },
     });
 
-    // Open the server-backed version history for a file. Dynamic require keeps
-    // the modal bundle out of the module-load cycle (same pattern as XNotify).
+    // Open the server-backed version history for a file.
     const openVersionHistory = (path: string) => {
-      const { VersionHistoryModal } = require("./modals/index.js") as typeof import("./modals/index.js");
       new VersionHistoryModal(this, path).open();
     };
 
@@ -258,7 +257,6 @@ export class IonSyncPlugin extends Plugin {
       id: "show-conflicts",
       name: "Show sync conflicts",
       callback: () => {
-        const { ConflictsModal } = require("./modals/index.js") as typeof import("./modals/index.js");
         new ConflictsModal(this).open();
       },
     });
@@ -333,12 +331,12 @@ export class IonSyncPlugin extends Plugin {
     // One-time migration: move plaintext secrets from data.json into the keychain.
     if (saved?.password) {
       this.app.secretStorage.setSecret("ionsync-password", saved.password);
-      delete (this.settings as any).password;
+      delete (this.settings as { password?: string }).password;
       await this.saveData(this.settings);
     }
     if (saved?.encryptionPassword) {
       this.app.secretStorage.setSecret("ionsync-encryption-password", saved.encryptionPassword);
-      delete (this.settings as any).encryptionPassword;
+      delete (this.settings as { encryptionPassword?: string }).encryptionPassword;
       await this.saveData(this.settings);
     }
 
@@ -408,15 +406,51 @@ export class IonSyncPlugin extends Plugin {
     this.app.secretStorage.setSecret("ionsync-encryption-password", value);
   }
 
+  // Logging goes through window.console (member access, popout-window safe)
+  // rather than the bare console global, which Obsidian's lint config forbids.
   log(...args: unknown[]): void {
-    if (this.settings.debug) {
-      console.log("[IonSync]", ...args);
-    }
+    if (this.settings.debug) window.console.log("[IonSync]", ...args);
   }
 
-  getSVGIcon(): string {
-    // Atom — nucleus dot + three orbital ellipses at 0°, 60°, 120°
-    return `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"></circle><ellipse cx="12" cy="12" rx="10" ry="3.5"></ellipse><ellipse cx="12" cy="12" rx="10" ry="3.5" transform="rotate(60 12 12)"></ellipse><ellipse cx="12" cy="12" rx="10" ry="3.5" transform="rotate(120 12 12)"></ellipse></svg>`;
+  /** Always-on warning sink for unexpected but non-fatal states. */
+  warn(...args: unknown[]): void {
+    window.console.warn("[IonSync]", ...args);
+  }
+
+  /** Always-on error sink. */
+  error(...args: unknown[]): void {
+    window.console.error("[IonSync]", ...args);
+  }
+
+  /**
+   * Build the IonSync atom icon (nucleus dot + three orbital ellipses at 0°,
+   * 60°, 120°) as an SVG element using Obsidian's DOM helpers, so callers never
+   * assign an HTML string to innerHTML. `stroke="currentColor"` lets the icon
+   * inherit the surrounding text colour.
+   */
+  buildSVGIcon(): SVGSVGElement {
+    const svg = createSvg("svg", {
+      attr: {
+        xmlns: "http://www.w3.org/2000/svg",
+        width: "16",
+        height: "16",
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "1.75",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      },
+    });
+    svg.createSvg("circle", {
+      attr: { cx: "12", cy: "12", r: "1.5", fill: "currentColor", stroke: "none" },
+    });
+    for (const rotation of [0, 60, 120]) {
+      const attr: Record<string, string> = { cx: "12", cy: "12", rx: "10", ry: "3.5" };
+      if (rotation) attr.transform = `rotate(${rotation} 12 12)`;
+      svg.createSvg("ellipse", { attr });
+    }
+    return svg;
   }
 }
 

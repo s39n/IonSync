@@ -83,7 +83,8 @@ class Utils {
   /** Converts a Uint8Array or string to a base64 string */
   toBase64(data: Uint8Array | string): string {
     if (typeof data === "string") {
-      return btoa(unescape(encodeURIComponent(data)));
+      // Encode to UTF-8 bytes then to a binary string (replaces deprecated unescape()).
+      return btoa(bytesToBinaryString(new TextEncoder().encode(data)));
     }
     return btoa(bytesToBinaryString(data));
   }
@@ -96,12 +97,28 @@ class Utils {
     return bytes;
   }
 
+  /** Extract a human-readable message from an unknown thrown value. */
+  errorMessage(e: unknown): string {
+    if (e instanceof Error) return e.message;
+    if (typeof e === "string") return e;
+    if (e == null) return "";
+    if (typeof e === "number" || typeof e === "boolean" || typeof e === "bigint") return String(e);
+    if (typeof e === "symbol") return e.toString();
+    if (typeof e === "function") return "[function]";
+    try { return JSON.stringify(e); } catch { return "[unstringifiable error]"; }
+  }
+
+  /** Normalise an unknown thrown value into an Error for safe re-throwing. */
+  toError(e: unknown): Error {
+    return e instanceof Error ? e : new Error(this.errorMessage(e));
+  }
+
   /** Returns a debounced version of fn that fires after delay ms of silence. */
   debounce<T extends unknown[]>(fn: (...args: T) => void, delay: number): (...args: T) => void {
-    let timer: ReturnType<typeof setTimeout> | null = null;
+    let timer: number | null = null;
     return (...args: T) => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => { timer = null; fn(...args); }, delay);
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(() => { timer = null; fn(...args); }, delay);
     };
   }
 

@@ -13,6 +13,16 @@ import { verifyTOTP, generateSecret, totpUri, createPendingToken, consumePending
 import { sealTotpSecret, openTotpSecret } from "../totpSecret.js";
 import { pushActivity } from "../context.js";
 
+// Coerce an Express query/body value to a string, rejecting array/object forms
+// (a crafted ?path[]=a&path[]=b makes req.query.path an array — treat as absent).
+function qstr(v: unknown, fallback = ""): string {
+  return typeof v === "string" ? v : fallback;
+}
+// Human-readable message from an unknown thrown value (for log templates).
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : typeof e === "string" ? e : "unknown error";
+}
+
 // E2EE helpers live in ../e2ee.js (shared, version-aware). The server only
 // *detects* encryption (isE2eeEncrypted) for the dashboard's lock icon and
 // export manifest — it never decrypts. E2EE files are decrypted in the browser
@@ -294,7 +304,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     const normalized = normalizeRecoveryCode(code);
     const codesJson = ctx.db.getSetting("totp_recovery_codes");
     if (codesJson) {
-      const hashes: string[] = JSON.parse(codesJson);
+      const hashes = JSON.parse(codesJson) as string[];
       const inputHash = hashRecoveryCode(normalized);
       const idx = hashes.indexOf(inputHash);
       if (idx !== -1) {
@@ -402,7 +412,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   // also requires a matching X-CSRF-Token on this route.
   router.post("/api/action/:action/:peerId", (req, res) => {
     if (!checkAuth(req, res)) return;
-    const { action, peerId } = req.params as { action: string; peerId: string };
+    const { action, peerId } = req.params;
     const target = ctx.peers.get(peerId);
 
     if (!target) {
@@ -455,7 +465,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   // Returns { versions: Array<{ sha1, mtime, receivedAt, size }> } newest-first.
   router.get("/api/file-versions", (req, res) => {
     if (!checkAuth(req, res)) return;
-    const filePath = decodeURIComponent(String(req.query.path ?? "")).trim();
+    const filePath = decodeURIComponent(qstr(req.query.path)).trim();
     if (!filePath) { res.status(400).json({ error: "Missing path" }); return; }
 
     const versions = ctx.db.getVersions(filePath).map(v => ({
@@ -473,10 +483,10 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   // must be decrypted client-side in the browser using the user's passphrase.
   router.get("/api/file-content", (req, res) => {
     if (!checkAuth(req, res)) return;
-    const filePath = decodeURIComponent(String(req.query.path ?? "")).trim();
+    const filePath = decodeURIComponent(qstr(req.query.path)).trim();
     if (!filePath) { res.status(400).json({ error: "Missing path" }); return; }
 
-    const mtimeParam = String(req.query.mtime ?? "").trim();
+    const mtimeParam = qstr(req.query.mtime).trim();
     let buf: Buffer | null;
     let resolvedMtime: number | undefined;
 
@@ -570,7 +580,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   // Preview: how many files (and total bytes) a folder delete would affect.
   router.get("/api/folder-file-count", (req, res) => {
     if (!checkAuth(req, res)) return;
-    const prefix = normalizePrefix(String(req.query.prefix ?? ""));
+    const prefix = normalizePrefix(qstr(req.query.prefix));
     if (prefix === null) { res.status(400).json({ error: "Invalid prefix" }); return; }
     const matches = activeFilesUnder(prefix);
     const bytes = matches.reduce((sum, f) => sum + (ctx.storage.getSizeLatest(f.path) ?? 0), 0);
@@ -579,7 +589,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
 
   router.post("/api/delete-folder", express.json(), (req, res) => {
     if (!checkAuth(req, res)) return;
-    const prefix = normalizePrefix(String((req.body as { prefix?: unknown })?.prefix ?? ""));
+    const prefix = normalizePrefix(qstr((req.body as { prefix?: unknown })?.prefix));
     if (prefix === null) { res.status(400).json({ error: "Invalid prefix" }); return; }
 
     const matches = activeFilesUnder(prefix);
@@ -638,7 +648,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   // All files with optional action filter: ?action=all|active|deleted
   router.get("/api/db/files", (req, res) => {
     if (!checkAuth(req, res)) return;
-    const action = (String(req.query.action ?? "all")) as "active" | "deleted" | "all";
+    const action = (qstr(req.query.action, "all")) as "active" | "deleted" | "all";
     const files = ctx.db.getFilesWithSize(action).map(f => ({
       path: f.path,
       sha1: f.sha1,
@@ -661,8 +671,8 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   // Delete a specific file version from storage + DB
   router.delete("/api/db/version", (req, res) => {
     if (!checkAuth(req, res)) return;
-    const filePath = decodeURIComponent(String(req.query.path ?? "")).trim();
-    const mtime = parseInt(String(req.query.mtime ?? ""), 10);
+    const filePath = decodeURIComponent(qstr(req.query.path)).trim();
+    const mtime = parseInt(qstr(req.query.mtime), 10);
     if (!filePath || isNaN(mtime)) { res.status(400).json({ error: "Missing path or mtime" }); return; }
     ctx.storage.deleteVersion(filePath, mtime);
     ctx.db.deleteVersionRecord(filePath, mtime);
@@ -672,7 +682,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   // Remove a device record
   router.delete("/api/db/device/:id", (req, res) => {
     if (!checkAuth(req, res)) return;
-    const { id } = req.params as { id: string };
+    const { id } = req.params;
     // Disconnect the peer if currently connected
     for (const peer of ctx.peers.values()) {
       if (peer.deviceId === id) peer.disconnect("Device removed by admin");
@@ -698,7 +708,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   // DELETE /api/db/purge-deleted?path=... → purge a single path
   router.delete("/api/db/purge-deleted", (req, res) => {
     if (!checkAuth(req, res)) return;
-    const rawPath = String(req.query.path ?? "").trim();
+    const rawPath = qstr(req.query.path).trim();
     if (rawPath) {
       const normalized = path.normalize(rawPath);
       if (normalized.startsWith("..") || path.isAbsolute(normalized)) {
@@ -772,7 +782,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   router.get("/api/export-snapshot", (req, res) => {
     if (!checkAuth(req, res)) return;
 
-    const dateParam = String(req.query.date ?? "").trim();
+    const dateParam = qstr(req.query.date).trim();
     if (!dateParam) { res.status(400).json({ error: "Missing date parameter" }); return; }
 
     const asOfMs = new Date(dateParam).getTime();
@@ -795,7 +805,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
           content: buf.toString("base64"),
         });
       } catch (e) {
-        console.warn(`[export] skipping "${filePath}": ${e}`);
+        console.warn(`[export] skipping "${filePath}": ${errMsg(e)}`);
       }
     }
 
@@ -810,7 +820,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   router.post("/api/export-selected", express.json(), (req, res) => {
     if (!checkAuth(req, res)) return;
 
-    const paths: unknown = req.body?.paths;
+    const paths: unknown = (req.body as { paths?: unknown } | undefined)?.paths;
     if (!Array.isArray(paths) || paths.length === 0) {
       res.status(400).json({ error: "No paths provided" });
       return;
@@ -831,7 +841,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
           content: buf.toString("base64"),
         });
       } catch (e) {
-        console.warn(`[export-selected] skipping "${filePath}": ${e}`);
+        console.warn(`[export-selected] skipping "${filePath}": ${errMsg(e)}`);
       }
     }
 
@@ -946,7 +956,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   // ── Conflicts (reviewable records, in place of copy files) ────────────
   router.get("/api/conflicts", (req, res) => {
     if (!checkAuth(req, res)) return;
-    const includeResolved = String(req.query.all ?? "") === "1";
+    const includeResolved = qstr(req.query.all) === "1";
     const list = ctx.db.listConflicts(includeResolved).map(c => ({
       ...c,
       deviceName: c.deviceId ? (ctx.db.getDeviceName(c.deviceId) ?? c.deviceId.slice(0, 8)) : null,
@@ -967,7 +977,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   // Dismiss a conflict (mark resolved). Head is unaffected.
   router.post("/api/conflict-resolve", express.json(), (req, res) => {
     if (!checkAuth(req, res)) return;
-    const id = Number((req.body ?? {}).id);
+    const id = Number((req.body as { id?: unknown } | null)?.id);
     if (!Number.isFinite(id)) { res.status(400).json({ error: "Missing id" }); return; }
     ctx.db.resolveConflict(id);
     res.json({ ok: true });
@@ -977,7 +987,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
   // to every device (broadcast). Marks the conflict resolved.
   router.post("/api/conflict-restore", express.json(), (req, res) => {
     if (!checkAuth(req, res)) return;
-    const id = Number((req.body ?? {}).id);
+    const id = Number((req.body as { id?: unknown } | null)?.id);
     const c = Number.isFinite(id) ? ctx.db.getConflict(id) : undefined;
     if (!c) { res.status(404).json({ error: "Unknown conflict" }); return; }
     const buf = ctx.storage.readLatest(`_conflicts/${c.id}`);

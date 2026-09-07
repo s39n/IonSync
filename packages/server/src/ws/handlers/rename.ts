@@ -1,4 +1,4 @@
-import type { FileRenameMsg, FileEntry } from "@ionsync/protocol";
+import type { FileRenameMsg } from "@ionsync/protocol";
 import type { SyncContext } from "../../context.js";
 import { pushActivity } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
@@ -118,9 +118,6 @@ function broadcastActive(ctx: SyncContext, peer: SyncPeer, path: string): void {
 
 function logInfo(ctx: SyncContext, msg: string): void {
   if (ctx.config.logs.level >= 3) pushLog(ctx, msg);
-}
-function logWarn(ctx: SyncContext, msg: string): void {
-  if (ctx.config.logs.level >= 2) pushLog(ctx, `[WARN] ${msg}`);
 }
 function pushLog(ctx: SyncContext, msg: string): void {
   const line = `[${new Date().toISOString()}] ${msg}`;

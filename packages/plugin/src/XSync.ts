@@ -1,4 +1,4 @@
-import type { FileEntry, ServerMsg, ConflictListResponseMsg, ConflictContentResponseMsg, ConflictActionResponseMsg } from "@ionsync/protocol";
+import type { FileEntry, ServerMsg, FileHistoryResponseMsg, FileDataResponseMsg, ConflictListResponseMsg, ConflictContentResponseMsg, ConflictActionResponseMsg } from "@ionsync/protocol";
 import { collectFolderChildren, cascadeDeleteExceedsSafetyCap, computeOfflineDeletes, verifyPluginBundle } from "@ionsync/protocol";
 import { Platform, type TAbstractFile } from "obsidian";
 import { WsManager, type UpdateInfo } from "./WsManager.js";
@@ -8,6 +8,7 @@ import { XTimeouts } from "./XTimeouts.js";
 import { ExclusionFilter } from "./ExclusionFilter.js";
 import Utils from "./Utils.js";
 import { PLUGIN_UPDATE_PUBKEY } from "./updateKey.js";
+import { appInternals, vaultOnRaw, vaultOnFileEvent } from "./obsidian-internals.js";
 import type { IonSyncPlugin } from "./main.js";
 import { diff_match_patch } from "diff-match-patch";
 import { deriveKey, encryptToBytes, decryptFromBase64, isEncryptedBase64, getWriteVersion } from "./Crypto.js";
@@ -27,7 +28,7 @@ export class XSync {
 
   private xTimeouts = new XTimeouts();
   private exclusionFilter: ExclusionFilter | null = null;
-  private eventRefs: Record<string, any> = {};
+  private eventRefs: Record<string, unknown> = {};
 
   private deleteQueue: Record<string, DeleteQueueEntry> = {};
   private isProcessingDeleteQueue = false;
@@ -134,13 +135,14 @@ export class XSync {
   private _applyingPaths = new Map<string, number>();
 
   // Per-path debounce timers for config-dir "raw" events (see _registerRawEvent).
-  private _rawDebounce = new Map<string, ReturnType<typeof setTimeout>>();
+  // window.setTimeout returns a number in Obsidian's browser environment.
+  private _rawDebounce = new Map<string, number>();
 
   // Trailing-pass timer for hot-applying a synced community-plugins.json (see _reloadCommunityPlugins).
-  private _pluginReloadTimer: ReturnType<typeof setTimeout> | null = null;
+  private _pluginReloadTimer: number | null = null;
 
   // Debounce timer for a scope-setting change → full re-scan (see scheduleFullReconcile).
-  private _reconcileDebounce: ReturnType<typeof setTimeout> | null = null;
+  private _reconcileDebounce: number | null = null;
 
   private _applyingAdd(path: string): void {
     this._applyingPaths.set(path, (this._applyingPaths.get(path) ?? 0) + 1);
@@ -286,9 +288,9 @@ export class XSync {
         if (Platform.isMobile) this.ws.disconnect();
       })();
     };
-    document.addEventListener("visibilitychange", this.eventRefs["visibility-change"]);
+    document.addEventListener("visibilitychange", this.eventRefs["visibility-change"] as EventListener);
 
-    const onFocus = Utils.debounce((() => { void this._onFocusChanged(); }) as () => unknown, 500) as () => void;
+    const onFocus = Utils.debounce((() => { void this._onFocusChanged(); }), 500);
     this.eventRefs["active-leaf-change"] = this.plugin.app.workspace.on("active-leaf-change", onFocus);
     this.eventRefs["layout-change"] = this.plugin.app.workspace.on("layout-change", onFocus);
 
@@ -322,10 +324,10 @@ export class XSync {
     this.storage.close(); // close IndexedDB connection (no-op on the json path)
     this.xTimeouts.clear();
     this._recentlyApplied.clear();
-    for (const t of this._rawDebounce.values()) clearTimeout(t);
+    for (const t of this._rawDebounce.values()) window.clearTimeout(t);
     this._rawDebounce.clear();
-    if (this._pluginReloadTimer) { clearTimeout(this._pluginReloadTimer); this._pluginReloadTimer = null; }
-    if (this._reconcileDebounce) { clearTimeout(this._reconcileDebounce); this._reconcileDebounce = null; }
+    if (this._pluginReloadTimer) { window.clearTimeout(this._pluginReloadTimer); this._pluginReloadTimer = null; }
+    if (this._reconcileDebounce) { window.clearTimeout(this._reconcileDebounce); this._reconcileDebounce = null; }
     if (this.configCheckInterval !== null) {
       window.clearInterval(this.configCheckInterval);
       this.configCheckInterval = null;
@@ -341,7 +343,7 @@ export class XSync {
     this._inCursorSession = false;
 
     if (this.eventRefs["visibility-change"]) {
-      document.removeEventListener("visibilitychange", this.eventRefs["visibility-change"]);
+      document.removeEventListener("visibilitychange", this.eventRefs["visibility-change"] as EventListener);
     }
 
     if (!this.inited) return;
@@ -497,9 +499,11 @@ export class XSync {
         this._liveMaxSeq = 0;
         // If any ordered file failed to apply, the batch is NOT complete — do not
         // let it finalize as "fully synced" (that's the silent under-fetch).
-        const sessionComplete = !this._sessionHadApplyFailure;
-        this._sessionHadApplyFailure = false;
-        await this._onSyncDone(sessionComplete);
+        {
+          const sessionComplete = !this._sessionHadApplyFailure;
+          this._sessionHadApplyFailure = false;
+          await this._onSyncDone(sessionComplete);
+        }
         break;
       case "verify_manifest": {
         // Accumulate the streamed active-file manifest; on the final chunk, diff
@@ -714,7 +718,7 @@ export class XSync {
         let writeErr: unknown;
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
-            console.log(`[IonSync] Applying file ${file.path}, attempt ${attempt + 1}`);
+            this.plugin.log(`Applying file ${file.path}, attempt ${attempt + 1}`);
             // Register before writing so the vault event is caught by the guard
             // in _processLocalEvent and suppressed (prevents spurious re-uploads).
             this._applyingAdd(file.path);
@@ -723,7 +727,7 @@ export class XSync {
             writeErr = null;
             break;
           } catch (e) {
-            console.warn(`[IonSync] Failed write for ${file.path} on attempt ${attempt + 1}:`, e);
+            this.plugin.warn(`Failed write for ${file.path} on attempt ${attempt + 1}:`, e);
             // Write failed — no vault event will fire, so release this write's
             // refcount (an overlapping apply may still own one).
             this._applyingRemove(file.path);
@@ -732,13 +736,13 @@ export class XSync {
             if (attempt === 0) {
               const parent = file.path.split("/").slice(0, -1).join("/");
               if (parent) await this.storage.makeFolder(parent, { ...file, fileType: "folder", action: "active" });
-              await new Promise(r => setTimeout(r, 80));
+              await new Promise(r => window.setTimeout(r, 80));
             }
           }
         }
         if (writeErr) {
           this._applyingRemove(file.path); // final cleanup if both attempts failed
-          throw writeErr;
+          throw Utils.toError(writeErr);
         }
 
         // Mark this path as recently applied so any platform-generated delete
@@ -756,7 +760,7 @@ export class XSync {
         // This upgrades the server's stored copy to ciphertext and prevents
         // future "unencrypted file received" alerts for this file.
         if (shouldReencrypt) {
-          setTimeout(() => this.pushFile(file.path), 1500);
+          window.setTimeout(() => { void this.pushFile(file.path); }, 1500);
         }
       }
     } catch (e) {
@@ -862,7 +866,7 @@ export class XSync {
       this._liveMaxSeq = 0;
       this._appliedSeq.clear();
       this.ws.send({ type: "sync_cursor", since: this._lastSyncedSeq });
-    } catch (e) {
+    } catch {
       this.isSyncing = false;
       this._inCursorSession = false;
       this.releaseWakeLock();
@@ -881,8 +885,8 @@ export class XSync {
    * off stops future syncing without deleting existing copies from other devices.
    */
   scheduleFullReconcile(): void {
-    if (this._reconcileDebounce) clearTimeout(this._reconcileDebounce);
-    this._reconcileDebounce = setTimeout(() => {
+    if (this._reconcileDebounce) window.clearTimeout(this._reconcileDebounce);
+    this._reconcileDebounce = window.setTimeout(() => {
       this._reconcileDebounce = null;
       this._needsFullReconcile = true;
       if (this.ws.isConnected && this.plugin.settings.autoSync && !this.isSyncing) void this.sync();
@@ -953,7 +957,7 @@ export class XSync {
     // once the 60-second grace window has expired, so we don't hold 20k+
     // path strings in memory indefinitely on devices with large vaults.
     if (wasFirstSync) {
-      setTimeout(() => { this._recentlyApplied.clear(); }, 65_000);
+      window.setTimeout(() => { this._recentlyApplied.clear(); }, 65_000);
     }
 
     // Offline-delete reconciliation (sync-audit gap S4): a file still active in
@@ -1078,7 +1082,7 @@ export class XSync {
       this._verifyLocalPaths = new Set(paths);
       this.ws.send({ type: "verify_request" });
     } catch (e) {
-      this.plugin.log(`[IonSync] verify: failed to start (${e})`);
+      this.plugin.log(`[IonSync] verify: failed to start (${Utils.errorMessage(e)})`);
       this._verifying = false;
       this._verifyManifest = null;
       this._verifyLocalPaths = null;
@@ -1149,7 +1153,7 @@ export class XSync {
         requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => void;
       }).requestIdleCallback;
       if (typeof ric === "function") ric(() => resolve(), { timeout: timeoutMs });
-      else setTimeout(resolve, 50);
+      else window.setTimeout(resolve, 50);
     });
   }
 
@@ -1168,16 +1172,18 @@ export class XSync {
    */
   private _scheduleCursorCheckpoint(): void {
     if (this._cursorCheckpointTimer !== null) return; // throttle: already scheduled
-    this._cursorCheckpointTimer = window.setTimeout(async () => {
+    this._cursorCheckpointTimer = window.setTimeout(() => {
       this._cursorCheckpointTimer = null;
-      try {
-        await this.storage.flushMetadata();
-        this.plugin.settings.lastSyncedSeq = this._lastSyncedSeq;
-        this.plugin.settings.lastSyncedEndpoint = this._endpointKey();
-        await this.plugin.saveSettings();
-      } catch (e) {
-        this.plugin.log(`[IonSync] cursor checkpoint failed: ${e}`);
-      }
+      void (async () => {
+        try {
+          await this.storage.flushMetadata();
+          this.plugin.settings.lastSyncedSeq = this._lastSyncedSeq;
+          this.plugin.settings.lastSyncedEndpoint = this._endpointKey();
+          await this.plugin.saveSettings();
+        } catch (e) {
+          this.plugin.log(`[IonSync] cursor checkpoint failed: ${Utils.errorMessage(e)}`);
+        }
+      })();
     }, 2_000);
   }
 
@@ -1219,7 +1225,7 @@ export class XSync {
     for (const path of changed) {
       if (!this.ws.isConnected) break;
       try { await this._uploadFile(path); }
-      catch (e) { this.plugin.log(`[IonSync] reconcile upload failed for ${path}: ${e}`); }
+      catch (e) { this.plugin.log(`[IonSync] reconcile upload failed for ${path}: ${Utils.errorMessage(e)}`); }
     }
   }
 
@@ -1336,7 +1342,7 @@ export class XSync {
 
     entry.sha1 = liveSha1;
     // baseSha1 = the sha we last synced for this path (see _sendFileEvent).
-    this.ws.send({ type: "file_data", mode: mode as any, file: entry, content, ...(contentBytes ? { contentBytes } : {}), ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}) });
+    this.ws.send({ type: "file_data", mode, file: entry, content, ...(contentBytes ? { contentBytes } : {}), ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}) });
     this.addActivity("up", path);
     this.syncUpCount++;
     // Feed the stall watchdog: a large offline reconcile (e.g. a full reseed of a
@@ -1351,10 +1357,11 @@ export class XSync {
   // ── Vault Events ─────────────────────────────────────────────────────────
 
   private _registerVaultEvent(type: VaultAction): void {
-    this.eventRefs[type] = this.plugin.app.vault.on(type as any, async (file: TAbstractFile, ...args: unknown[]) => {
+    this.eventRefs[type] = vaultOnFileEvent(this.plugin.app.vault, type, (file, ...args) => {
       if (!this.isEnabled) return;
-      try { await this._processLocalEvent(type, file, false, args); }
-      catch (e) { console.error(`[XSync] vault event error (${type}):`, e); }
+      void this._processLocalEvent(type, file, false, args).catch((e: unknown) => {
+        this.plugin.error(`[XSync] vault event error (${type}):`, e);
+      });
     });
   }
 
@@ -1370,8 +1377,8 @@ export class XSync {
   // exclusionFilter honours the per-config-file sync toggles.
   private _registerRawEvent(): void {
     const configPrefix = `${this.plugin.app.vault.configDir}/`;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- "raw" is an undocumented vault event (string path), not in the typings.
-    this.eventRefs["raw"] = (this.plugin.app.vault as any).on("raw", (path: string) => {
+    // "raw" is an undocumented vault event (string path); see obsidian-internals.
+    this.eventRefs["raw"] = vaultOnRaw(this.plugin.app.vault, (path: string) => {
       if (!this.isEnabled) return;
       if (typeof path !== "string") return;
       // Handle config-dir changes always, and other hidden paths when "Hidden
@@ -1386,8 +1393,8 @@ export class XSync {
       // Coalesce bursty writes (a plugin rewriting its data.json rapidly) into a
       // single _sendFileEvent, so we hash and upload once per settled change.
       const existing = this._rawDebounce.get(path);
-      if (existing) clearTimeout(existing);
-      this._rawDebounce.set(path, setTimeout(() => {
+      if (existing) window.clearTimeout(existing);
+      this._rawDebounce.set(path, window.setTimeout(() => {
         this._rawDebounce.delete(path);
         void this._processRawConfig(path);
       }, 400));
@@ -1680,7 +1687,7 @@ export class XSync {
     const entry: FileEntry = { path: file.path, sha1: sha1 ?? "", mtime: stat.mtime, size: stat.size, action: "active", fileType: "file" };
     // baseSha1 = the sha we last synced for this path. The server uses it to
     // detect concurrent edits (stale base) without trusting device clocks.
-    this.ws.send({ type: "file_data", mode: mode as any, file: entry, content, ...(contentBytes ? { contentBytes } : {}), ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}) });
+    this.ws.send({ type: "file_data", mode, file: entry, content, ...(contentBytes ? { contentBytes } : {}), ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}) });
     await this.storage.writeMetadata(entry);
     this.addActivity("up", file.path);
   }
@@ -1773,8 +1780,9 @@ export class XSync {
     }
     await this.storage.updatePlugin(update.files);
     this.xNotify.showNotification("#ffaa00", "Plugin updated — reloading…");
-    await (this.plugin.app as any).plugins.disablePlugin("ion-sync");
-    await (this.plugin.app as any).plugins.enablePlugin("ion-sync");
+    const plugins = appInternals(this.plugin.app).plugins;
+    await plugins.disablePlugin("ion-sync");
+    await plugins.enablePlugin("ion-sync");
   }
 
   private async _processDeleteQueue(): Promise<void> {
@@ -1806,7 +1814,7 @@ export class XSync {
         const stat = await this.plugin.app.vault.adapter.stat(path);
         if (stat) {
           // File still exists — spurious delete event.  Drop it silently.
-          console.log(`[IonSync] Dropping spurious delete queue entry for ${path} (file still exists)`);
+          this.plugin.log(`Dropping spurious delete queue entry for ${path} (file still exists)`);
           delete this.deleteQueue[path];
           continue;
         }
@@ -1861,8 +1869,7 @@ export class XSync {
       return;
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const css = (this.plugin.app as any).customCss;
+    const css = appInternals(this.plugin.app).customCss;
     if (!css) return;
 
     if (path === `${configDir}/appearance.json`) {
@@ -1881,8 +1888,8 @@ export class XSync {
   // the manifest not yet present; the trailing pass catches it.
   private _scheduleCommunityPluginReload(): void {
     void this._reloadCommunityPlugins();
-    if (this._pluginReloadTimer) clearTimeout(this._pluginReloadTimer);
-    this._pluginReloadTimer = setTimeout(() => {
+    if (this._pluginReloadTimer) window.clearTimeout(this._pluginReloadTimer);
+    this._pluginReloadTimer = window.setTimeout(() => {
       this._pluginReloadTimer = null;
       void this._reloadCommunityPlugins();
     }, 1500);
@@ -1899,9 +1906,8 @@ export class XSync {
    * echo straight back out.
    */
   private async _reloadCommunityPlugins(): Promise<void> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const plugins = (this.plugin.app as any).plugins;
-    if (!plugins?.enablePlugin || !plugins?.disablePlugin) return;
+    const plugins = appInternals(this.plugin.app).plugins;
+    if (!plugins.enablePlugin || !plugins.disablePlugin) return;
     try {
       // Register any plugin folders that arrived since startup, so their
       // manifests are known before we try to enable them.
@@ -2057,7 +2063,7 @@ export class XSync {
             this.plugin.log(`[ReEncrypt] ${done}/${paths.length} files done`);
           }
         } catch (e) {
-          this.plugin.log(`[ReEncrypt] Error on ${path}: ${e}`);
+          this.plugin.log(`[ReEncrypt] Error on ${path}: ${Utils.errorMessage(e)}`);
         }
       }
 
@@ -2071,12 +2077,12 @@ export class XSync {
     }
   }
 
-  async listVersionHistory(path: string): Promise<any> {
+  async listVersionHistory(path: string): Promise<FileHistoryResponseMsg> {
     this.ws.send({ type: "file_history", path });
     return this._waitForResponse("file_history_response");
   }
 
-  async downloadVersion(path: string, mtime?: number): Promise<any> {
+  async downloadVersion(path: string, mtime?: number): Promise<FileDataResponseMsg> {
     this.ws.send({ type: "file_data", mode: "send", path, ...(mtime !== undefined ? { mtime } : {}) });
     return this._waitForResponse("file_data_response");
   }
@@ -2127,7 +2133,7 @@ export class XSync {
   getActivityLog(): string[] { return this.activityLog; }
 
   private async acquireWakeLock(): Promise<void> {
-    try { if ("wakeLock" in navigator && !this.wakeLock) this.wakeLock = await (navigator as any).wakeLock.request("screen"); } catch {}
+    try { if ("wakeLock" in navigator && !this.wakeLock) this.wakeLock = await navigator.wakeLock.request("screen"); } catch { /* wake lock is best-effort */ }
   }
 
   releaseWakeLock(): void {

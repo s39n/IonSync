@@ -71,11 +71,11 @@ export class VersionHistoryModal extends Modal {
     // Preview toggle button
     const previewBtn = actions.createEl("button", { text: "Preview", cls: "ion-btn" });
     const previewArea = row.createDiv({ cls: "ion-preview-area" });
-    previewArea.style.display = "none";
+    previewArea.hide();
 
     previewBtn.onclick = async () => {
       if (previewArea.style.display !== "none") {
-        previewArea.style.display = "none";
+        previewArea.hide();
         previewBtn.textContent = "Preview";
         return;
       }
@@ -93,11 +93,11 @@ export class VersionHistoryModal extends Modal {
         });
         const pre = previewArea.createEl("pre", { cls: "ion-preview-content" });
         pre.textContent = text;
-        previewArea.style.display = "";
+        previewArea.show();
         previewBtn.textContent = "Hide";
       } catch (e) {
-        previewArea.textContent = String(e instanceof Error ? e.message : e);
-        previewArea.style.display = "";
+        previewArea.textContent = e instanceof Error ? e.message : String(e);
+        previewArea.show();
         previewBtn.textContent = "Preview";
       }
       previewBtn.disabled = false;
@@ -133,7 +133,7 @@ export class VersionHistoryModal extends Modal {
         await navigator.clipboard.writeText(text);
         new Notice("Copied to clipboard");
         copyBtn.textContent = "Copied ✓";
-        setTimeout(() => { copyBtn.textContent = "Copy"; copyBtn.disabled = false; }, 2000);
+        window.setTimeout(() => { copyBtn.textContent = "Copy"; copyBtn.disabled = false; }, 2000);
       } catch (e) {
         new Notice(`Copy failed: ${e instanceof Error ? e.message : String(e)}`);
         copyBtn.textContent = "Copy";
@@ -181,16 +181,20 @@ export class FilesHistoryModal extends SuggestModal<string> {
     this.setPlaceholder("Search files…");
   }
 
-  override async onOpen(): Promise<void> {
-    super.onOpen();
-    try {
-      const resp = await this.plugin.xSync.listVersionHistory("/");
-      this.files = resp.versions
-        .map((v: any) => (v as any).path as string)
-        .filter(Boolean);
-    } catch {
-      this.files = [];
-    }
+  override onOpen(): void {
+    void super.onOpen();
+    void (async () => {
+      try {
+        const resp = await this.plugin.xSync.listVersionHistory("/");
+        // A path of "/" returns a directory listing whose entries carry a `path`
+        // (not the per-file VersionEntry shape); read it defensively.
+        this.files = resp.versions
+          .map((v) => (v as { path?: string }).path ?? "")
+          .filter(Boolean);
+      } catch {
+        this.files = [];
+      }
+    })();
   }
 
   override getSuggestions(query: string): string[] {
@@ -198,10 +202,10 @@ export class FilesHistoryModal extends SuggestModal<string> {
   }
 
   override renderSuggestion(filePath: string, el: HTMLElement): void {
-    el.createEl("div", { text: filePath });
+    el.createDiv({ text: filePath });
   }
 
-  override async onChooseSuggestion(filePath: string): Promise<void> {
+  override onChooseSuggestion(filePath: string): void {
     new VersionHistoryModal(this.plugin, filePath).open();
   }
 }

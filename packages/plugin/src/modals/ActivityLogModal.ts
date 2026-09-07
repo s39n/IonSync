@@ -15,35 +15,14 @@ export class ActivityLogModal extends Modal {
     contentEl.empty();
 
     // Header row: title + a "Copy all" button.
-    const header = contentEl.createEl("div");
-    header.style.cssText = "display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;";
-    header.createEl("h2", { text: "Activity Log" }).style.margin = "0";
+    const header = contentEl.createDiv({ cls: "ion-activity-header" });
+    header.createEl("h2", { text: "Activity log" });
 
     const copyBtn = header.createEl("button", { text: "Copy all" });
     copyBtn.onclick = () => { void this._copyAll(); };
 
     // A white "log sheet" panel — paper-like regardless of the Obsidian theme.
-    this.sheetEl = contentEl.createEl("div");
-    this.sheetEl.style.cssText = [
-      "max-height:400px",
-      "overflow-y:auto",
-      "background:#ffffff",
-      "color:#1e1e1e",
-      "border:1px solid #d0d0d0",
-      "border-radius:6px",
-      "padding:10px 14px",
-      "font-family:'SFMono-Regular',Consolas,'Liberation Mono',monospace",
-      "font-size:12px",
-      "line-height:1.7",
-      "box-shadow:inset 0 1px 3px rgba(0,0,0,0.08)",
-      "white-space:pre-wrap",
-      "word-break:break-word",
-      // Obsidian disables text selection on UI chrome by default — re-enable it
-      // here so log lines can be selected and copied.
-      "user-select:text",
-      "-webkit-user-select:text",
-      "cursor:text",
-    ].join(";");
+    this.sheetEl = contentEl.createDiv({ cls: "ion-activity-sheet" });
 
     this._render();
     // Live refresh while the modal is open so activity appears without reopening.
@@ -72,14 +51,12 @@ export class ActivityLogModal extends Modal {
 
     this.sheetEl.empty();
     if (log.length === 0) {
-      const empty = this.sheetEl.createEl("div", { text: "No activity yet." });
-      empty.style.cssText = "color:#888;font-style:italic;";
+      this.sheetEl.createDiv({ text: "No activity yet.", cls: "ion-activity-empty" });
       return;
     }
     for (const entry of log) {
-      const line = this.sheetEl.createEl("div", { text: entry });
       // Faint ruled line between entries, like a printed log sheet.
-      line.style.cssText = "padding:2px 0;border-bottom:1px dashed #ececec;";
+      this.sheetEl.createDiv({ text: entry, cls: "ion-activity-line" });
     }
   }
 

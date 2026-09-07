@@ -1,5 +1,10 @@
 import type { FileEntry } from "@ionsync/protocol";
 
+/** Wrap an IndexedDB request/transaction error as a proper Error for rejection. */
+function idbError(err: DOMException | null, context = "IndexedDB request failed"): Error {
+  return new Error(err?.message ? `${context}: ${err.message}` : context);
+}
+
 /**
  * IndexedDB-backed device-state store (sync redesign phase 2b).
  *
@@ -45,7 +50,7 @@ export class IndexStore {
         this.db = req.result;
         resolve();
       };
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(idbError(req.error));
     });
   }
 
@@ -74,7 +79,7 @@ export class IndexStore {
           resolve(out);
         }
       };
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(idbError(req.error));
     });
   }
 
@@ -82,7 +87,7 @@ export class IndexStore {
     return new Promise((resolve, reject) => {
       const req = this.store(FILES_STORE, "readonly").count();
       req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(idbError(req.error));
     });
   }
 
@@ -107,7 +112,7 @@ export class IndexStore {
         const store = this.store(FILES_STORE, "readwrite");
         for (const e of slice) store.put(e);
         store.transaction.oncomplete = () => resolve();
-        store.transaction.onerror = () => reject(store.transaction.error);
+        store.transaction.onerror = () => reject(idbError(store.transaction.error));
       });
     }
   }
@@ -116,7 +121,7 @@ export class IndexStore {
     return new Promise((resolve, reject) => {
       const req = this.store(META_STORE, "readonly").get(key);
       req.onsuccess = () => resolve(req.result ? ((req.result as { value: string }).value) : null);
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(idbError(req.error));
     });
   }
 
@@ -132,7 +137,7 @@ export class IndexStore {
   private done(req: IDBRequest): Promise<void> {
     return new Promise((resolve, reject) => {
       req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(idbError(req.error));
     });
   }
 }

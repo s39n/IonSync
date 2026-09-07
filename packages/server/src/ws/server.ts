@@ -76,7 +76,10 @@ export function attachWebSocketServer(
       }
     }, 5_000);
 
-    // ✅ Changed to async to support reading the current file for Delta Patching
+    // Async to support reading the current file for delta patching. The ws
+    // library tolerates an async listener and every throw is caught in the
+    // try/catch below, so the returned promise never goes unhandled.
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises -- see comment above
     ws.on("message", async (raw: Buffer, isBinary: boolean) => {
       let msg: ClientMsg;
       try {
@@ -128,8 +131,9 @@ export function attachWebSocketServer(
           handleFileEvent(ctx, peer, msg);
           break;
         case "file_data": {
-          // ✅ This is the line that was missing! It defines rawMsg so the rest of the block can use it.
-          const rawMsg = msg as any;
+          // `msg` is already narrowed to the file_data client messages by the
+          // switch; `.mode` discriminates upload / patch / conflict / download.
+          const rawMsg = msg;
 
           if (rawMsg.mode === "patch") {
             // Conflict pre-check: a delta patch is only meaningful against the
@@ -166,21 +170,23 @@ export function attachWebSocketServer(
               // text that won't match the client's SHA1 and would either be
               // silently rejected (delaying sync a full cycle) or, for E2EE-ish
               // edge cases, stored corrupted. Request the full file instead.
-              if ((results as boolean[]).some((ok) => !ok)) {
+              if ((results).some((ok) => !ok)) {
                 pushLog(ctx, `[Delta] Partial patch apply for ${rawMsg.file.path} — requesting full upload`);
                 peer.pendingUploads.add(rawMsg.file.path);
                 peer.send({ type: "file_event_result", path: rawMsg.file.path, result: "client_newer" });
                 break;
               }
 
-              // 3. Morph message into a standard 'apply' full-file upload
-              rawMsg.mode = "apply";
-              rawMsg.content = Buffer.from(newText, "utf-8").toString("base64");
-
-              // 4. Hand off to your existing modular handler
-              handleFileUpload(ctx, peer, rawMsg);
+              // 3. Morph into a standard 'apply' full-file upload and hand off.
+              //    Build a derived message rather than mutating rawMsg, so the
+              //    discriminated-union narrowing in the branches below stays intact.
+              handleFileUpload(ctx, peer, {
+                ...rawMsg,
+                mode: "apply",
+                content: Buffer.from(newText, "utf-8").toString("base64"),
+              });
             } catch (err) {
-              pushLog(ctx, `[Delta] Failed to patch ${rawMsg.file?.path}: ${err}`);
+              pushLog(ctx, `[Delta] Failed to patch ${rawMsg.file?.path}: ${err instanceof Error ? err.message : String(err)}`);
               // Recover by pulling the full file rather than leaving the path stuck.
               peer.pendingUploads.add(rawMsg.file.path);
               peer.send({ type: "file_event_result", path: rawMsg.file.path, result: "client_newer" });
@@ -192,7 +198,7 @@ export function attachWebSocketServer(
           else if (rawMsg.mode === "conflict") {
             handleConflictUpload(ctx, peer, rawMsg);
           }
-          else {
+          else if (rawMsg.mode === "send") {
             handleFileDownload(ctx, peer, rawMsg);
           }
           break;

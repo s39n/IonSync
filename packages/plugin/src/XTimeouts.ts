@@ -12,16 +12,18 @@ export class XTimeouts {
   // the app was cancelled and never sent, leaving the local file diverged from
   // the last-synced metadata until some later incoming push exposed it as a
   // spurious conflict.
-  private timers = new Map<string, { timer: ReturnType<typeof setTimeout>; callback: () => Promise<void> }>();
+  private timers = new Map<string, { timer: number; callback: () => Promise<void> }>();
 
   /** Set (or reset) a debounced callback for `key`, firing after `ms` milliseconds */
   set(key: string, ms: number, callback: () => Promise<void>): void {
     const existing = this.timers.get(key);
-    if (existing !== undefined) clearTimeout(existing.timer);
-    const timer = setTimeout(async () => {
+    if (existing !== undefined) window.clearTimeout(existing.timer);
+    const timer = window.setTimeout(() => {
       this.timers.delete(key);
-      try { await callback(); }
-      catch (e) { console.error(`[XTimeouts] error for ${key}:`, e); }
+      void (async () => {
+        try { await callback(); }
+        catch (e) { window.console.error(`[XTimeouts] error for ${key}:`, e); }
+      })();
     }, ms);
     this.timers.set(key, { timer, callback });
   }
@@ -29,7 +31,7 @@ export class XTimeouts {
   /** Cancel the timer for `key` without running the callback */
   cancel(key: string): void {
     const entry = this.timers.get(key);
-    if (entry !== undefined) { clearTimeout(entry.timer); this.timers.delete(key); }
+    if (entry !== undefined) { window.clearTimeout(entry.timer); this.timers.delete(key); }
   }
 
   /**
@@ -41,7 +43,7 @@ export class XTimeouts {
   async executeAll(): Promise<void> {
     const pending = Array.from(this.timers.values());
     this.timers.clear();
-    for (const { timer } of pending) clearTimeout(timer);
+    for (const { timer } of pending) window.clearTimeout(timer);
     await Promise.all(pending.map(async ({ callback }) => {
       try { await callback(); }
       catch (e) { console.error("[XTimeouts] executeAll callback error:", e); }
@@ -50,7 +52,7 @@ export class XTimeouts {
 
   /** Cancel every pending timer */
   clear(): void {
-    for (const { timer } of this.timers.values()) clearTimeout(timer);
+    for (const { timer } of this.timers.values()) window.clearTimeout(timer);
     this.timers.clear();
   }
 }

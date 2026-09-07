@@ -9,10 +9,10 @@ export class IonSyncSettingsTab extends PluginSettingTab {
   override display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "IonSync" });
+    ;
 
     // ── Connection ──────────────────────────────────────────────────────────
-    containerEl.createEl("h3", { text: "Connection" });
+    new Setting(containerEl).setName("Connection").setHeading();
 
     new Setting(containerEl)
       .setName("Server host")
@@ -29,12 +29,12 @@ export class IonSyncSettingsTab extends PluginSettingTab {
       .addText((t) => {
         t.setPlaceholder("default")
           .setValue(this.plugin.settings.port ? String(this.plugin.settings.port) : "");
-        t.inputEl.addEventListener("blur", async () => {
+        t.inputEl.addEventListener("blur", () => {
           const v = t.inputEl.value.trim();
           const n = parseInt(v, 10);
           this.plugin.settings.port = (!v || isNaN(n) || n <= 0) ? 0 : n;
           t.inputEl.value = this.plugin.settings.port ? String(this.plugin.settings.port) : "";
-          await this.plugin.saveSettings();
+          void this.plugin.saveSettings();
         });
         return t;
       });
@@ -67,7 +67,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
       );
 
     // ── Sync behaviour ──────────────────────────────────────────────────────
-    containerEl.createEl("h3", { text: "Sync" });
+    new Setting(containerEl).setName("Sync").setHeading();
 
     new Setting(containerEl)
       .setName("Enable sync")
@@ -91,7 +91,6 @@ export class IonSyncSettingsTab extends PluginSettingTab {
       .addSlider((s) =>
         s.setLimits(0, 60, 1)
           .setValue(this.plugin.settings.delayedSync)
-          .setDynamicTooltip()
           .onChange(async (v) => { this.plugin.settings.delayedSync = v; await this.plugin.saveSettings(); })
       );
 
@@ -101,7 +100,6 @@ export class IonSyncSettingsTab extends PluginSettingTab {
       .addSlider((s) =>
         s.setLimits(0, 2, 1)
           .setValue(this.plugin.settings.notifications)
-          .setDynamicTooltip()
           .onChange(async (v) => { this.plugin.settings.notifications = v; await this.plugin.saveSettings(); })
       );
 
@@ -113,7 +111,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
       );
 
     // ── What to sync ────────────────────────────────────────────────────────
-    containerEl.createEl("h3", { text: "What to sync" });
+    new Setting(containerEl).setName("What to sync").setHeading();
 
     const toggleSetting = (name: string, desc: string, key: keyof typeof this.plugin.settings) => {
       new Setting(containerEl)
@@ -122,7 +120,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
         .addToggle((t) =>
           t.setValue(this.plugin.settings[key] as boolean)
             .onChange(async (v) => {
-              (this.plugin.settings as any)[key] = v;
+              (this.plugin.settings as unknown as Record<string, boolean>)[key] = v;
               await this.plugin.saveSettings();
               this.plugin.xSync?.scheduleFullReconcile();
             })
@@ -166,12 +164,11 @@ export class IonSyncSettingsTab extends PluginSettingTab {
       .addSlider((s) =>
         s.setLimits(1, 100, 1)
           .setValue(this.plugin.settings.maxFileSizeMB ?? 25)
-          .setDynamicTooltip()
           .onChange(async (v) => { this.plugin.settings.maxFileSizeMB = v; await this.plugin.saveSettings(); this.plugin.xSync?.scheduleFullReconcile(); })
       );
 
     // ── End-to-End Encryption ───────────────────────────────────────────────
-    containerEl.createEl("h3", { text: "End-to-End Encryption" });
+    new Setting(containerEl).setName("End-to-End Encryption").setHeading();
 
     new Setting(containerEl)
       .setName("Enable E2EE")
@@ -213,16 +210,11 @@ export class IonSyncSettingsTab extends PluginSettingTab {
           t.inputEl.setAttribute("autocorrect", "off");
           t.inputEl.setAttribute("autocapitalize", "none");
           t.inputEl.setAttribute("spellcheck", "false");
-          t.inputEl.style.width = "260px";
+          t.inputEl.addClass("ion-pw-input");
           return t;
         });
 
-      const warn = containerEl.createEl("div");
-      warn.style.cssText =
-        "border: 1px solid var(--color-orange); border-radius: 6px; " +
-        "padding: 10px 14px; margin: 4px 0 12px; font-size: 12px; " +
-        "color: var(--color-orange); " +
-        "background: var(--background-modifier-error);";
+      const warn = containerEl.createDiv({ cls: "ion-e2ee-warn" });
       warn.setText(
         "There is no password recovery. If you forget this passphrase " +
         "you will permanently lose access to all encrypted files stored on the server. " +
@@ -267,7 +259,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
               btn.setDisabled(true);
               await this.plugin.xSync.triggerReEncrypt();
               btn.setButtonText("Done — syncing now");
-              setTimeout(() => {
+              window.setTimeout(() => {
                 btn.setButtonText("Re-encrypt all files now");
                 btn.setDisabled(false);
               }, 4000);
@@ -276,7 +268,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
     }
 
     // ── Exclusion list ──────────────────────────────────────────────────────
-    containerEl.createEl("h3", { text: "Exclusion list" });
+    new Setting(containerEl).setName("Exclusion list").setHeading();
     containerEl.createEl("p", { text: "One glob pattern per line. Lines starting with # are comments." });
 
     new Setting(containerEl)
@@ -285,21 +277,20 @@ export class IonSyncSettingsTab extends PluginSettingTab {
           .setValue(this.plugin.settings.exclusionList)
           .onChange(async (v) => { this.plugin.settings.exclusionList = v; await this.plugin.saveSettings(); this.plugin.xSync?.scheduleFullReconcile(); })
       )
-      .settingEl.style.flexDirection = "column";
+      .settingEl.addClass("ion-setting-column");
 
     // ── Support ─────────────────────────────────────────────────────────────
-    const supportEl = containerEl.createEl("div");
-    supportEl.style.cssText =
-      "margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--background-modifier-border); text-align: center;";
+    const supportEl = containerEl.createDiv({ cls: "ion-support" });
     const coffeeLink = supportEl.createEl("a", {
       text: "☕ Buy me a coffee",
       href: "https://buymeacoffee.com/seanseanric",
+      cls: "ion-support-link",
     });
-    coffeeLink.style.cssText =
-      "color: var(--text-accent); font-size: 13px; text-decoration: none;";
     coffeeLink.setAttribute("target", "_blank");
     coffeeLink.setAttribute("rel", "noopener");
-    supportEl.createEl("p", { text: "IonSync is free and open source. Tips are appreciated!" })
-      .style.cssText = "margin-top: 6px; font-size: 12px; color: var(--text-muted);";
+    supportEl.createEl("p", {
+      text: "IonSync is free and open source. Tips are appreciated!",
+      cls: "ion-support-note",
+    });
   }
 }
