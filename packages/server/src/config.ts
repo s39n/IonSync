@@ -73,6 +73,7 @@ export async function loadConfig(configPath?: string): Promise<Config> {
       : "";
     throw new Error(`Config file not found: ${resolved}${example}`);
   }
+  // eslint-disable-next-line no-unsanitized/method -- `resolved` is the server operator's own config.js, path.resolve'd from a trusted local path (CLI arg / cwd), never web input; this is a Node server, not a browser context.
   const mod = (await import(resolved)) as Record<string, unknown>;
   const raw = (mod["default"] ?? mod) as Record<string, unknown>;
   return mergeConfig(raw);
