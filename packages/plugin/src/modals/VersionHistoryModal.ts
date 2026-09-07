@@ -71,11 +71,11 @@ export class VersionHistoryModal extends Modal {
     // Preview toggle button
     const previewBtn = actions.createEl("button", { text: "Preview", cls: "ion-btn" });
     const previewArea = row.createDiv({ cls: "ion-preview-area" });
-    previewArea.style.display = "none";
+    previewArea.hide();
 
     previewBtn.onclick = async () => {
       if (previewArea.style.display !== "none") {
-        previewArea.style.display = "none";
+        previewArea.hide();
         previewBtn.textContent = "Preview";
         return;
       }
@@ -93,11 +93,11 @@ export class VersionHistoryModal extends Modal {
         });
         const pre = previewArea.createEl("pre", { cls: "ion-preview-content" });
         pre.textContent = text;
-        previewArea.style.display = "";
+        previewArea.show();
         previewBtn.textContent = "Hide";
       } catch (e) {
-        previewArea.textContent = String(e instanceof Error ? e.message : e);
-        previewArea.style.display = "";
+        previewArea.textContent = e instanceof Error ? e.message : String(e);
+        previewArea.show();
         previewBtn.textContent = "Preview";
       }
       previewBtn.disabled = false;

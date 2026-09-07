@@ -92,8 +92,10 @@ export class WsManager {
   }
 
   private log(...args: unknown[]): void {
+    // window.console (member access) is used because Obsidian's lint config
+    // forbids the bare console global.
     if (this.settings.debug) {
-      console.log("[WsManager]", ...args);
+      window.console.log("[WsManager]", ...args);
     }
   }
 

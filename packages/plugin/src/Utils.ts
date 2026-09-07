@@ -100,7 +100,12 @@ class Utils {
   errorMessage(e: unknown): string {
     if (e instanceof Error) return e.message;
     if (typeof e === "string") return e;
-    return e == null ? "" : String(e);
+    if (e == null) return "";
+    if (typeof e === "object") {
+      try { return JSON.stringify(e); } catch { return "[unstringifiable error]"; }
+    }
+    // Primitive (number, boolean, bigint, symbol) — safe to coerce.
+    return String(e as number | boolean | bigint | symbol);
   }
 
   /** Normalise an unknown thrown value into an Error for safe re-throwing. */

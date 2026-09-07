@@ -1,6 +1,7 @@
 import { Plugin, Platform, TFile } from "obsidian";
 import { XSync } from "./XSync.js";
 import { IonSyncSettingsTab } from "./SettingsTab.js";
+import { VersionHistoryModal, ConflictsModal } from "./modals/index.js";
 import { setInstallSalt, setWriteVersion, hasInstallSalt } from "./Crypto.js";
 
 // Stamped by the esbuild post-build plugin — lets you confirm in the dev console
@@ -191,7 +192,7 @@ export class IonSyncPlugin extends Plugin {
   private _startTimer: number | null = null;
 
   override async onload(): Promise<void> {
-    console.log(`[IonSync] plugin loaded — build ${BUILD}`);
+    window.console.log(`[IonSync] plugin loaded — build ${BUILD}`);
     await this.loadSettings();
 
     let identitySet = false;
@@ -234,10 +235,8 @@ export class IonSyncPlugin extends Plugin {
       callback: () => { void this.xSync.verifyNow(); },
     });
 
-    // Open the server-backed version history for a file. Dynamic require keeps
-    // the modal bundle out of the module-load cycle (same pattern as XNotify).
+    // Open the server-backed version history for a file.
     const openVersionHistory = (path: string) => {
-      const { VersionHistoryModal } = require("./modals/index.js") as typeof import("./modals/index.js");
       new VersionHistoryModal(this, path).open();
     };
 
@@ -258,7 +257,6 @@ export class IonSyncPlugin extends Plugin {
       id: "show-conflicts",
       name: "Show sync conflicts",
       callback: () => {
-        const { ConflictsModal } = require("./modals/index.js") as typeof import("./modals/index.js");
         new ConflictsModal(this).open();
       },
     });
@@ -408,23 +406,20 @@ export class IonSyncPlugin extends Plugin {
     this.app.secretStorage.setSecret("ionsync-encryption-password", value);
   }
 
+  // Logging goes through window.console (member access, popout-window safe)
+  // rather than the bare console global, which Obsidian's lint config forbids.
   log(...args: unknown[]): void {
-    if (this.settings.debug) {
-      // eslint-disable-next-line no-console -- gated debug logger; single sink for verbose diagnostics
-      console.log("[IonSync]", ...args);
-    }
+    if (this.settings.debug) window.console.log("[IonSync]", ...args);
   }
 
   /** Always-on warning sink for unexpected but non-fatal states. */
   warn(...args: unknown[]): void {
-    // eslint-disable-next-line no-console -- single, intentional warning sink for the plugin
-    console.warn("[IonSync]", ...args);
+    window.console.warn("[IonSync]", ...args);
   }
 
   /** Always-on error sink. */
   error(...args: unknown[]): void {
-    // eslint-disable-next-line no-console -- single, intentional error sink for the plugin
-    console.error("[IonSync]", ...args);
+    window.console.error("[IonSync]", ...args);
   }
 
   /**

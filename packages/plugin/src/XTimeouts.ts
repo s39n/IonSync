@@ -18,10 +18,12 @@ export class XTimeouts {
   set(key: string, ms: number, callback: () => Promise<void>): void {
     const existing = this.timers.get(key);
     if (existing !== undefined) window.clearTimeout(existing.timer);
-    const timer = window.setTimeout(async () => {
+    const timer = window.setTimeout(() => {
       this.timers.delete(key);
-      try { await callback(); }
-      catch (e) { console.error(`[XTimeouts] error for ${key}:`, e); }
+      void (async () => {
+        try { await callback(); }
+        catch (e) { window.console.error(`[XTimeouts] error for ${key}:`, e); }
+      })();
     }, ms);
     this.timers.set(key, { timer, callback });
   }

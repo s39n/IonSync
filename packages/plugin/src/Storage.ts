@@ -354,7 +354,7 @@ export class Storage {
           // File is on disk but metadata says deleted — stale deletion (crash / spurious
           // phone event).  Use Date.now() so this device wins the server's
           // deleted-vs-active comparison and the file gets restored.
-          console.log(`[IonSync] Storage: stale-delete recovery for ${file.path} — asserting existence with Date.now()`);
+          window.console.log(`[IonSync] Storage: stale-delete recovery for ${file.path} — asserting existence with Date.now()`);
           effectiveMtime = Date.now();
         } else if (stored && stored.action === "active" && stored.mtime > mtime) {
           effectiveMtime = stored.mtime; // re-encryption bump

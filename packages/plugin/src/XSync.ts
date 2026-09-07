@@ -499,9 +499,11 @@ export class XSync {
         this._liveMaxSeq = 0;
         // If any ordered file failed to apply, the batch is NOT complete — do not
         // let it finalize as "fully synced" (that's the silent under-fetch).
-        const sessionComplete = !this._sessionHadApplyFailure;
-        this._sessionHadApplyFailure = false;
-        await this._onSyncDone(sessionComplete);
+        {
+          const sessionComplete = !this._sessionHadApplyFailure;
+          this._sessionHadApplyFailure = false;
+          await this._onSyncDone(sessionComplete);
+        }
         break;
       case "verify_manifest": {
         // Accumulate the streamed active-file manifest; on the final chunk, diff
@@ -716,7 +718,7 @@ export class XSync {
         let writeErr: unknown;
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
-            console.log(`[IonSync] Applying file ${file.path}, attempt ${attempt + 1}`);
+            this.plugin.log(`Applying file ${file.path}, attempt ${attempt + 1}`);
             // Register before writing so the vault event is caught by the guard
             // in _processLocalEvent and suppressed (prevents spurious re-uploads).
             this._applyingAdd(file.path);
@@ -725,7 +727,7 @@ export class XSync {
             writeErr = null;
             break;
           } catch (e) {
-            console.warn(`[IonSync] Failed write for ${file.path} on attempt ${attempt + 1}:`, e);
+            this.plugin.warn(`Failed write for ${file.path} on attempt ${attempt + 1}:`, e);
             // Write failed — no vault event will fire, so release this write's
             // refcount (an overlapping apply may still own one).
             this._applyingRemove(file.path);
@@ -740,7 +742,7 @@ export class XSync {
         }
         if (writeErr) {
           this._applyingRemove(file.path); // final cleanup if both attempts failed
-          throw writeErr;
+          throw Utils.toError(writeErr);
         }
 
         // Mark this path as recently applied so any platform-generated delete
@@ -758,7 +760,7 @@ export class XSync {
         // This upgrades the server's stored copy to ciphertext and prevents
         // future "unencrypted file received" alerts for this file.
         if (shouldReencrypt) {
-          window.setTimeout(() => this.pushFile(file.path), 1500);
+          window.setTimeout(() => { void this.pushFile(file.path); }, 1500);
         }
       }
     } catch (e) {
@@ -864,7 +866,7 @@ export class XSync {
       this._liveMaxSeq = 0;
       this._appliedSeq.clear();
       this.ws.send({ type: "sync_cursor", since: this._lastSyncedSeq });
-    } catch (e) {
+    } catch {
       this.isSyncing = false;
       this._inCursorSession = false;
       this.releaseWakeLock();
@@ -1080,7 +1082,7 @@ export class XSync {
       this._verifyLocalPaths = new Set(paths);
       this.ws.send({ type: "verify_request" });
     } catch (e) {
-      this.plugin.log(`[IonSync] verify: failed to start (${e})`);
+      this.plugin.log(`[IonSync] verify: failed to start (${Utils.errorMessage(e)})`);
       this._verifying = false;
       this._verifyManifest = null;
       this._verifyLocalPaths = null;
@@ -1170,16 +1172,18 @@ export class XSync {
    */
   private _scheduleCursorCheckpoint(): void {
     if (this._cursorCheckpointTimer !== null) return; // throttle: already scheduled
-    this._cursorCheckpointTimer = window.setTimeout(async () => {
+    this._cursorCheckpointTimer = window.setTimeout(() => {
       this._cursorCheckpointTimer = null;
-      try {
-        await this.storage.flushMetadata();
-        this.plugin.settings.lastSyncedSeq = this._lastSyncedSeq;
-        this.plugin.settings.lastSyncedEndpoint = this._endpointKey();
-        await this.plugin.saveSettings();
-      } catch (e) {
-        this.plugin.log(`[IonSync] cursor checkpoint failed: ${e}`);
-      }
+      void (async () => {
+        try {
+          await this.storage.flushMetadata();
+          this.plugin.settings.lastSyncedSeq = this._lastSyncedSeq;
+          this.plugin.settings.lastSyncedEndpoint = this._endpointKey();
+          await this.plugin.saveSettings();
+        } catch (e) {
+          this.plugin.log(`[IonSync] cursor checkpoint failed: ${Utils.errorMessage(e)}`);
+        }
+      })();
     }, 2_000);
   }
 
@@ -1221,7 +1225,7 @@ export class XSync {
     for (const path of changed) {
       if (!this.ws.isConnected) break;
       try { await this._uploadFile(path); }
-      catch (e) { this.plugin.log(`[IonSync] reconcile upload failed for ${path}: ${e}`); }
+      catch (e) { this.plugin.log(`[IonSync] reconcile upload failed for ${path}: ${Utils.errorMessage(e)}`); }
     }
   }
 
@@ -1810,7 +1814,7 @@ export class XSync {
         const stat = await this.plugin.app.vault.adapter.stat(path);
         if (stat) {
           // File still exists — spurious delete event.  Drop it silently.
-          console.log(`[IonSync] Dropping spurious delete queue entry for ${path} (file still exists)`);
+          this.plugin.log(`Dropping spurious delete queue entry for ${path} (file still exists)`);
           delete this.deleteQueue[path];
           continue;
         }
@@ -2059,7 +2063,7 @@ export class XSync {
             this.plugin.log(`[ReEncrypt] ${done}/${paths.length} files done`);
           }
         } catch (e) {
-          this.plugin.log(`[ReEncrypt] Error on ${path}: ${e}`);
+          this.plugin.log(`[ReEncrypt] Error on ${path}: ${Utils.errorMessage(e)}`);
         }
       }
 
