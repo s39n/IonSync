@@ -25,15 +25,17 @@ function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
+// atob/btoa only (no Node Buffer): available in desktop Electron, mobile
+// WebViews, and Node 20, and behaves identically across all three. The Buffer
+// polyfill on Obsidian mobile produces typed-array views that confuse WebCrypto
+// (same rationale as Crypto.decryptFromBase64).
 function bytesToB64(b: Uint8Array): string {
-  if (typeof Buffer !== "undefined") return Buffer.from(b).toString("base64");
   let s = "";
   for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]!);
   return btoa(s);
 }
 
 function b64ToBytes(b64: string): Uint8Array {
-  if (typeof Buffer !== "undefined") return new Uint8Array(Buffer.from(b64, "base64"));
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
