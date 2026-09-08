@@ -16,5 +16,8 @@
     "eslint-plugin-obsidianmd": "^0.4.2",
     "typescript": "^5.4.5",
     "typescript-eslint": "^8.69.0"
+  },
+  "overrides": {
+    "qs": "6.16.0"
   }
 }

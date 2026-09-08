@@ -1,6 +1,6 @@
 import { Modal, SuggestModal, Notice } from "obsidian";
 import type { FileHistoryResponseMsg, VersionEntry } from "@ionsync/protocol";
-import { decryptFromBase64, isEncryptedBase64 } from "../Crypto.js";
+import { decodeBase64ToString, decryptFromBase64, isEncryptedBase64 } from "../Crypto.js";
 import type { IonSyncPlugin } from "../main.js";
 
 // ── VersionHistoryModal ────────────────────────────────────────────────────
@@ -162,7 +162,7 @@ export class VersionHistoryModal extends Modal {
       return new TextDecoder().decode(plainBuf);
     }
 
-    return Buffer.from(content, "base64").toString("utf-8");
+    return decodeBase64ToString(content);
   }
 
   override onClose(): void {
