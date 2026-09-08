@@ -1,6 +1,6 @@
 import { Modal, Notice } from "obsidian";
 import type { ConflictSummary } from "@ionsync/protocol";
-import { decryptFromBase64, isEncryptedBase64 } from "../Crypto.js";
+import { decodeBase64ToString, decryptFromBase64, isEncryptedBase64 } from "../Crypto.js";
 import type { IonSyncPlugin } from "../main.js";
 
 // ── ConflictsModal ──────────────────────────────────────────────────────────
@@ -156,7 +156,7 @@ export class ConflictsModal extends Modal {
       const plainBuf = await decryptFromBase64(resp.content, this.plugin.getEncryptionPassword());
       return new TextDecoder().decode(plainBuf);
     }
-    return Buffer.from(resp.content, "base64").toString("utf-8");
+    return decodeBase64ToString(resp.content);
   }
 
   override onClose(): void {

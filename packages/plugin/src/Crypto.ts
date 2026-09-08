@@ -248,6 +248,19 @@ export function isEncryptedBase64(content: string): boolean {
   return content.startsWith(E2EE_BASE64_PREFIX);
 }
 
+/**
+ * Decodes a plain (unencrypted) base64 string to a UTF-8 string using native
+ * WebAPIs (atob + TextDecoder) rather than Buffer. Same rationale as
+ * decryptFromBase64: the Buffer polyfill on Obsidian mobile is unreliable, and
+ * Buffer is a Node type that lints as unsafe `any` in the plugin bundle.
+ */
+export function decodeBase64ToString(content: string): string {
+  const binary = atob(content);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
 // Decrypt
 
 /**

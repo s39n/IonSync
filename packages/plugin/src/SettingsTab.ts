@@ -9,7 +9,10 @@ export class IonSyncSettingsTab extends PluginSettingTab {
   override display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    ;
+
+    // Obsidian's config folder is user-configurable (not always ".obsidian"),
+    // so surface the real folder name in these descriptions.
+    const configDir = this.app.vault.configDir;
 
     // ── Connection ──────────────────────────────────────────────────────────
     new Setting(containerEl).setName("Connection").setHeading();
@@ -130,7 +133,7 @@ export class IonSyncSettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Keep settings local to this device")
       .setDesc(
-        "Per-device profile: don't sync any Obsidian settings (.obsidian config) on this device — " +
+        `Per-device profile: don't sync any Obsidian settings (${configDir} config) on this device — ` +
         "appearance, hotkeys, plugins, layout, etc. stay local. Notes still sync. " +
         "Overrides the individual config toggles below."
       )
@@ -145,14 +148,14 @@ export class IonSyncSettingsTab extends PluginSettingTab {
     toggleSetting("Audio", "mp3, wav, ogg, etc.", "syncAudio");
     toggleSetting("Video", "mp4, mkv, avi, etc.", "syncVideos");
     toggleSetting("PDFs", "PDF files", "syncPDFs");
-    toggleSetting("Themes & snippets", ".obsidian/themes/ and .obsidian/snippets/", "syncThemesAndSnippets");
-    toggleSetting("Main settings", ".obsidian/app.json", "syncMainSettings");
-    toggleSetting("Appearance settings", ".obsidian/appearance.json", "syncAppearanceSettings");
-    toggleSetting("Hotkeys", ".obsidian/hotkeys.json", "syncHotkeys");
+    toggleSetting("Themes & snippets", `${configDir}/themes/ and ${configDir}/snippets/`, "syncThemesAndSnippets");
+    toggleSetting("Main settings", `${configDir}/app.json`, "syncMainSettings");
+    toggleSetting("Appearance settings", `${configDir}/appearance.json`, "syncAppearanceSettings");
+    toggleSetting("Hotkeys", `${configDir}/hotkeys.json`, "syncHotkeys");
     toggleSetting("Active core plugins", "core-plugins.json", "syncActiveCorePlugins");
-    toggleSetting("Core plugin settings", ".obsidian/*.json (e.g. daily-notes.json, templates.json)", "syncCorePluginSettings");
+    toggleSetting("Core plugin settings", `${configDir}/*.json (e.g. daily-notes.json, templates.json)`, "syncCorePluginSettings");
     toggleSetting("Active community plugins", "community-plugins.json", "syncActiveCommunityPlugins");
-    toggleSetting("Installed community plugins", ".obsidian/plugins/", "syncInstalledCommunityPlugins");
+    toggleSetting("Installed community plugins", `${configDir}/plugins/`, "syncInstalledCommunityPlugins");
 
     new Setting(containerEl)
       .setName("Max file size (MB)")
