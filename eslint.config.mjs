@@ -14,6 +14,8 @@ export default [
   {
     ignores: [
       "**/node_modules/**",
+      "dist-plugin-repo/**",
+      "plugin-repo/**",
       "**/dist/**",
       "**/main.js",
       "packages/server/client/**",

@@ -1,0 +1,20 @@
+{
+	"compilerOptions": {
+		"target": "ES2018",
+		"module": "CommonJS",
+		"moduleResolution": "node",
+		"lib": ["ES2022", "DOM"],
+		"strict": true,
+		"exactOptionalPropertyTypes": true,
+		"noUncheckedIndexedAccess": true,
+		"noImplicitOverride": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"noEmit": true,
+		"baseUrl": ".",
+		"paths": {
+			"@ionsync/protocol": ["./src/protocol/index.ts"]
+		}
+	},
+	"include": ["src/**/*.ts"]
+}

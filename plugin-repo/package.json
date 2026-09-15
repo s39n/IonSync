@@ -1,0 +1,32 @@
+{
+	"name": "ion-sync",
+	"version": "0.0.0",
+	"description": "Self-hosted vault synchronization for Obsidian",
+	"main": "main.js",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
+		"typecheck": "tsc --noEmit --skipLibCheck",
+		"lint": "eslint ."
+	},
+	"keywords": ["obsidian", "sync", "self-hosted"],
+	"author": "Sean Richards",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/diff-match-patch": "^1.0.36",
+		"@types/node": "^20.0.0",
+		"esbuild": "0.28.2",
+		"eslint": "^9.39.0",
+		"eslint-plugin-obsidianmd": "^0.4.2",
+		"obsidian": "^1.12.3",
+		"tslib": "^2.6.0",
+		"typescript": "^5.9.0"
+	},
+	"dependencies": {
+		"@noble/curves": "^2.4.0",
+		"diff-match-patch": "^1.0.5"
+	},
+	"allowScripts": {
+		"esbuild@0.28.2": true
+	}
+}

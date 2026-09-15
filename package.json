@@ -19,5 +19,8 @@
   },
   "overrides": {
     "qs": "6.16.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true
   }
 }

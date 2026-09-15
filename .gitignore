@@ -49,3 +49,6 @@ Thumbs.db
 *.swp
 .agents/
 /logs/
+
+# Generated standalone plugin repo (assembled by scripts/build-plugin-repo.mjs)
+dist-plugin-repo/
