@@ -1,0 +1,76 @@
+name: Mirror plugin to release repo
+
+# Publishes the Obsidian plugin to its standalone community-store repo
+# (s39n/ion-sync) from this monorepo. One run assembles the standalone tree
+# (scripts/build-plugin-repo.mjs), pushes it, and tags a release there - the
+# release repo's own release.yml then builds, attests, and publishes.
+#
+# Requires repo secret PLUGIN_REPO_TOKEN: a fine-grained PAT scoped to
+# s39n/ion-sync with Contents: read/write and Workflows: read/write. A PAT
+# (not the default GITHUB_TOKEN) is required so the tag push triggers the
+# release repo's workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_release:
+        description: "Tag the release repo (triggers its build + publish)"
+        type: boolean
+        default: true
+  push:
+    tags:
+      - "plugin-*"
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Read plugin version
+        id: ver
+        run: echo "version=$(node -p "require('./packages/plugin/manifest.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release repo
+        uses: actions/checkout@v4
+        with:
+          repository: s39n/ion-sync
+          token: ${{ secrets.PLUGIN_REPO_TOKEN }}
+          path: _release_repo
+          fetch-depth: 0
+
+      - name: Assemble standalone plugin repo
+        run: node scripts/build-plugin-repo.mjs --out _release_repo
+
+      - name: Commit & push mirror
+        working-directory: _release_repo
+        run: |
+          git config user.name "ionsync-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to mirror."
+          else
+            git commit -m "chore: mirror plugin v${{ steps.ver.outputs.version }} from monorepo"
+            git push origin HEAD:main
+          fi
+
+      - name: Tag release (build + publish)
+        if: ${{ github.event_name == 'push' || inputs.tag_release }}
+        working-directory: _release_repo
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          if git ls-remote --tags origin "refs/tags/$VERSION" | grep -q "refs/tags/$VERSION$"; then
+            echo "Tag $VERSION already exists on the release repo; skipping."
+          else
+            git tag "$VERSION"
+            git push origin "$VERSION"
+          fi

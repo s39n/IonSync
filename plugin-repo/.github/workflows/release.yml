@@ -1,0 +1,71 @@
+name: Release plugin
+
+# Builds the plugin from source in CI and publishes the release assets with
+# GitHub artifact attestations (build provenance). Triggered by pushing a
+# version tag that matches manifest.json version, e.g.:
+#
+#     git tag 2.0.9 && git push origin 2.0.9
+#
+# The build is reproducible (deterministic build id), so anyone - including the
+# Obsidian community reviewer - who checks out this tag and runs the same build
+# gets a byte-identical main.js.
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build & publish attested release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Verify manifest version matches tag
+        run: |
+          manifest_version="$(node -p "require('./manifest.json').version")"
+          if [ "$manifest_version" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::manifest.json version ($manifest_version) does not match tag (${GITHUB_REF_NAME})"
+            exit 1
+          fi
+          echo "manifest.json version matches tag: $manifest_version"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            main.js \
+            manifest.json \
+            styles.css \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

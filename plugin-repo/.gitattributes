@@ -1,0 +1,4 @@
+# Normalize line endings so builds are byte-reproducible on every platform.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
