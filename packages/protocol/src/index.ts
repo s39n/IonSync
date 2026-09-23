@@ -388,6 +388,10 @@ export interface VersionCheckResponseMsg {
   /** base64 ed25519 signature of main.js (see updateSig). Absent on unsigned
    *  builds; the plugin fails closed when it's missing or invalid. */
   signature?: string;
+  /** base64 ed25519 signature over every allowlisted update file
+   *  (see updateSig.updateFilesMessage). When absent, the plugin writes only
+   *  the separately signed main.js. */
+  filesSignature?: string;
 }
 
 /** Sent when all pending sync transfers for a session have resolved. */
@@ -544,4 +548,4 @@ export function computeOfflineDeletes(
 
 // ─── Binary-frame wire codec ────────────────────────────────────────────────
 export { encodeFrame, decodeFrame, canBinaryFrame, BINARY_FRAMES_CAP } from "./wire.js";
-export { signPluginBundle, verifyPluginBundle } from "./updateSig.js";
+export { signPluginBundle, verifyPluginBundle, signPluginFiles, verifyPluginFiles, updateFilesMessage, UPDATE_FILE_NAMES } from "./updateSig.js";

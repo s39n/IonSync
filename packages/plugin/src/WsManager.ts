@@ -13,6 +13,8 @@ export interface UpdateInfo {
   files: { name: string; content: string }[];
   /** base64 ed25519 signature of main.js; verified before applying (fail closed). */
   signature?: string;
+  /** base64 ed25519 signature over all allowlisted update files. */
+  filesSignature?: string;
 }
 
 export type WsManagerEvent =
@@ -289,7 +291,11 @@ export class WsManager {
     const files: { name: string; content: string }[] = Object.entries(msg.files ?? {}).map(
       ([name, content]) => ({ name, content })
     );
-    this.emit({ type: "update_available", update: { files, ...(msg.signature ? { signature: msg.signature } : {}) } });
+    this.emit({ type: "update_available", update: {
+      files,
+      ...(msg.signature ? { signature: msg.signature } : {}),
+      ...(msg.filesSignature ? { filesSignature: msg.filesSignature } : {}),
+    } });
   }
 
   private scheduleReconnect(delay?: number): void {

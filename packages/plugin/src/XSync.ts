@@ -1,5 +1,5 @@
 import type { FileEntry, ServerMsg, FileHistoryResponseMsg, FileDataResponseMsg, ConflictListResponseMsg, ConflictContentResponseMsg, ConflictActionResponseMsg } from "@ionsync/protocol";
-import { collectFolderChildren, cascadeDeleteExceedsSafetyCap, computeOfflineDeletes, verifyPluginBundle } from "@ionsync/protocol";
+import { collectFolderChildren, cascadeDeleteExceedsSafetyCap, computeOfflineDeletes, verifyPluginBundle, verifyPluginFiles, UPDATE_FILE_NAMES } from "@ionsync/protocol";
 import { Platform, type TAbstractFile } from "obsidian";
 import { WsManager, type UpdateInfo } from "./WsManager.js";
 import { Storage } from "./Storage.js";
@@ -1779,6 +1779,25 @@ export class XSync {
       this.xNotify.showNotification(STATUS_WARN, "Blocked an unsigned plugin update — not applied");
       return;
     }
+    // Only allowlisted names may be written, and the non-main.js files only when
+    // the whole-set signature verifies. Anything else (e.g. a forged data.json,
+    // which holds this plugin's settings) is dropped: it could point the plugin
+    // at another server or switch E2EE off without touching main.js.
+    const allowed = new Set<string>(UPDATE_FILE_NAMES);
+    const candidates = update.files.filter((f) => allowed.has(f.name));
+    let toWrite = [main];
+    if (update.filesSignature) {
+      const asBytes = candidates.map((f) => ({ name: f.name, bytes: Utils.fromBase64(f.content) }));
+      if (!verifyPluginFiles(asBytes, update.filesSignature, PLUGIN_UPDATE_PUBKEY)) {
+        this.plugin.log("[Update] REJECTED: update file-set signature invalid — nothing written");
+        this.xNotify.showNotification(STATUS_WARN, "Blocked a plugin update with an invalid signature — not applied");
+        return;
+      }
+      toWrite = candidates;
+    } else if (candidates.length > 1) {
+      this.plugin.log("[Update] server sent no file-set signature — writing the signed main.js only");
+    }
+
     // Already written this session and waiting on a restart — don't re-download
     // or re-notify on every reconnect (the server keeps reporting it until the
     // running build changes, which only happens once the user reloads).
@@ -1789,7 +1808,7 @@ export class XSync {
     // forbids that (it's the pattern used to run downloaded code silently).
     // The update takes effect the next time the plugin is loaded, so prompt the
     // user to reload rather than swapping the running code underneath them.
-    await this.storage.updatePlugin(update.files);
+    await this.storage.updatePlugin(toWrite);
     this._downloadedUpdateSig = update.signature;
     this.xNotify.showNotification(STATUS_WARN, "IonSync update downloaded — restart Obsidian (or toggle the plugin off/on) to apply");
   }

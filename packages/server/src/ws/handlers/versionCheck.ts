@@ -16,6 +16,8 @@ interface BuildInfo {
   build: string;
   /** base64 ed25519 signature of main.js, written by the signed build. */
   sig?: string;
+  /** base64 ed25519 signature over every allowlisted update file. */
+  filesSig?: string;
 }
 
 // Cached build info loaded once at startup
@@ -95,5 +97,5 @@ export function handleVersionCheck(
     }
   }
 
-  peer.send({ type: "version_check_response", needsUpdate: true, files, ...(serverBuild.sig ? { signature: serverBuild.sig } : {}), caps: SERVER_CAPS });
+  peer.send({ type: "version_check_response", needsUpdate: true, files, ...(serverBuild.sig ? { signature: serverBuild.sig } : {}), ...(serverBuild.filesSig ? { filesSignature: serverBuild.filesSig } : {}), caps: SERVER_CAPS });
 }

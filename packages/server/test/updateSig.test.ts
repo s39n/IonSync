@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { signPluginBundle, verifyPluginBundle } from "@ionsync/protocol";
+import { signPluginBundle, verifyPluginBundle, signPluginFiles, verifyPluginFiles } from "@ionsync/protocol";
 
 // Throwaway test keypair (NOT the production signing key).
 const TEST_PUB = "5018246e911354f1d0439133cee043dd4ca8bde6271981d0e72ad4d5dab520ce";
@@ -31,4 +31,39 @@ test("fails closed on a missing or malformed signature", () => {
   assert.equal(verifyPluginBundle(bundle, undefined, TEST_PUB), false);
   assert.equal(verifyPluginBundle(bundle, "", TEST_PUB), false);
   assert.equal(verifyPluginBundle(bundle, "!!!not-base64!!!", TEST_PUB), false);
+});
+
+// ── Whole-update (file set) signature ─────────────────────────────────────────
+const enc = (s: string) => new TextEncoder().encode(s);
+const goodSet = () => [
+  { name: "main.js", bytes: enc("main code") },
+  { name: "manifest.json", bytes: enc('{"id":"ion-sync"}') },
+  { name: "styles.css", bytes: enc(".a{}") },
+];
+
+test("file-set signature round-trips and ignores order", () => {
+  const sig = signPluginFiles(goodSet(), TEST_PRIV);
+  assert.equal(verifyPluginFiles([...goodSet()].reverse(), sig, TEST_PUB), true);
+});
+
+test("file-set signature rejects a tampered sidecar file", () => {
+  const sig = signPluginFiles(goodSet(), TEST_PRIV);
+  const set = goodSet();
+  set[1] = { name: "manifest.json", bytes: enc('{"id":"evil"}') };
+  assert.equal(verifyPluginFiles(set, sig, TEST_PUB), false);
+});
+
+test("file-set signature rejects a dropped file (missing != empty)", () => {
+  const sig = signPluginFiles(goodSet(), TEST_PRIV);
+  assert.equal(verifyPluginFiles(goodSet().slice(0, 2), sig, TEST_PUB), false);
+  const emptied = goodSet(); emptied[2] = { name: "styles.css", bytes: new Uint8Array(0) };
+  assert.equal(verifyPluginFiles(emptied, sig, TEST_PUB), false);
+});
+
+test("file-set signature is independent of non-allowlisted extras", () => {
+  const sig = signPluginFiles(goodSet(), TEST_PRIV);
+  // Extras are never written by the plugin, so they don't affect verification.
+  assert.equal(verifyPluginFiles([...goodSet(), { name: "data.json", bytes: enc("{}") }], sig, TEST_PUB), true);
+  assert.equal(verifyPluginFiles(goodSet(), sig, OTHER_PUB), false);
+  assert.equal(verifyPluginFiles(goodSet(), undefined, TEST_PUB), false);
 });
