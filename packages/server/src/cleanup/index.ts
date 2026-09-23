@@ -33,15 +33,22 @@ export class SyncCleanup {
     const allPaths = db.getAllFilePaths();
     let trimmedCount = 0;
     for (const filePath of allPaths) {
-      const toTrim = db.getVersionsToTrim(filePath, versionsPerFile);
+      // Trim by ARRIVAL order (row id), never the head's row, and delete a
+      // version file only once no remaining row references its mtime. Trimming
+      // by device mtime could delete the real head when a device clock ran
+      // ahead and left a stale version with a larger mtime.
+      const toTrim = db.getVersionRowsToTrim(filePath, versionsPerFile);
       if (toTrim.length === 0) continue;
+      for (const row of toTrim) db.deleteVersionRowById(row.id);
+      const inUse = db.getVersionMtimesInUse(filePath);
       try {
-        for (const v of toTrim) storage.deleteVersion(filePath, v.mtime);
+        for (const m of new Set(toTrim.map((r) => r.mtime))) {
+          if (!inUse.has(m)) storage.deleteVersion(filePath, m);
+        }
       } catch (e) {
         pushLog(this.ctx, `[cleanup] skipped version trim for ${JSON.stringify(filePath)}: ${e instanceof Error ? e.message : String(e)}`);
         continue;
       }
-      db.pruneVersions(filePath, versionsPerFile);
       trimmedCount += toTrim.length;
     }
 

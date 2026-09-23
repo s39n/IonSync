@@ -330,6 +330,32 @@ export class SyncDB {
 
   // --- Version history ------------------------------------------------------
 
+  /**
+   * Storage key (mtime) of the stored version holding `sha1` for a path — the
+   * most recently RECEIVED such version (highest row id), not the highest
+   * client mtime. With no sha1, uses the current head's sha1. Null when no
+   * version row matches (legacy data).
+   *
+   * Content must be looked up this way rather than "newest mtime on disk":
+   * mtimes come from device clocks, so a device running ahead would otherwise
+   * keep its stale version "latest" after newer accepted edits.
+   */
+  getVersionMtimeForSha(filePath: string, sha1?: string): number | null {
+    const row = sha1 !== undefined
+      ? this.db
+          .prepare<[string, string], { mtime: number }>(
+            "SELECT mtime FROM file_versions WHERE path = ? AND sha1 = ? ORDER BY id DESC LIMIT 1"
+          )
+          .get(filePath, sha1)
+      : this.db
+          .prepare<[string, string], { mtime: number }>(
+            `SELECT v.mtime FROM file_versions v JOIN files f ON f.path = v.path
+             WHERE v.path = ? AND f.path = ? AND v.sha1 = f.sha1 ORDER BY v.id DESC LIMIT 1`
+          )
+          .get(filePath, filePath);
+    return row ? row.mtime : null;
+  }
+
   getVersions(filePath: string): VersionEntry[] {
     return this.db
       .prepare<[string], DbVersionRow>(
@@ -353,12 +379,44 @@ export class SyncDB {
     return row !== undefined;
   }
 
+  /**
+   * Version rows past the newest `keepCount` (by arrival order), EXCLUDING the
+   * row that backs the current head — the head's bytes must survive trimming
+   * even if its row is old (e.g. after a repoint). Each row carries its id so
+   * callers can delete exactly that row.
+   */
+  getVersionRowsToTrim(filePath: string, keepCount: number): Array<{ id: number; mtime: number }> {
+    return this.db
+      .prepare<[string, string, string, number], { id: number; mtime: number }>(
+        `SELECT id, mtime FROM file_versions
+         WHERE path = ?
+           AND id IS NOT (
+             SELECT v.id FROM file_versions v JOIN files f ON f.path = v.path
+             WHERE v.path = ? AND v.sha1 = f.sha1 ORDER BY v.id DESC LIMIT 1
+           )
+           AND id NOT IN (SELECT id FROM file_versions WHERE path = ? ORDER BY id DESC LIMIT ?)`
+      )
+      .all(filePath, filePath, filePath, keepCount);
+  }
+
+  /** mtimes still referenced by any version row of a path. */
+  getVersionMtimesInUse(filePath: string): Set<number> {
+    const rows = this.db
+      .prepare<[string], { mtime: number }>("SELECT mtime FROM file_versions WHERE path = ?")
+      .all(filePath);
+    return new Set(rows.map((r) => r.mtime));
+  }
+
+  deleteVersionRowById(id: number): void {
+    this.db.prepare<[number]>("DELETE FROM file_versions WHERE id = ?").run(id);
+  }
+
   getVersionsToTrim(filePath: string, keepCount: number): VersionEntry[] {
     return this.db
       .prepare<[string, number], DbVersionRow>(
         `SELECT sha1, mtime, received_at FROM file_versions
          WHERE path = ?
-         ORDER BY mtime DESC
+         ORDER BY id DESC
          LIMIT -1 OFFSET ?`
       )
       .all(filePath, keepCount)
@@ -370,7 +428,7 @@ export class SyncDB {
       .prepare<[string, string, number]>(
         `DELETE FROM file_versions
          WHERE path = ? AND id NOT IN (
-           SELECT id FROM file_versions WHERE path = ? ORDER BY mtime DESC LIMIT ?
+           SELECT id FROM file_versions WHERE path = ? ORDER BY id DESC LIMIT ?
          )`
       )
       .run(filePath, filePath, keepCount);

@@ -12,6 +12,7 @@ import { verifyTOTP, generateSecret, totpUri, createPendingToken, consumePending
   generateRecoveryCodes, formatRecoveryCode, normalizeRecoveryCode, hashRecoveryCode } from "../totp.js";
 import { sealTotpSecret, openTotpSecret } from "../totpSecret.js";
 import { pushActivity } from "../context.js";
+import { versionMtimeFor } from "../head.js";
 
 // Coerce an Express query/body value to a string, rejecting array/object forms
 // (a crafted ?path[]=a&path[]=b makes req.query.path an array — treat as absent).
@@ -497,9 +498,10 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
         buf = ctx.storage.readVersion(filePath, mtime);
         resolvedMtime = mtime;
       } else {
-        buf = ctx.storage.readLatest(filePath);
-        const versions = ctx.db.getVersions(filePath);
-        resolvedMtime = versions[0]?.mtime;
+        // The head version (by sha), not the highest device mtime on disk.
+        const m = versionMtimeFor(ctx, filePath);
+        buf = m === null ? null : ctx.storage.readVersion(filePath, m);
+        resolvedMtime = m ?? undefined;
       }
     } catch {
       // Storage.resolve throws on a path-traversal attempt — a rejected request,
@@ -831,7 +833,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     const files: Array<{ path: string; mtime: number; encrypted: boolean; content: string }> = [];
     for (const filePath of pathList) {
       try {
-        const mtime = ctx.storage.latestVersionMtime(filePath);
+        const mtime = versionMtimeFor(ctx, filePath);
         if (mtime === null) continue; // no stored version — skip
         const buf = ctx.storage.readVersion(filePath, mtime);
         if (!buf) continue;

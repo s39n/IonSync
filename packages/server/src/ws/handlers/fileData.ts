@@ -5,6 +5,7 @@ import type { SyncPeer } from "../peer.js";
 import { broadcastToPeers, checkSyncDone } from "./sync.js";
 import { isE2eeEncrypted, e2eeVersion } from "../../e2ee.js";
 import crypto from "node:crypto";
+import { readHead } from "../../head.js";
 
 /**
  * Decide whether an upload fast-forwards the server head or is a concurrent
@@ -120,7 +121,7 @@ function isNoopResend(ctx: SyncContext, file: FileEntry, isE2EE: boolean, upload
   const head = ctx.db.getFile(file.path);
   if (!head || head.action !== "active" || head.sha1 !== file.sha1) return false;
   if (isE2EE) {
-    const headBuf = ctx.storage.readLatest(file.path);
+    const headBuf = readHead(ctx, file.path);
     if (!headBuf || !isE2eeEncrypted(headBuf)) return false; // plaintext→ciphertext upgrade: store it
     // Re-key: same plaintext, but the stored ciphertext is a different format
     // version — store it so the migration actually replaces the blob.
@@ -202,6 +203,12 @@ export function handleFileUpload(
       return;
     }
     if (!isRejected) {
+      // Version files are keyed by the device's mtime. If one already exists at
+      // this mtime it is about to be overwritten, so drop the version rows that
+      // described it — otherwise history would list a sha whose bytes are gone.
+      if (ctx.storage.getSizeVersion(file.path, file.mtime) !== null) {
+        ctx.db.deleteVersionRecord(file.path, file.mtime);
+      }
       ctx.storage.write(file.path, file.mtime, buf);
       savedSize = buf.length;
     }
@@ -377,7 +384,7 @@ function pushRenameConvergence(ctx: SyncContext, peer: SyncPeer, fromPath: strin
   }
   const target = ctx.db.getFile(toPath);
   if (target && target.action === "active" && target.fileType === "file") {
-    const headBuf = ctx.storage.readLatest(toPath);
+    const headBuf = readHead(ctx, toPath, target.sha1);
     peer.send({ type: "file_push", file: target, content: "", ...(headBuf ? { contentBytes: headBuf } : {}) });
   }
 }
@@ -396,7 +403,7 @@ function rejectStaleUpload(ctx: SyncContext, peer: SyncPeer, file: FileEntry): v
 function pushHeadToUploader(ctx: SyncContext, peer: SyncPeer, path: string): void {
   const serverFile = ctx.db.getFile(path);
   if (serverFile && serverFile.action === "active" && serverFile.fileType === "file") {
-    const headBuf = ctx.storage.readLatest(serverFile.path);
+    const headBuf = readHead(ctx, serverFile.path, serverFile.sha1);
     peer.send({ type: "file_push", file: serverFile, content: "", ...(headBuf ? { contentBytes: headBuf } : {}) });
   }
 }
@@ -428,7 +435,7 @@ export function handleFileDownload(
   if (file.action === "active" && file.fileType === "file") {
     const buf = msg.mtime !== undefined
       ? ctx.storage.readVersion(file.path, msg.mtime)
-      : ctx.storage.readLatest(file.path);
+      : readHead(ctx, file.path);
     content = buf ? buf.toString("base64") : "";
   }
 

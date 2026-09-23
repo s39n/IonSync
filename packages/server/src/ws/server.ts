@@ -22,6 +22,7 @@ import { handleVersionCheck } from "./handlers/versionCheck.js";
 import { handleVerifyRequest, handleVerifyMissing } from "./handlers/verify.js";
 import { ConnectionRateLimiter } from "./rateLimit.js";
 import { isValidVaultPath } from "../paths.js";
+import { readHead } from "../head.js";
 import { checkSyncDone } from "./handlers/sync.js";
 import type { SyncPeer } from "./peer.js";
 import type { IncomingMessage } from "node:http";
@@ -166,7 +167,7 @@ export function attachWebSocketServer(
               console.log(`[Delta Patch] Stitching update for: ${rawMsg.file.path}`);
 
               // 1. Read current server file (latest stored version)
-              const currentBuffer = ctx.storage.readLatest(rawMsg.file.path);
+              const currentBuffer = readHead(ctx, rawMsg.file.path);
               const currentText = currentBuffer ? currentBuffer.toString("utf-8") : "";
 
               // 2. Apply the incoming patch
