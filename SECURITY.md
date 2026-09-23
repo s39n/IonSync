@@ -87,6 +87,26 @@ hardening is opportunistic (e.g. Argon2id in place of PBKDF2), not an open gap.
 
 ---
 
+## Audit 2026-09-23
+
+Fixed on branch `fix/audit-2026-09`:
+
+| # | Issue | Severity | Status |
+|---|-------|----------|--------|
+| 12 | Auto-update wrote every server-sent file; only `main.js` was signed (a forged `data.json` could repoint the server / disable E2EE) | **High** | ✅ Fixed — name allowlist + signature over the whole file set (`filesSig`) |
+| 13 | Head content chosen by highest device mtime, not the DB head (clock skew served stale bytes; cleanup could trim the head) | **High** (integrity) | ✅ Fixed — head resolved by sha via `file_versions` |
+| 14 | Folder rename into own subtree deleted its content; partial failure on existing destination; case-insensitive DB prefix match | **High** (data loss) | ✅ Fixed |
+| 15 | No server-side vault path validation (`.` resolved to the storage root → purge wiped all content) | **Medium** | ✅ Fixed — `paths.ts` + Storage refuses the root |
+| 16 | Conflict blobs shared the vault namespace (`_conflicts/<id>`) | **Low** | ✅ Fixed — separate store + startup migration |
+
+Still open (not yet addressed):
+
+- **WS auth is `sha256(nonce‖password)` over plain `ws://`** — one captured login allows an offline GPU brute-force of the shared password (which also unlocks the dashboard). Use a long random password; use `wss://` off-LAN; consider a slow KDF / PAKE.
+- **E2EE accepts plaintext from the server** and ciphertext isn't bound to its path (no AAD), so a malicious server can inject, swap, or roll back content. Consider a strict mode + AAD in a v4 format.
+- **Plaintext SHA-1 is visible to the server** for encrypted files (content confirmation). Consider a keyed HMAC under E2EE.
+- Container runs as root on Node 20 (EOL 2026-04); signing key passed as a build ARG (prefer a BuildKit secret).
+- Dashboard: CDN scripts without SRI, no logout, TOTP replay within the window, `/api/totp/enable` overwrites an existing secret without the current code, double `decodeURIComponent` (500 on `%` in names), dashboard delete destroys history so "restore" yields an empty file, whole-vault exports built in memory.
+
 ## High severity
 
 ### 1. Admin session token is a static function of the password
