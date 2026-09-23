@@ -27,7 +27,17 @@ export class Storage {
     if (rel.startsWith("..") || path.isAbsolute(rel)) {
       throw new Error(`Path traversal detected: ${filePath}`);
     }
+    // A path that resolves to the storage root itself ("", ".", "a/..") is not a
+    // file — deleteAllVersions on it would rm -rf every stored note.
+    if (rel === "") {
+      throw new Error(`Path resolves to the storage root: ${JSON.stringify(filePath)}`);
+    }
     return resolved;
+  }
+
+  /** Absolute directory this store writes under. */
+  get root(): string {
+    return this.base;
   }
   // ─── Size Checking ───────────────────────────────────────────────────────
   /**

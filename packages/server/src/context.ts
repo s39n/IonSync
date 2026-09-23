@@ -1,7 +1,8 @@
 import type { ServerResponse } from "node:http";
 import type { Config } from "./config.js";
 import type { SyncDB } from "./db/index.js";
-import type { Storage } from "./storage/index.js";
+import path from "node:path";
+import { Storage as StorageImpl, type Storage } from "./storage/index.js";
 import type { SyncPeer } from "./ws/peer.js";
 
 export interface ActivityEvent {
@@ -27,6 +28,12 @@ export interface SyncContext {
   config: Config;
   db: SyncDB;
   storage: Storage;
+  /**
+   * Losing sides of conflicts, keyed by conflict id. Kept in its OWN tree
+   * (<data>/conflicts) — it used to live at `_conflicts/<id>` inside the vault
+   * file store, where a real vault file at that path collided with it.
+   */
+  conflicts: Storage;
   /** Connected, authenticated peers. Keyed by peer ID (UUID assigned at connect). */
   peers: Map<string, SyncPeer>;
   /** Rolling in-memory log buffer — last 200 lines. */
@@ -43,12 +50,15 @@ export function createContext(
   config: Config,
   db: SyncDB,
   storage: Storage,
-  clientDir: string
+  clientDir: string,
+  conflicts: Storage = new StorageImpl(path.join(path.dirname(storage.root), "conflicts"))
 ): SyncContext {
+  conflicts.init();
   return {
     config,
     db,
     storage,
+    conflicts,
     peers: new Map(),
     logBuffer: [],
     activityLog: [],

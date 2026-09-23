@@ -102,7 +102,7 @@ describe("file_rename", () => {
     assert.equal(cs.length, 1);
     assert.equal(cs[0]!.path, "notes/b.md");
     assert.equal(cs[0]!.sha1, sha1("bravo"));
-    assert.equal(srv.ctx.storage.readLatest(`_conflicts/${cs[0]!.id}`)?.toString(), "bravo");
+    assert.equal(srv.ctx.conflicts.readLatest(String(cs[0]!.id))?.toString(), "bravo");
 
     // Old path stays dead (never resurrected); target keeps A's content.
     assert.equal(srv.ctx.db.getFile("notes/a.md")?.action, "deleted");

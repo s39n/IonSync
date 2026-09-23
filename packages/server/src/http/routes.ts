@@ -769,8 +769,9 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     // Wipe DB (files, file_versions, devices)
     ctx.db.resetAll();
 
-    // Wipe all stored file content from disk
+    // Wipe all stored file content from disk (vault files + conflict blobs)
     ctx.storage.deleteAllFiles();
+    ctx.conflicts.deleteAllFiles();
 
     res.json({ ok: true });
   });
@@ -970,7 +971,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     const id = Number(req.query.id);
     const c = Number.isFinite(id) ? ctx.db.getConflict(id) : undefined;
     if (!c) { res.status(404).json({ error: "Unknown conflict" }); return; }
-    const buf = ctx.storage.readLatest(`_conflicts/${c.id}`);
+    const buf = ctx.conflicts.readLatest(String(c.id));
     res.json({ id: c.id, path: c.path, mtime: c.mtime, content: buf ? buf.toString("base64") : "", encrypted: buf ? isE2eeEncrypted(buf) : false });
   });
 
@@ -990,7 +991,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     const id = Number((req.body as { id?: unknown } | null)?.id);
     const c = Number.isFinite(id) ? ctx.db.getConflict(id) : undefined;
     if (!c) { res.status(404).json({ error: "Unknown conflict" }); return; }
-    const buf = ctx.storage.readLatest(`_conflicts/${c.id}`);
+    const buf = ctx.conflicts.readLatest(String(c.id));
     if (!buf) { res.status(404).json({ error: "Conflict content missing" }); return; }
     const entry: FileEntry = { path: c.path, sha1: c.sha1, mtime: Date.now(), action: "active", fileType: "file" };
     ctx.storage.write(c.path, entry.mtime, buf);

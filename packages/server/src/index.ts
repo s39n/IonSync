@@ -12,6 +12,7 @@ import { buildPublicRouter, buildAdminRouter } from "./http/routes.js";
 import { SyncCleanup } from "./cleanup/index.js";
 import { startBackupScheduler } from "./backup.js";
 import { sealTotpSecret, isSealed } from "./totpSecret.js";
+import { migrateLegacyConflictBlobs } from "./conflictMigration.js";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -50,6 +51,12 @@ const storage = new Storage(filesDir);
 storage.init();
 
 const ctx = createContext(config, db, storage, clientDir);
+
+// Conflict blobs moved from files/_conflicts/<id> to their own store.
+{
+  const moved = migrateLegacyConflictBlobs(db, storage, ctx.conflicts);
+  if (moved > 0) console.log(`[migrate] moved ${moved} conflict blob(s) out of the vault file store`);
+}
 
 // One-time migration (SECURITY.md #10): seal a legacy plaintext TOTP secret at
 // rest so a leaked DB or backup can't clone the 2FA seed. Idempotent — sealed

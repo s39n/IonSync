@@ -21,6 +21,9 @@ import { handleRename } from "./handlers/rename.js";
 import { handleVersionCheck } from "./handlers/versionCheck.js";
 import { handleVerifyRequest, handleVerifyMissing } from "./handlers/verify.js";
 import { ConnectionRateLimiter } from "./rateLimit.js";
+import { isValidVaultPath } from "../paths.js";
+import { checkSyncDone } from "./handlers/sync.js";
+import type { SyncPeer } from "./peer.js";
 import type { IncomingMessage } from "node:http";
 import { diff_match_patch } from "diff-match-patch"; // ✅ Phase 2 Import
 
@@ -111,6 +114,11 @@ export function attachWebSocketServer(
       if (peer.deviceId) {
         ctx.db.touchDevice(peer.deviceId);
       }
+
+      // Reject malformed vault paths before any handler touches the DB or disk
+      // (see paths.ts: "." resolves to the storage root). Lists are filtered so
+      // one bad entry can't block a whole sync; single-path messages are dropped.
+      if (!sanitizeMessagePaths(ctx, peer, msg)) return;
 
       // A throwing handler must never escape this callback: the listener is
       // async, so an uncaught exception becomes an unhandled promise rejection
@@ -250,6 +258,49 @@ export function attachWebSocketServer(
   });
 
   return wss;
+}
+
+/**
+ * Validates every client-supplied vault path in `msg`. Returns false when the
+ * message must be dropped. List-carrying messages are filtered in place.
+ */
+function sanitizeMessagePaths(ctx: SyncContext, peer: SyncPeer, msg: ClientMsg): boolean {
+  const reject = (p: unknown): false => {
+    pushLog(ctx, `[ws] rejected ${msg.type} with invalid path ${JSON.stringify(p)} from ${peer.deviceId ?? peer.id}`);
+    return false;
+  };
+  switch (msg.type) {
+    case "sync": {
+      if (!Array.isArray(msg.files)) return reject(undefined);
+      const before = msg.files.length;
+      msg.files = msg.files.filter((f) => isValidVaultPath(f?.path));
+      if (msg.files.length !== before) {
+        pushLog(ctx, `[ws] dropped ${before - msg.files.length} sync entr(ies) with invalid paths from ${peer.deviceId ?? peer.id}`);
+      }
+      return true;
+    }
+    case "verify_missing":
+      if (!Array.isArray(msg.paths)) return reject(undefined);
+      msg.paths = msg.paths.filter((p) => isValidVaultPath(p));
+      return true;
+    case "file_event":
+      return isValidVaultPath(msg.file?.path) || reject(msg.file?.path);
+    case "file_data": {
+      const p = msg.mode === "send" ? msg.path : msg.file?.path;
+      if (isValidVaultPath(p)) return true;
+      // An upload the server was waiting on must still release its slot, or the
+      // sync session would never reach sync_done.
+      if (typeof p === "string" && peer.pendingUploads.delete(p)) checkSyncDone(peer);
+      return reject(p);
+    }
+    case "file_rename":
+      if (!isValidVaultPath(msg.from)) return reject(msg.from);
+      return isValidVaultPath(msg.to) || reject(msg.to);
+    case "file_history":
+      return isValidVaultPath(msg.path) || reject(msg.path);
+    default:
+      return true;
+  }
 }
 
 function pushLog(ctx: SyncContext, msg: string): void {

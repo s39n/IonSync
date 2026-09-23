@@ -379,7 +379,7 @@ export class SyncDB {
   // ─── Conflicts ─────────────────────────────────────────────────────────────
 
   /** Record the losing side of a conflict. Returns the new conflict id, which
-   *  doubles as the storage key (`_conflicts/<id>`) for its content blob. */
+   *  doubles as the key for its content blob in the conflict store. */
   recordConflict(path: string, sha1: string, mtime: number, deviceId: string | null): number {
     const info = this.db
       .prepare<[string, string, number, string | null, number]>(

@@ -35,8 +35,11 @@ export class SyncCleanup {
     for (const filePath of allPaths) {
       const toTrim = db.getVersionsToTrim(filePath, versionsPerFile);
       if (toTrim.length === 0) continue;
-      for (const v of toTrim) {
-        storage.deleteVersion(filePath, v.mtime);
+      try {
+        for (const v of toTrim) storage.deleteVersion(filePath, v.mtime);
+      } catch (e) {
+        pushLog(this.ctx, `[cleanup] skipped version trim for ${JSON.stringify(filePath)}: ${e instanceof Error ? e.message : String(e)}`);
+        continue;
       }
       db.pruneVersions(filePath, versionsPerFile);
       trimmedCount += toTrim.length;
@@ -56,7 +59,13 @@ export class SyncCleanup {
     const minSynced = db.getMinSyncedSeq();
     const purgeable = db.getDeletedFilesUpToSeq(minSynced);
     for (const file of purgeable) {
-      storage.deleteAllVersions(file.path);
+      // A malformed legacy path (e.g. ".") makes Storage refuse the delete;
+      // still drop the DB row so one bad record can't stall every later purge.
+      try {
+        storage.deleteAllVersions(file.path);
+      } catch (e) {
+        pushLog(this.ctx, `[cleanup] skipped storage purge for ${JSON.stringify(file.path)}: ${e instanceof Error ? e.message : String(e)}`);
+      }
       db.deleteFileMeta(file.path);
     }
 
