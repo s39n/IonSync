@@ -948,7 +948,10 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
       pushActivity(ctx, { kind: "rename", detail: `${fromPrefix} => ${toPrefix} (${count} files)` });
       res.json({ ok: true, files: count, storageEntries: moved.length });
     } catch (e: unknown) {
-      res.status(500).json({ error: String(e) });
+      // Storage refuses unsafe moves (into own subtree, onto existing files)
+      // BEFORE touching disk or DB — a client error, not a server fault.
+      const msg = errMsg(e);
+      res.status(msg.startsWith("Cannot ") ? 400 : 500).json({ error: msg });
     }
   });
 

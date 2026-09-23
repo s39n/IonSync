@@ -763,12 +763,15 @@ export class SyncDB {
    */
   renameFolderPaths(fromPrefix: string, toPrefix: string): number {
     if (fromPrefix === toPrefix) return 0;
-    const like = fromPrefix.replace(/[%_]/g, "\\$&") + "/%";
+    // Exact, case-SENSITIVE prefix match. SQLite's LIKE is case-insensitive for
+    // ASCII, so "notes/%" also matched "Notes/…" — renaming one folder relinked
+    // a different folder's DB rows while its storage stayed put.
+    const dirPrefix = fromPrefix + "/";
     const prefixLen = fromPrefix.length;
     const result = this.db.transaction(() => {
       const files = this.db
-        .prepare<[string]>("SELECT path FROM files WHERE path LIKE ? ESCAPE '\\'")
-        .all(like) as Array<{ path: string }>;
+        .prepare<[number, string]>("SELECT path FROM files WHERE substr(path, 1, ?) = ?")
+        .all([...dirPrefix].length, dirPrefix) as Array<{ path: string }>;
       const now = Date.now();
       for (const { path: oldPath } of files) {
         const newPath = toPrefix + oldPath.slice(prefixLen);
