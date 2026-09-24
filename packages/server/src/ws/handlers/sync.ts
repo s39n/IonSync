@@ -3,6 +3,7 @@ import { compareFiles } from "@ionsync/protocol";
 import type { SyncContext } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 import { isHiddenOrConfigPath } from "./fileData.js";
+import { readHead, headSize } from "../../head.js";
 
 /** Max files requested from client simultaneously — bounds server-side buffer memory. */
 const UPLOAD_BATCH = 8;
@@ -175,7 +176,7 @@ export function drainPushQueue(ctx: SyncContext, peer: SyncPeer): void {
     const file = peer.pushQueue.shift()!;
     let buf: Buffer | null = null;
     if (file.action === "active" && file.fileType === "file") {
-      buf = ctx.storage.readLatest(file.path);
+      buf = readHead(ctx, file.path, file.sha1);
     }
     // Cursor-sync pushes carry their seq so the client can advance its cursor.
     // `session:true` marks them as part of the ordered cursor stream (set when
@@ -252,7 +253,7 @@ export function broadcastToPeers(ctx: SyncContext, sourcePeer: SyncPeer | null, 
   let buf: Buffer | null = null;
   if (file.action === "active" && file.fileType === "file") {
     // ✅ 1. Check size before reading
-    const sizeBytes = ctx.storage.getSizeLatest(file.path) ?? 0;
+    const sizeBytes = headSize(ctx, file.path, file.sha1) ?? 0;
     const limitBytes = ctx.config.maxFileSizeMb * 1024 * 1024;
 
     if (sizeBytes > limitBytes) {
@@ -261,7 +262,7 @@ export function broadcastToPeers(ctx: SyncContext, sourcePeer: SyncPeer | null, 
       // knows the file exists but doesn't crash the server downloading it.
       buf = null;
     } else {
-      buf = ctx.storage.readLatest(file.path);
+      buf = readHead(ctx, file.path, file.sha1);
     }
   }
 

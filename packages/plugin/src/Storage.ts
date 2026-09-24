@@ -1,4 +1,5 @@
 import type { FileEntry } from "@ionsync/protocol";
+import { UPDATE_FILE_NAMES } from "@ionsync/protocol";
 import { TFile, TFolder, type App } from "obsidian";
 import { FSAdapter } from "./FSAdapter.js";
 import { ExclusionFilter } from "./ExclusionFilter.js";
@@ -270,6 +271,9 @@ export class Storage {
       // must ignore those duplicates — and this also rejects any path
       // traversal in server-supplied names.
       if (f.name.includes("/") || f.name.includes("\\")) continue;
+      // Defence in depth: never write anything outside the fixed update set
+      // (a server-supplied "data.json" would overwrite this plugin's settings).
+      if (!(UPDATE_FILE_NAMES as readonly string[]).includes(f.name)) continue;
       // Decode base64 → UTF-8 properly. A bare atob() yields one char per
       // BYTE (Latin-1); writing that re-encodes each byte-char as UTF-8 and
       // corrupts every multi-byte character in the bundle.

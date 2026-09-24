@@ -27,7 +27,17 @@ export class Storage {
     if (rel.startsWith("..") || path.isAbsolute(rel)) {
       throw new Error(`Path traversal detected: ${filePath}`);
     }
+    // A path that resolves to the storage root itself ("", ".", "a/..") is not a
+    // file — deleteAllVersions on it would rm -rf every stored note.
+    if (rel === "") {
+      throw new Error(`Path resolves to the storage root: ${JSON.stringify(filePath)}`);
+    }
     return resolved;
+  }
+
+  /** Absolute directory this store writes under. */
+  get root(): string {
+    return this.base;
   }
   // ─── Size Checking ───────────────────────────────────────────────────────
   /**
@@ -219,7 +229,16 @@ export class Storage {
    * Returns the list of old→new path pairs that were moved.
    */
   renameFolder(fromPrefix: string, toPrefix: string): Array<{ oldPath: string; newPath: string }> {
-    const fromDir = this.resolve(fromPrefix);
+    const from = fromPrefix.replace(/^\/+|\/+$/g, "");
+    const to = toPrefix.replace(/^\/+|\/+$/g, "");
+    if (from === to) return [];
+    // Moving a folder into its own subtree (or a parent into a child's name)
+    // used to move every leaf under `from` and then rm -rf `from` — deleting
+    // the files it had just moved there.
+    if (to.startsWith(from + "/") || from.startsWith(to + "/")) {
+      throw new Error(`Cannot move folder "${from}" into its own subtree "${to}"`);
+    }
+    const fromDir = this.resolve(from);
     if (!fs.existsSync(fromDir)) return [];
 
     const moved: Array<{ oldPath: string; newPath: string }> = [];
@@ -229,9 +248,7 @@ export class Storage {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       const hasVersions = entries.some(e => e.isFile() && e.name.startsWith("v_"));
       if (hasVersions) {
-        const oldVaultPath = fromPrefix + "/" + rel;
-        const newVaultPath = toPrefix + "/" + rel;
-        moved.push({ oldPath: oldVaultPath.replace(/^\/+/, ""), newPath: newVaultPath.replace(/^\/+/, "") });
+        moved.push({ oldPath: from + "/" + rel, newPath: to + "/" + rel });
       }
       for (const e of entries) {
         if (e.isDirectory()) {
@@ -242,17 +259,40 @@ export class Storage {
 
     collectLeafDirs(fromDir, "");
 
-    // Move each leaf storage directory
+    // Pre-flight: refuse the whole move if any destination already holds
+    // versions. renameSync onto a non-empty directory throws, and failing
+    // half-way left disk and DB disagreeing about where files live.
+    for (const { newPath } of moved) {
+      const dst = this.resolve(newPath);
+      if (fs.existsSync(dst) && fs.readdirSync(dst).some((n) => n.startsWith("v_"))) {
+        throw new Error(`Cannot rename folder: destination "${newPath}" already exists`);
+      }
+    }
+
+    // Move each leaf's version files (not the directory itself, so a leaf that
+    // also contains child leaves keeps its children for their own move).
     for (const { oldPath, newPath } of moved) {
       const src = this.resolve(oldPath);
       const dst = this.resolve(newPath);
-      fs.mkdirSync(path.dirname(dst), { recursive: true });
-      fs.renameSync(src, dst);
+      fs.mkdirSync(dst, { recursive: true });
+      for (const name of fs.readdirSync(src)) {
+        if (name.startsWith("v_")) fs.renameSync(path.join(src, name), path.join(dst, name));
+      }
     }
 
-    // Remove the now-empty fromDir tree
-    try { fs.rmSync(fromDir, { recursive: true, force: true }); } catch { /* non-fatal */ }
+    // Remove only directories left EMPTY under fromDir — never rm -rf, so no
+    // content can be lost if anything above was skipped.
+    removeEmptyDirs(fromDir);
 
     return moved;
   }
+}
+
+/** Remove `dir` and its subdirectories bottom-up, but only those that are empty. */
+function removeEmptyDirs(dir: string): void {
+  if (!fs.existsSync(dir)) return;
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.isDirectory()) removeEmptyDirs(path.join(dir, e.name));
+  }
+  try { fs.rmdirSync(dir); } catch { /* not empty — keep */ }
 }

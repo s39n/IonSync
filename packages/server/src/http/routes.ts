@@ -12,6 +12,7 @@ import { verifyTOTP, generateSecret, totpUri, createPendingToken, consumePending
   generateRecoveryCodes, formatRecoveryCode, normalizeRecoveryCode, hashRecoveryCode } from "../totp.js";
 import { sealTotpSecret, openTotpSecret } from "../totpSecret.js";
 import { pushActivity } from "../context.js";
+import { versionMtimeFor } from "../head.js";
 
 // Coerce an Express query/body value to a string, rejecting array/object forms
 // (a crafted ?path[]=a&path[]=b makes req.query.path an array — treat as absent).
@@ -497,9 +498,10 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
         buf = ctx.storage.readVersion(filePath, mtime);
         resolvedMtime = mtime;
       } else {
-        buf = ctx.storage.readLatest(filePath);
-        const versions = ctx.db.getVersions(filePath);
-        resolvedMtime = versions[0]?.mtime;
+        // The head version (by sha), not the highest device mtime on disk.
+        const m = versionMtimeFor(ctx, filePath);
+        buf = m === null ? null : ctx.storage.readVersion(filePath, m);
+        resolvedMtime = m ?? undefined;
       }
     } catch {
       // Storage.resolve throws on a path-traversal attempt — a rejected request,
@@ -769,8 +771,9 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     // Wipe DB (files, file_versions, devices)
     ctx.db.resetAll();
 
-    // Wipe all stored file content from disk
+    // Wipe all stored file content from disk (vault files + conflict blobs)
     ctx.storage.deleteAllFiles();
+    ctx.conflicts.deleteAllFiles();
 
     res.json({ ok: true });
   });
@@ -830,7 +833,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     const files: Array<{ path: string; mtime: number; encrypted: boolean; content: string }> = [];
     for (const filePath of pathList) {
       try {
-        const mtime = ctx.storage.latestVersionMtime(filePath);
+        const mtime = versionMtimeFor(ctx, filePath);
         if (mtime === null) continue; // no stored version — skip
         const buf = ctx.storage.readVersion(filePath, mtime);
         if (!buf) continue;
@@ -947,7 +950,10 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
       pushActivity(ctx, { kind: "rename", detail: `${fromPrefix} => ${toPrefix} (${count} files)` });
       res.json({ ok: true, files: count, storageEntries: moved.length });
     } catch (e: unknown) {
-      res.status(500).json({ error: String(e) });
+      // Storage refuses unsafe moves (into own subtree, onto existing files)
+      // BEFORE touching disk or DB — a client error, not a server fault.
+      const msg = errMsg(e);
+      res.status(msg.startsWith("Cannot ") ? 400 : 500).json({ error: msg });
     }
   });
 
@@ -970,7 +976,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     const id = Number(req.query.id);
     const c = Number.isFinite(id) ? ctx.db.getConflict(id) : undefined;
     if (!c) { res.status(404).json({ error: "Unknown conflict" }); return; }
-    const buf = ctx.storage.readLatest(`_conflicts/${c.id}`);
+    const buf = ctx.conflicts.readLatest(String(c.id));
     res.json({ id: c.id, path: c.path, mtime: c.mtime, content: buf ? buf.toString("base64") : "", encrypted: buf ? isE2eeEncrypted(buf) : false });
   });
 
@@ -990,7 +996,7 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     const id = Number((req.body as { id?: unknown } | null)?.id);
     const c = Number.isFinite(id) ? ctx.db.getConflict(id) : undefined;
     if (!c) { res.status(404).json({ error: "Unknown conflict" }); return; }
-    const buf = ctx.storage.readLatest(`_conflicts/${c.id}`);
+    const buf = ctx.conflicts.readLatest(String(c.id));
     if (!buf) { res.status(404).json({ error: "Conflict content missing" }); return; }
     const entry: FileEntry = { path: c.path, sha1: c.sha1, mtime: Date.now(), action: "active", fileType: "file" };
     ctx.storage.write(c.path, entry.mtime, buf);

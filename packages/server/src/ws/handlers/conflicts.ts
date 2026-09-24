@@ -46,7 +46,7 @@ export function handleConflictContent(
     peer.send({ type: "conflict_content_response", id: msg.id, path: "", content: "", encrypted: false, found: false });
     return;
   }
-  const buf = ctx.storage.readLatest(`_conflicts/${c.id}`);
+  const buf = ctx.conflicts.readLatest(String(c.id));
   peer.send({
     type: "conflict_content_response",
     id: c.id,
@@ -81,7 +81,7 @@ export function handleConflictRestore(
     peer.send({ type: "conflict_action_response", id: msg.id, action: "restore", ok: false, error: "Unknown conflict" });
     return;
   }
-  const buf = ctx.storage.readLatest(`_conflicts/${c.id}`);
+  const buf = ctx.conflicts.readLatest(String(c.id));
   if (!buf) {
     peer.send({ type: "conflict_action_response", id: msg.id, action: "restore", ok: false, error: "Conflict content missing" });
     return;

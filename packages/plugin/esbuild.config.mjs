@@ -87,7 +87,25 @@ const postBuildPlugin = {
       // `build` MUST be a string: the plugin sends it as a string in
       // version_check and the server compares with !== — a numeric value here
       // would make every connect look like an update (reload loop).
-      fs.writeFileSync(BUILD_DIR + "build_info.json", JSON.stringify({ version: VERSION, build: String(BUILD), ...(sig ? { sig } : {}) }));
+      // Sign the WHOLE update (main.js + manifest.json + styles.css), after
+      // manifest.json has its final version. The plugin only writes the
+      // non-main.js files when this signature verifies, so a rogue server can't
+      // slip an unsigned sidecar (e.g. a forged data.json) into the plugin dir.
+      let filesSig;
+      if (signKey && sig) {
+        try {
+          const { signPluginFiles, UPDATE_FILE_NAMES } = await import("../protocol/dist/index.js");
+          const files = UPDATE_FILE_NAMES
+            .filter((name) => fs.existsSync(BUILD_DIR + name))
+            .map((name) => ({ name, bytes: new Uint8Array(fs.readFileSync(BUILD_DIR + name)) }));
+          filesSig = signPluginFiles(files, signKey);
+          console.log("[sign] update file set signed (" + files.map((f) => f.name).join(", ") + ")");
+        } catch (e) {
+          console.error("[sign] FAILED to sign the update file set (only main.js will auto-update):", e);
+        }
+      }
+
+      fs.writeFileSync(BUILD_DIR + "build_info.json", JSON.stringify({ version: VERSION, build: String(BUILD), ...(sig ? { sig } : {}), ...(filesSig ? { filesSig } : {}) }));
 
       // Copy to server/client/ so the server can distribute the plugin for
       // auto-update. build_info.json MUST be in this list — without it the

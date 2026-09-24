@@ -347,7 +347,7 @@ describe("conflict resolution (baseSha1)", () => {
     assert.equal(cs.length, 1);
     assert.equal(cs[0]!.path, PATH);
     assert.equal(cs[0]!.sha1, V3.sha1);
-    assert.equal(srv.ctx.storage.readLatest(`_conflicts/${cs[0]!.id}`)?.toString("base64"), V3.b64);
+    assert.equal(srv.ctx.conflicts.readLatest(String(cs[0]!.id))?.toString("base64"), V3.b64);
 
     client.close();
     await srv.stop();
@@ -433,7 +433,7 @@ describe("conflict copies for binary paths", () => {
     assert.equal(cs.length, 1);
     assert.equal(cs[0]!.path, PATH);
     assert.equal(cs[0]!.sha1, V3.sha1);
-    assert.equal(srv.ctx.storage.readLatest(`_conflicts/${cs[0]!.id}`)?.toString("base64"), V3.b64);
+    assert.equal(srv.ctx.conflicts.readLatest(String(cs[0]!.id))?.toString("base64"), V3.b64);
 
     client.close();
     await srv.stop();

@@ -14,9 +14,9 @@ describe("conflict management over WebSocket", () => {
 
     // Seed two conflict records, each with stored losing content.
     const idA = srv.ctx.db.recordConflict("notes/a.md", sha1("losing-A"), 1000, "dev-1");
-    srv.ctx.storage.write(`_conflicts/${idA}`, 1000, Buffer.from("losing-A"));
+    srv.ctx.conflicts.write(String(idA), 1000, Buffer.from("losing-A"));
     const idB = srv.ctx.db.recordConflict("notes/b.md", sha1("losing-B"), 2000, null);
-    srv.ctx.storage.write(`_conflicts/${idB}`, 2000, Buffer.from("losing-B"));
+    srv.ctx.conflicts.write(String(idB), 2000, Buffer.from("losing-B"));
 
     // conflict_list → both surface
     client.send({ type: "conflict_list" });

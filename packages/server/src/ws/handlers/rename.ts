@@ -4,6 +4,7 @@ import { pushActivity } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 import { broadcastToPeers } from "./sync.js";
 import { isHiddenOrConfigPath, storeConflict } from "./fileData.js";
+import { readHead } from "../../head.js";
 
 /**
  * Client renamed/moved a path as one atomic operation (`file_rename`), instead
@@ -50,7 +51,7 @@ export function handleRename(ctx: SyncContext, peer: SyncPeer, msg: FileRenameMs
   if (concurrent) {
     // Preserve the concurrent edit (the current `from` head) as a conflict
     // record against `to`, instead of a "(Conflicted Copy ...)" file.
-    storeConflict(ctx, peer, to, serverFrom.sha1, serverFrom.mtime, ctx.storage.readLatest(from));
+    storeConflict(ctx, peer, to, serverFrom.sha1, serverFrom.mtime, readHead(ctx, from, serverFrom.sha1));
     completeRename(ctx, from, to);
     broadcastDelete(ctx, peer, from);
     requestUpload(peer, to); // initiator uploads its `to` content (the renamed version)
