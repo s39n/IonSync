@@ -245,7 +245,46 @@ export interface SyncCursorMsg {
   type: "sync_cursor";
   /** Highest server seq the client has already applied. 0 = full bootstrap. */
   since: number;
+  /**
+   * Paths the user is looking at right now (e.g. the open note), at most
+   * `SYNC_PRIORITY_MAX`. If one changed since `since`, the server pushes it
+   * first as an out-of-band push, ahead of the ordered batch, so the visible
+   * note is current within one round trip. Purely a hint: servers that don't
+   * know it ignore it, and the ordered stream still delivers the file.
+   */
+  priority?: string[];
 }
+
+/** Most `priority` paths a server honours per sync_cursor. */
+export const SYNC_PRIORITY_MAX = 3;
+
+/**
+ * Client → server liveness probe (servers advertising `APP_PING_CAP`). Browsers
+ * can't send WebSocket protocol pings from script, so a returning mobile app
+ * uses this to check whether a socket that survived backgrounding is still
+ * alive, instead of paying a full reconnect.
+ */
+export interface PingMsg {
+  type: "ping";
+  n: number;
+}
+
+/** Server → client reply to `ping`, echoing `n`. */
+export interface PongMsg {
+  type: "pong";
+  n: number;
+}
+
+/** Server understands `ping`/`pong`. */
+export const APP_PING_CAP = "app_ping";
+
+/**
+ * Server processes an `auth` and a `version_check` sent back to back, without
+ * the client waiting for `auth_ok` in between. A client that saw this cap on an
+ * earlier connection to the same server pipelines them, saving a round trip on
+ * every reconnect.
+ */
+export const PIPELINED_AUTH_CAP = "pipelined_auth";
 
 /**
  * Completeness audit (integrity safety net). After a cursor bootstrap a client
@@ -287,7 +326,8 @@ export type ClientMsg =
   | ConflictRestoreMsg
   | FileRenameMsg
   | VerifyRequestMsg
-  | VerifyMissingMsg;
+  | VerifyMissingMsg
+  | PingMsg;
 
 // ─── Server → Client messages ──────────────────────────────────────────────
 
@@ -502,7 +542,8 @@ export type ServerMsg =
   | VersionCheckResponseMsg
   | SyncDoneMsg
   | RequestSyncMsg
-  | VerifyManifestMsg;
+  | VerifyManifestMsg
+  | PongMsg;
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 

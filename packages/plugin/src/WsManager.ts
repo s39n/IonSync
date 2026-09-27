@@ -3,7 +3,7 @@ import type {
   ClientMsg,
   VersionCheckResponseMsg,
 } from "@ionsync/protocol";
-import { encodeFrame, decodeFrame, BINARY_FRAMES_CAP, BACKGROUND_SYNC_PATH } from "@ionsync/protocol";
+import { encodeFrame, decodeFrame, BINARY_FRAMES_CAP, BACKGROUND_SYNC_PATH, APP_PING_CAP, PIPELINED_AUTH_CAP } from "@ionsync/protocol";
 import type { FileDataUploadMsg } from "@ionsync/protocol";
 import { Platform } from "obsidian";
 import type { IonSyncPlugin, PluginSettings } from "./main.js";
@@ -21,6 +21,17 @@ export interface RecentUpload {
 /** Sends of the same path this close together are one burst of edits. */
 const BURST_MS = 10_000;
 
+/**
+ * Mobile: how long the socket is kept after the app is backgrounded (XSync owns
+ * the timer). A quick trip to another app and back then needs no reconnect.
+ * Matches the server's 30s ping sweep, past which a suspended socket is likely
+ * dead anyway.
+ */
+export const HIDE_GRACE_MS = 30_000;
+
+/** How long a returning app waits for a `pong` before reconnecting instead. */
+const RESUME_PROBE_MS = 3_000;
+
 export interface UpdateInfo {
   files: { name: string; content: string }[];
   /** base64 ed25519 signature of main.js; verified before applying (fail closed). */
@@ -32,6 +43,8 @@ export interface UpdateInfo {
 export type WsManagerEvent =
   | { type: "connected" }
   | { type: "disconnected" }
+  /** Mobile: the app came back and the socket kept from before is still alive. */
+  | { type: "resumed" }
   | { type: "update_available"; update: UpdateInfo }
   | { type: "incompatible" }
   | { type: "message"; msg: ServerMsg };
@@ -70,6 +83,19 @@ export class WsManager {
    *  Kept across a disconnect (the beacon fires as the socket closes); rotated
    *  by the server on every connect. Null against servers that predate it. */
   bgToken: string | null = null;
+  /** Mobile hide grace period: refuse state-changing sends (see send()). Set by
+   *  XSync once the hide flush is done; cleared on return and on any socket
+   *  change. */
+  holdOutbound = false;
+  /** Something was refused by the hold since the last takeRefusedDuringHold(). */
+  private refusedDuringHold = false;
+
+  /** Whether any send was refused during the hold; resets the flag. */
+  takeRefusedDuringHold(): boolean {
+    const r = this.refusedDuringHold;
+    this.refusedDuringHold = false;
+    return r;
+  }
 
   /** Active capture buffers: full-file uploads passing through send() are also
    *  recorded into each, so they can be re-delivered by beacon (see XSync).
@@ -91,6 +117,17 @@ export class WsManager {
   private readonly MAX_RECONNECT_DELAY = 30_000;
   private reconnectTimer: number | null = null;
   private mobileVisibilityListener?: () => void;
+  /** When the app was last backgrounded (mobile), or 0 while visible. */
+  private hiddenAt = 0;
+  /** Server caps seen on the last successful handshake, per endpoint URL. Kept
+   *  across disconnects (unlike serverCaps) so a reconnect can pipeline. */
+  private knownCaps = new Map<string, string[]>();
+  /** version_check already sent on the current socket (pipelined with auth). */
+  private versionCheckSent = false;
+  /** version_check_response received on the current socket. */
+  private gotVersionResponse = false;
+  private pingSeq = 0;
+  private pongWaiters = new Map<number, (alive: boolean) => void>();
 
   private get settings(): PluginSettings { return this.plugin.settings; }
 
@@ -115,12 +152,83 @@ export class WsManager {
     // reconnect (and two notifications) every time the user switches windows.
     // The server's ping/pong keepalive and the existing onclose handler already
     // manage genuine connection drops there.
+    //
+    // A socket may now survive a short trip to another app (XSync keeps it for
+    // HIDE_GRACE_MS). On return we don't trust it blindly — a suspended app's
+    // socket can be dead without having noticed — but probe it: alive → carry on
+    // with no reconnect at all; dead, or away longer than the grace → reconnect
+    // immediately, exactly as before.
     if (Platform.isMobile && typeof document !== "undefined") {
       this.mobileVisibilityListener = () => {
-        if (!document.hidden) this.scheduleReconnect(0);
+        if (document.hidden) { this.hiddenAt = Date.now(); return; }
+        const awayMs = this.hiddenAt > 0 ? Date.now() - this.hiddenAt : 0;
+        this.hiddenAt = 0;
+        const open = this.isConnected && this.ws?.readyState === WebSocket.OPEN;
+        if (open && awayMs <= HIDE_GRACE_MS) { void this._checkResumedSocket(); return; }
+        if (open) {
+          // Away too long: the socket is most likely dead; don't wait on a probe.
+          this.log(`Away ${Math.round(awayMs / 1000)}s — reconnecting fresh`);
+          this.disconnect();
+        }
+        this.reconnectDelay = 1_000;
+        this.scheduleReconnect(0);
       };
       document.addEventListener("visibilitychange", this.mobileVisibilityListener);
     }
+  }
+
+  /**
+   * Liveness probe for a socket that outlived a background period. Resolves
+   * true on a `pong` within `timeoutMs`, false on timeout or a closed socket.
+   * Against a server without APP_PING_CAP it can't probe and trusts an open
+   * socket (such a server never gets a grace period anyway — see XSync).
+   */
+  probe(timeoutMs: number): Promise<boolean> {
+    if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return Promise.resolve(false);
+    if (!this.serverCaps.includes(APP_PING_CAP)) return Promise.resolve(true);
+    const n = ++this.pingSeq;
+    return new Promise((resolve) => {
+      const timer = window.setTimeout(() => { this.pongWaiters.delete(n); resolve(false); }, timeoutMs);
+      this.pongWaiters.set(n, (alive) => { window.clearTimeout(timer); resolve(alive); });
+      if (!this.send({ type: "ping", n })) {
+        this.pongWaiters.delete(n);
+        window.clearTimeout(timer);
+        resolve(false);
+      }
+    });
+  }
+
+  private async _checkResumedSocket(): Promise<void> {
+    const probed = this.ws;
+    const alive = await this.probe(RESUME_PROBE_MS);
+    // The socket changed while we waited (it closed and a reconnect already
+    // replaced it): never tear down the new one. If it closed and nothing has
+    // replaced it yet, reconnect now rather than after the backoff.
+    if (this.ws !== probed) {
+      if (!this.ws) this.scheduleReconnect(0);
+      return;
+    }
+    // Hidden again while the probe was out: that hide re-armed the hold and
+    // the grace timer. Keep holding; the next return probes afresh.
+    if (typeof document !== "undefined" && document.hidden) return;
+    if (alive) {
+      this.log("Resumed on the existing socket");
+      // Only now is it safe to write through this socket again.
+      this.holdOutbound = false;
+      this.emit({ type: "resumed" });
+      return;
+    }
+    this.log("Socket didn't answer after resume — reconnecting");
+    this.disconnect();
+    this.reconnectDelay = 1_000;
+    this._openSocket();
+  }
+
+  /** Fail any outstanding probes (the socket they were sent on is gone). */
+  private _failProbes(): void {
+    const waiters = [...this.pongWaiters.values()];
+    this.pongWaiters.clear();
+    for (const w of waiters) w(false);
   }
 
   private log(...args: unknown[]): void {
@@ -172,6 +280,17 @@ export class WsManager {
    * callers that record "this is now synced" must not do so on false.
    */
   send(msg: ClientMsg): boolean {
+    // Hide grace period: the socket is kept open but nothing that changes
+    // server state may leave through it — the hide flush already recorded
+    // everything it sent, and a send made now could sit in the socket buffer
+    // when the OS suspends the app, then die with it, unrecorded. Refusing it
+    // makes the caller treat it like a closed socket (queue it / record it as
+    // unsent for the reconnect replay). Reads (sync_cursor, history, …) and the
+    // liveness ping still go through.
+    if (this.holdOutbound && WsManager._changesServerState(msg)) {
+      this.refusedDuringHold = true;
+      return false;
+    }
     const isUpload = msg.type === "file_data" && (msg.mode === "apply" || msg.mode === "patch");
     // Captured before the readyState check: a socket that just dropped is
     // exactly the case the beacon exists to rescue. Only full, first-time
@@ -206,6 +325,12 @@ export class WsManager {
       }
     }
     return true;
+  }
+
+  /** Uploads, deletes, conflict records, renames: messages that write server state. */
+  private static _changesServerState(msg: ClientMsg): boolean {
+    if (msg.type === "file_data") return msg.mode !== "send";
+    return msg.type === "file_rename" || msg.type === "file_event";
   }
 
   /** Start recording full-file uploads sent through send(). Returns this
@@ -259,6 +384,8 @@ export class WsManager {
   disconnect(): void {
     this.log("Disconnecting");
     this._cancelReconnect();
+    this._failProbes();
+    this.holdOutbound = false;
     if (this.ws) {
       this.ws.onclose = null;
       this.ws.close();
@@ -293,6 +420,10 @@ export class WsManager {
     }
     const url = this._endpoint("ws");
     this.log("Opening WebSocket to:", url);
+    this.versionCheckSent = false;
+    this.gotVersionResponse = false;
+    this.holdOutbound = false; // a fresh socket starts clean
+    this.refusedDuringHold = false;
 
     try {
       this.ws = new WebSocket(url);
@@ -328,6 +459,12 @@ export class WsManager {
     this.ws.onclose = () => {
       this.log("WebSocket closed");
       this.ws = null;
+      this._failProbes();
+      this.holdOutbound = false;
+      // A pipelined handshake that died before the version check came back:
+      // don't keep pipelining on the strength of an old answer — the next
+      // connect goes sequential and re-learns the caps.
+      if (this.versionCheckSent && !this.gotVersionResponse) this.knownCaps.delete(url);
       if (this.isConnected) {
         this.isConnected = false;
         this.serverCaps = [];
@@ -349,11 +486,16 @@ export class WsManager {
         if (msg.e2eeSalt) void this.plugin.applyE2eeSalt(msg.e2eeSalt);
         // Background-flush token (servers that predate it omit the field).
         this.bgToken = msg.bgToken ?? null;
-        // Advertise binary_frames so the server can push file content as binary
-        // frames to us. The server gates on this per-peer; an old server ignores
-        // the field and we fall back to base64 (serverCaps stays empty).
-        this.send({ type: "version_check", version: VERSION, build: BUILD_STR, caps: [BINARY_FRAMES_CAP] });
+        // Already sent right behind `auth` when this server is known to handle
+        // that (see _handleChallenge); otherwise send it now.
+        if (!this.versionCheckSent) this._sendVersionCheck();
         break;
+      case "pong": {
+        const waiter = this.pongWaiters.get(msg.n);
+        this.pongWaiters.delete(msg.n);
+        waiter?.(true);
+        break;
+      }
       case "auth_error":
         console.error("[WsManager] Authentication failed");
         this.disconnect();
@@ -374,6 +516,20 @@ export class WsManager {
       ...(this.settings.deviceName ? { deviceName: this.settings.deviceName } : {}),
       token,
     });
+    // Pipeline the version check behind auth when this server told us (on an
+    // earlier connection this session) that it handles that — one round trip
+    // fewer on every reconnect. First contact stays strictly sequential.
+    if ((this.knownCaps.get(this._endpoint("ws")) ?? []).includes(PIPELINED_AUTH_CAP)) {
+      this._sendVersionCheck();
+    }
+  }
+
+  private _sendVersionCheck(): void {
+    this.versionCheckSent = true;
+    // Advertise binary_frames so the server can push file content as binary
+    // frames to us. The server gates on this per-peer; an old server ignores
+    // the field and we fall back to base64 (serverCaps stays empty).
+    this.send({ type: "version_check", version: VERSION, build: BUILD_STR, caps: [BINARY_FRAMES_CAP] });
   }
 
   private async _computeToken(nonce: string, password: string): Promise<string> {
@@ -386,6 +542,8 @@ export class WsManager {
   }
 
   private _handleVersionCheck(msg: VersionCheckResponseMsg): void {
+    this.gotVersionResponse = true;
+    this.knownCaps.set(this._endpoint("ws"), msg.caps ?? []);
     if (!msg.needsUpdate) {
       this.serverCaps = msg.caps ?? [];
       this.isConnected = true;

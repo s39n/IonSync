@@ -1,7 +1,7 @@
 import type { FileEntry, ServerMsg, FileHistoryResponseMsg, FileDataResponseMsg, ConflictListResponseMsg, ConflictContentResponseMsg, ConflictActionResponseMsg, FileDataUploadMsg, BackgroundSyncReq } from "@ionsync/protocol";
-import { collectFolderChildren, cascadeDeleteExceedsSafetyCap, computeOfflineDeletes, verifyPluginBundle, verifyPluginFiles, UPDATE_FILE_NAMES, BG_BEACON_MAX_BYTES, BG_BEACON_MAX_FILES, BG_RESEND_CAP } from "@ionsync/protocol";
+import { collectFolderChildren, cascadeDeleteExceedsSafetyCap, computeOfflineDeletes, verifyPluginBundle, verifyPluginFiles, UPDATE_FILE_NAMES, BG_BEACON_MAX_BYTES, BG_BEACON_MAX_FILES, BG_RESEND_CAP, APP_PING_CAP } from "@ionsync/protocol";
 import { Platform, TFile, type TAbstractFile } from "obsidian";
-import { WsManager, type UpdateInfo } from "./WsManager.js";
+import { WsManager, HIDE_GRACE_MS, type UpdateInfo } from "./WsManager.js";
 import { Storage } from "./Storage.js";
 import { XNotify, NotifyType, STATUS_WARN, STATUS_OK, STATUS_ERROR, STATUS_SYNC } from "./XNotify.js";
 import { XTimeouts } from "./XTimeouts.js";
@@ -11,7 +11,7 @@ import { PLUGIN_UPDATE_PUBKEY } from "./updateKey.js";
 import { appInternals, vaultOnRaw, vaultOnFileEvent } from "./obsidian-internals.js";
 import type { IonSyncPlugin } from "./main.js";
 import { diff_match_patch } from "diff-match-patch";
-import { deriveKey, encryptToBytes, decryptFromBase64, isEncryptedBase64, getWriteVersion } from "./Crypto.js";
+import { deriveKey, encryptToBytes, decryptFromBytes, isEncryptedBytes, getWriteVersion } from "./Crypto.js";
 
 interface DeleteQueueEntry {
   metadata: Partial<FileEntry>;
@@ -68,6 +68,10 @@ export class XSync {
    *  (the server stitches patches only on the WS path). A counter, not a flag,
    *  so overlapping flushes (hide→show→hide) can't switch it off early. */
   private _forceFullDepth = 0;
+  /** Mobile: pending "disconnect after the hide grace period" timer. */
+  private _hideDisconnectTimer: number | null = null;
+  /** The background-confirm replay currently running, if any. */
+  private _replayInFlight: Promise<void> | null = null;
 
   private deleteQueue: Record<string, DeleteQueueEntry> = {};
   private isProcessingDeleteQueue = false;
@@ -217,6 +221,17 @@ export class XSync {
   private _e2eeKeyPassword = "";
   private _e2eeKeyVersion = 0;
 
+  /**
+   * Start the encryption key derivation in the background (PBKDF2 at 600k
+   * rounds is slow by design — on the order of a second on a phone), so it
+   * overlaps Obsidian's startup indexing and the connect instead of stalling
+   * the first encrypted file. The key stays in memory only, as before; a blob
+   * at another format version still derives its key on demand. Idempotent.
+   */
+  prewarmEncryptionKey(): void {
+    void this._getEncryptionKey().catch(() => undefined);
+  }
+
   private async _getEncryptionKey(): Promise<CryptoKey | null> {
     const { encryptionEnabled } = this.plugin.settings;
     const encryptionPassword = this.plugin.getEncryptionPassword();
@@ -261,6 +276,8 @@ export class XSync {
 
     this.ws.isEnabled = this.plugin.settings.syncEnabled;
     this.exclusionFilter = new ExclusionFilter(this.plugin.settings, this.plugin.app.vault.configDir);
+
+    this.prewarmEncryptionKey();
 
     await this.storage.init();
     this.deleteQueue = await this.storage.loadDeleteQueue();
@@ -335,7 +352,12 @@ export class XSync {
     //      other devices now, not whenever this phone is next opened.
     // Desktop keeps the plain flush: its socket stays up and drains normally.
     this.eventRefs["visibility-change"] = () => {
-      if (document.visibilityState !== "hidden") return;
+      if (document.visibilityState !== "hidden") {
+        // Back before the grace period ran out: keep the socket (WsManager
+        // probes it and reconnects if it died).
+        this._clearHideDisconnect();
+        return;
+      }
       const mobile = Platform.isMobile;
       if (mobile) {
         const now = Date.now();
@@ -366,7 +388,27 @@ export class XSync {
         // Only disconnect if we're still hidden. If the app came back while the
         // flush ran, the foreground reconnect is already under way, and
         // disconnecting here would leave the app sitting offline.
-        if (mobile && document.visibilityState === "hidden") this.ws.disconnect();
+        //
+        // Against a server that can answer a liveness probe, keep the socket for
+        // a grace period instead, so a quick trip to another app and back needs
+        // no reconnect at all. Everything pending was flushed above either way.
+        // (On iOS the timer is frozen while suspended; it then fires on return,
+        // when the app is visible again, so it disconnects nothing.)
+        if (mobile && document.visibilityState === "hidden") {
+          if (this.ws.isConnected && this.ws.serverCaps.includes(APP_PING_CAP)) {
+            this._clearHideDisconnect();
+            // The flush recorded everything it sent. From here until the app is
+            // back (and the socket proven alive) nothing may write through it:
+            // refused sends are queued/recorded exactly as with a closed socket.
+            this.ws.holdOutbound = true;
+            this._hideDisconnectTimer = window.setTimeout(() => {
+              this._hideDisconnectTimer = null;
+              if (document.visibilityState === "hidden") this.ws.disconnect();
+            }, HIDE_GRACE_MS);
+          } else {
+            this.ws.disconnect();
+          }
+        }
       })();
     };
     document.addEventListener("visibilitychange", this.eventRefs["visibility-change"] as EventListener);
@@ -385,6 +427,7 @@ export class XSync {
       switch (event.type) {
         case "connected":      void this._onConnected(); break;
         case "disconnected":   this._onDisconnected(); break;
+        case "resumed":        void this._onResumed(); break;
         case "message":        void this._queueMessage(event.msg); break;
         case "update_available": void this._onUpdateAvailable(event.update); break;
         case "incompatible":   this.xNotify.showNotification("#ff9800", "Incompatible plugin version"); break;
@@ -421,6 +464,7 @@ export class XSync {
       this._cursorCheckpointTimer = null;
     }
     this._inCursorSession = false;
+    this._clearHideDisconnect();
 
     if (this.eventRefs["visibility-change"]) {
       document.removeEventListener("visibilitychange", this.eventRefs["visibility-change"] as EventListener);
@@ -607,14 +651,14 @@ export class XSync {
     if (file.path.includes("node_modules/") || file.path.includes(".git/")) return;
     if (this.exclusionFilter?.isExcluded(file.path)) return;
 
-    // Binary-frame push: content arrived as raw bytes. Normalize to the base64
-    // string the rest of this method (E2EE detection, conflict-copy capture,
-    // storage.write) already expects. This still avoids the server-side base64
-    // encode and the +33% wire; pushing bytes deeper into storage.write is a
-    // possible future optimization.
-    if (contentBytes && contentBytes.length > 0) {
-      content = Utils.toBase64(contentBytes);
-    }
+    // The payload as raw bytes, whichever way it arrived: a binary-frame push
+    // carries them directly; a legacy JSON push carries base64, decoded once
+    // here. Everything below (decrypt, write) works on bytes — no base64
+    // round trips, which on a phone were a real CPU and memory cost for every
+    // downloaded photo or PDF (twice over with encryption on).
+    let payload: Uint8Array = contentBytes && contentBytes.length > 0
+      ? contentBytes
+      : (content ? Utils.fromBase64(content) : new Uint8Array(0));
 
     // When true, re-upload the file encrypted after writing so the server's
     // stored copy is upgraded from plaintext to ciphertext.
@@ -622,8 +666,8 @@ export class XSync {
 
     // ── E2EE decrypt ──────────────────────────────────────────────────────
     // If the incoming content carries our encryption magic, decrypt it before
-    // passing it to the write path (which expects a plain base64 payload).
-    if (file.action !== "deleted" && content && isEncryptedBase64(content)) {
+    // passing it to the write path.
+    if (file.action !== "deleted" && payload.length > 0 && isEncryptedBytes(payload)) {
       const key = await this._getEncryptionKey();
       if (!key) {
         // Encrypted content arrived but this device has no key configured. Rather
@@ -638,9 +682,7 @@ export class XSync {
       try {
         // `key` above only guards that E2EE is configured; decrypt derives the
         // version-correct key from the password (handles legacy v1 blobs too).
-        const plainBytes = await decryptFromBase64(content, this.plugin.getEncryptionPassword());
-        // Re-encode as plain base64 so the existing write path handles it normally.
-        content = Utils.toBase64(new Uint8Array(plainBytes));
+        payload = new Uint8Array(await decryptFromBytes(payload, this.plugin.getEncryptionPassword()));
       } catch (e) {
         // Wrong password (or a corrupted blob). Halt instead of writing garbage and
         // flooding one error per file — the whole vault would be undecryptable.
@@ -651,7 +693,7 @@ export class XSync {
         );
         return;
       }
-    } else if (file.action !== "deleted" && content) {
+    } else if (file.action !== "deleted" && payload.length > 0) {
       // Reverse guard: this device has E2EE enabled but the incoming content is
       // plaintext (no magic header). This typically means the server is pushing
       // an old pre-E2EE version (e.g. a deleted file stored before encryption was
@@ -662,7 +704,7 @@ export class XSync {
       if (key) {
         console.warn(`[IonSync] E2EE: received unencrypted file — writing and scheduling re-encrypt: ${file.path}`);
         shouldReencrypt = true;
-        // Fall through: content is already plain base64, the write path handles it normally.
+        // Fall through: the payload is already plaintext; the write path handles it.
       }
     }
 
@@ -739,7 +781,16 @@ export class XSync {
             } else {
               this._conflictMintsThisPass++;
               this.plugin.log(`[Conflict] ${file.path} modified offline. Backing up.`);
-              await this._createConflictedCopy(file.path, localSha ?? "", capturedContent ?? undefined, localStat.mtime);
+              const preserved = await this._createConflictedCopy(file.path, localSha ?? "", capturedContent ?? undefined, localStat.mtime);
+              if (!preserved) {
+                // The local edit couldn't be sent to the server as a conflict
+                // record, so overwriting it now would lose it. Leave the file
+                // alone and mark the apply failed: the cursor won't advance past
+                // it, and the next sync retries once the socket is usable.
+                this._conflictMintsThisPass--;
+                this._lastApplyFailed = true;
+                return;
+              }
             }
           }
 
@@ -802,8 +853,8 @@ export class XSync {
             // Register before writing so the vault event is caught by the guard
             // in _processLocalEvent and suppressed (prevents spurious re-uploads).
             this._applyingAdd(file.path);
-            if (Utils.isBinary(file.path)) await this.storage.writeBinary(file.path, content, file);
-            else await this.storage.write(file.path, content, file, /* withShadow */ false);
+            if (Utils.isBinary(file.path)) await this.storage.writeBinaryBytes(file.path, payload, file);
+            else await this.storage.writeBytes(file.path, payload, file, /* withShadow */ false);
             writeErr = null;
             break;
           } catch (e) {
@@ -865,28 +916,35 @@ export class XSync {
     localSha: string,
     capturedContent?: string | ArrayBuffer,
     mtime: number = Date.now()
-  ): Promise<void> {
+  ): Promise<boolean> {
     // Preserve the local (losing) side of a conflict by uploading it to the
     // server as a reviewable conflict record (mode:"conflict"). The incoming
     // (winning) version is written locally by the caller afterward. No
     // "(Conflicted Copy).md" is created in the vault — conflicts live on the
     // server and are reviewed from the dashboard Conflicts panel.
-    if (capturedContent == null) return;
+    //
+    // Returns false only when the record could NOT be handed to the socket
+    // (closed, or held during the mobile hide grace). The caller must then NOT
+    // overwrite the local file — that would destroy the only copy of the edit.
+    if (capturedContent == null) return true;
     const e2eeKey = await this._getEncryptionKey();
     let contentBytes: Uint8Array | undefined;
     if (Utils.isBinary(originalPath)) {
       const buf = capturedContent instanceof ArrayBuffer ? capturedContent : null;
-      if (!buf) return;
+      if (!buf) return true;
       contentBytes = e2eeKey ? await encryptToBytes(e2eeKey, buf) : new Uint8Array(buf);
     } else {
       const txt = typeof capturedContent === "string" ? capturedContent : null;
-      if (txt === null) return;
+      if (txt === null) return true;
       const bytes = new TextEncoder().encode(txt);
       contentBytes = e2eeKey ? await encryptToBytes(e2eeKey, bytes) : bytes;
     }
     const entry: FileEntry = { path: originalPath, sha1: localSha, mtime, action: "active", fileType: "file" };
-    this.ws.send({ type: "file_data", mode: "conflict", file: entry, content: "", ...(contentBytes ? { contentBytes } : {}) });
+    if (!this.ws.send({ type: "file_data", mode: "conflict", file: entry, content: "", ...(contentBytes ? { contentBytes } : {}) })) {
+      return false;
+    }
     this.addActivity("up", `conflict: ${originalPath}`);
+    return true;
   }
 
   // ── Sync Engine ───────────────────────────────────────────────────────────
@@ -945,7 +1003,26 @@ export class XSync {
       this._inCursorSession = true;
       this._liveMaxSeq = 0;
       this._appliedSeq.clear();
-      this.ws.send({ type: "sync_cursor", since: this._lastSyncedSeq });
+      // The open note first: if it changed elsewhere, the server pushes it ahead
+      // of the ordered catch-up, so what's on screen is current almost at once.
+      // Not if it has local edits still on their way up (pending debounce,
+      // queued offline edit, or modified since last synced): pulling the remote
+      // version first would force the conflict path on the note being edited.
+      // The ordered stream still delivers it in its turn, exactly as before.
+      const activeFile = this.plugin.app.workspace.getActiveFile();
+      const active = activeFile?.path;
+      const activeMeta = active ? this.storage.readMetadata(active) : null;
+      const activeDirty = !!active && (
+        this.xTimeouts.keys().includes(active) ||
+        active in this.unsentSessionEvents ||
+        !activeMeta || (activeFile?.stat.mtime ?? 0) > activeMeta.mtime
+      );
+      const priority = active && !activeDirty && !this.exclusionFilter?.isExcluded(active) ? [active] : [];
+      this.ws.send({
+        type: "sync_cursor",
+        since: this._lastSyncedSeq,
+        ...(priority.length > 0 ? { priority } : {}),
+      });
     } catch {
       this.isSyncing = false;
       this._inCursorSession = false;
@@ -1568,7 +1645,7 @@ export class XSync {
           if (txt !== null) newSha1 = (await Utils.getSHA(txt)) ?? "";
         }
         const mtime = stat?.mtime ?? Date.now();
-        this.ws.send({
+        const sent = this.ws.send({
           type: "file_rename",
           from: oldPath,
           to: file.path,
@@ -1577,10 +1654,14 @@ export class XSync {
           ...(oldMeta?.sha1 ? { baseSha1: oldMeta.sha1 } : {}),
           fileType: "file",
         });
-        // Reflect the move locally: drop the old path's metadata, record the new.
-        await this.storage.deleteMetadata(oldPath);
-        await this.storage.writeMetadata({ path: file.path, sha1: newSha1, mtime, ...(typeof stat?.size === "number" ? { size: stat.size } : {}), action: "active", fileType: "file" });
-        return;
+        if (sent) {
+          // Reflect the move locally: drop the old path's metadata, record the new.
+          await this.storage.deleteMetadata(oldPath);
+          await this.storage.writeMetadata({ path: file.path, sha1: newSha1, mtime, ...(typeof stat?.size === "number" ? { size: stat.size } : {}), action: "active", fileType: "file" });
+          return;
+        }
+        // Not sent (socket closed or held): fall through to delete + create,
+        // which both queue safely until the socket is usable again.
       }
 
       // Legacy fallback (server without "file_rename", or a folder move):
@@ -1715,7 +1796,15 @@ export class XSync {
     if (file.path.startsWith(this.plugin.app.vault.configDir + "/")) delay = 5;
 
     this.xTimeouts.set(file.path, delay * 1_000, async () => {
-      await this._sendFileEvent(file, forceChanged);
+      const result = await this._sendFileEvent(file, forceChanged);
+      // The socket dropped during the debounce (a network blip, a cellular
+      // handoff). Queue the edit exactly like one made while offline, so the
+      // next sync() sends it — otherwise it would sit unsynced until the note
+      // was edited again or the app restarted.
+      if (result === "offline") {
+        this.unsentSessionEvents[file.path] = { action, file };
+        this.xNotify.updatePendingCount(Object.keys(this.unsentSessionEvents).length);
+      }
     });
   }
 
@@ -1912,6 +2001,41 @@ export class XSync {
     void this.sync();
   }
 
+  private _clearHideDisconnect(): void {
+    if (this._hideDisconnectTimer !== null) {
+      window.clearTimeout(this._hideDisconnectTimer);
+      this._hideDisconnectTimer = null;
+    }
+  }
+
+  /**
+   * Mobile: the app came back and the socket it kept through the background
+   * period answered a liveness probe — no reconnect needed. Resolve what the
+   * hide flush recorded as unconfirmed (its bytes almost certainly landed over
+   * this same socket; the server drops those resends silently), then a cheap
+   * cursor catch-up in case anything was missed while suspended.
+   */
+  private async _onResumed(): Promise<void> {
+    if (!this.plugin.settings.autoSync) return;
+    const refused = this.ws.takeRefusedDuringHold();
+    if (this.isSyncing) {
+      // A session that was running when the app hid had sends refused by the
+      // hold, so it may be waiting on something that will never arrive.
+      // Restart it now (as the stall watchdog would, 45s later) instead of
+      // leaving "Syncing" on screen. Nothing is lost: refused sends were
+      // queued/recorded, and the cursor resumes from its last checkpoint.
+      if (!refused) return;
+      this.plugin.log("[IonSync] resumed with sends refused mid-sync — restarting the session");
+      this.isSyncing = false;
+      this._inCursorSession = false;
+      this.messageQueue = [];
+      this._lastSyncProgress = Date.now();
+    }
+    try { await this._replayBackgroundConfirm(); }
+    catch (e) { this.plugin.log(`[bg-sync] replay error: ${Utils.errorMessage(e)}`); }
+    finally { void this.sync(); }
+  }
+
   private async _onConnected(): Promise<void> {
     // Fresh connection: clear the E2EE breaker so a corrected password gets a
     // chance to work. If it's still wrong the next bad file re-trips it.
@@ -2076,7 +2200,17 @@ export class XSync {
    * replay would look like brand-new content. Entries are cleared only once
    * resolved; unreadable ones (e.g. evicted files) wait for a later connect.
    */
-  private async _replayBackgroundConfirm(): Promise<void> {
+  private _replayBackgroundConfirm(): Promise<void> {
+    // One replay at a time: a reconnect's replay and a resume's replay can
+    // otherwise overlap (hide → show within the grace while the first runs).
+    if (!this._replayInFlight) {
+      this._replayInFlight = this._replayBackgroundConfirmOnce()
+        .finally(() => { this._replayInFlight = null; });
+    }
+    return this._replayInFlight;
+  }
+
+  private async _replayBackgroundConfirmOnce(): Promise<void> {
     if (!this.ws.serverCaps.includes(BG_RESEND_CAP)) return;
     // A device that hasn't finished its first sync has nothing of its own to
     // replay; keep any stale entries until it has.
@@ -2231,7 +2365,9 @@ export class XSync {
 
         const entry = this.deleteQueue[path]!;
         const file: FileEntry = { path, sha1: entry.metadata.sha1 ?? "", mtime: entry.metadata.mtime ?? Date.now(), action: "deleted", fileType: "file" };
-        this.ws.send({ type: "file_data", mode: "apply", file, content: "" });
+        // Not handed to an open socket (closed, or held during the mobile hide
+        // grace): keep it queued for the next drain rather than dropping it.
+        if (!this.ws.send({ type: "file_data", mode: "apply", file, content: "" })) break;
         await this.storage.writeMetadata(file);
         delete this.deleteQueue[path];
       }

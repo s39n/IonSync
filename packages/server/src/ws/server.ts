@@ -236,6 +236,11 @@ export function attachWebSocketServer(
         case "verify_missing":
           handleVerifyMissing(ctx, peer, msg);
           break;
+        case "ping":
+          // App-level liveness probe (APP_PING_CAP): a returning mobile client
+          // checks its socket survived backgrounding before trusting it.
+          peer.send({ type: "pong", n: typeof msg.n === "number" ? msg.n : 0 });
+          break;
         default:
           break;
       }
@@ -283,6 +288,14 @@ function sanitizeMessagePaths(ctx: SyncContext, peer: SyncPeer, msg: ClientMsg):
     case "verify_missing":
       if (!Array.isArray(msg.paths)) return reject(undefined);
       msg.paths = msg.paths.filter((p) => isValidVaultPath(p));
+      return true;
+    case "sync_cursor":
+      // `priority` is a hint: keep only valid paths, never reject the sync.
+      if (msg.priority !== undefined) {
+        msg.priority = Array.isArray(msg.priority)
+          ? msg.priority.filter((p) => isValidVaultPath(p))
+          : [];
+      }
       return true;
     case "file_event":
       return isValidVaultPath(msg.file?.path) || reject(msg.file?.path);
