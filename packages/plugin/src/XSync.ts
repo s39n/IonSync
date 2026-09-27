@@ -2016,7 +2016,21 @@ export class XSync {
    * cursor catch-up in case anything was missed while suspended.
    */
   private async _onResumed(): Promise<void> {
-    if (!this.plugin.settings.autoSync || this.isSyncing) return;
+    if (!this.plugin.settings.autoSync) return;
+    const refused = this.ws.takeRefusedDuringHold();
+    if (this.isSyncing) {
+      // A session that was running when the app hid had sends refused by the
+      // hold, so it may be waiting on something that will never arrive.
+      // Restart it now (as the stall watchdog would, 45s later) instead of
+      // leaving "Syncing" on screen. Nothing is lost: refused sends were
+      // queued/recorded, and the cursor resumes from its last checkpoint.
+      if (!refused) return;
+      this.plugin.log("[IonSync] resumed with sends refused mid-sync — restarting the session");
+      this.isSyncing = false;
+      this._inCursorSession = false;
+      this.messageQueue = [];
+      this._lastSyncProgress = Date.now();
+    }
     try { await this._replayBackgroundConfirm(); }
     catch (e) { this.plugin.log(`[bg-sync] replay error: ${Utils.errorMessage(e)}`); }
     finally { void this.sync(); }

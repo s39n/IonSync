@@ -87,6 +87,15 @@ export class WsManager {
    *  XSync once the hide flush is done; cleared on return and on any socket
    *  change. */
   holdOutbound = false;
+  /** Something was refused by the hold since the last takeRefusedDuringHold(). */
+  private refusedDuringHold = false;
+
+  /** Whether any send was refused during the hold; resets the flag. */
+  takeRefusedDuringHold(): boolean {
+    const r = this.refusedDuringHold;
+    this.refusedDuringHold = false;
+    return r;
+  }
 
   /** Active capture buffers: full-file uploads passing through send() are also
    *  recorded into each, so they can be re-delivered by beacon (see XSync).
@@ -199,6 +208,9 @@ export class WsManager {
       if (!this.ws) this.scheduleReconnect(0);
       return;
     }
+    // Hidden again while the probe was out: that hide re-armed the hold and
+    // the grace timer. Keep holding; the next return probes afresh.
+    if (typeof document !== "undefined" && document.hidden) return;
     if (alive) {
       this.log("Resumed on the existing socket");
       // Only now is it safe to write through this socket again.
@@ -275,7 +287,10 @@ export class WsManager {
     // makes the caller treat it like a closed socket (queue it / record it as
     // unsent for the reconnect replay). Reads (sync_cursor, history, …) and the
     // liveness ping still go through.
-    if (this.holdOutbound && WsManager._changesServerState(msg)) return false;
+    if (this.holdOutbound && WsManager._changesServerState(msg)) {
+      this.refusedDuringHold = true;
+      return false;
+    }
     const isUpload = msg.type === "file_data" && (msg.mode === "apply" || msg.mode === "patch");
     // Captured before the readyState check: a socket that just dropped is
     // exactly the case the beacon exists to rescue. Only full, first-time
@@ -408,6 +423,7 @@ export class WsManager {
     this.versionCheckSent = false;
     this.gotVersionResponse = false;
     this.holdOutbound = false; // a fresh socket starts clean
+    this.refusedDuringHold = false;
 
     try {
       this.ws = new WebSocket(url);
