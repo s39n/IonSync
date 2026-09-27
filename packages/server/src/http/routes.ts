@@ -13,6 +13,8 @@ import { verifyTOTP, generateSecret, totpUri, createPendingToken, consumePending
 import { sealTotpSecret, openTotpSecret } from "../totpSecret.js";
 import { pushActivity } from "../context.js";
 import { versionMtimeFor } from "../head.js";
+import { handleBackgroundSync } from "../backgroundSync.js";
+import { BACKGROUND_SYNC_PATH } from "@ionsync/protocol";
 
 // Coerce an Express query/body value to a string, rejecting array/object forms
 // (a crafted ?path[]=a&path[]=b makes req.query.path an array — treat as absent).
@@ -33,12 +35,32 @@ function errMsg(e: unknown): string {
 
 export function buildPublicRouter(ctx: SyncContext): express.Router {
   const router = express.Router();
-  // Nothing is exposed over plain HTTP on the public port — all sync traffic
-  // goes through the authenticated WebSocket attached to the same server.
-  // (A previous /api/sync/background stub accepted unauthenticated 50 MB JSON
-  // bodies and silently discarded them; it has been removed. See XSync's
-  // visibility-change handler, which now flushes pending events over the WS.)
-  void ctx;
+  // All live sync traffic goes through the authenticated WebSocket attached to
+  // the same server. The one HTTP entry point is the mobile background flush:
+  // a sendBeacon POST fired as the app is backgrounded, authenticated by a
+  // device-bound token issued over the socket, and applied through the exact WS
+  // upload path. (It replaces an old /api/sync/background stub that accepted
+  // unauthenticated 50 MB bodies and silently discarded them.) See
+  // ../backgroundSync.ts for the full safety model.
+  //
+  // Beacons are sent as text/plain so they stay a CORS "simple request" (no
+  // preflight from the app's origin); we parse the JSON ourselves. No CORS
+  // headers are set, so the response is opaque to any other origin — and a
+  // cross-site POST can't forge the token. Bodies are capped well above the
+  // ~64 KB beacon quota.
+  router.post(
+    BACKGROUND_SYNC_PATH,
+    express.text({ type: () => true, limit: "256kb" }),
+    (req: Request, res: Response) => {
+      try {
+        const result = handleBackgroundSync(ctx, req.body);
+        res.status(result.status).end();
+      } catch (e: unknown) {
+        console.error(`[bg-sync] handler error: ${errMsg(e)}`);
+        res.status(500).end();
+      }
+    },
+  );
   return router;
 }
 

@@ -3,6 +3,7 @@ import type { AuthMsg } from "@ionsync/protocol";
 import type { SyncContext } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 import { expectedToken } from "../../crypto.js";
+import { issueBgToken } from "../../backgroundSync.js";
 
 /**
  * Constant-time comparison of two hex token strings. A plain `a !== b`
@@ -71,7 +72,14 @@ export function handleAuth(ctx: SyncContext, peer: SyncPeer, msg: AuthMsg): void
 
   // Hand the device the per-install E2EE salt (format v3+, SECURITY.md #7).
   // Generated once and stored, so it is stable for the vault's life; not secret.
-  peer.send({ type: "auth_ok", e2eeSalt: ctx.db.getOrCreateE2eeSalt() });
+  // Also issue its background-flush token (see backgroundSync.ts): the device
+  // beacons pending edits with it when the app is backgrounded. Rotated on every
+  // connect; older plugins ignore the field.
+  peer.send({
+    type: "auth_ok",
+    e2eeSalt: ctx.db.getOrCreateE2eeSalt(),
+    bgToken: issueBgToken(ctx, msg.deviceId),
+  });
 
   log(ctx, `[auth] device "${msg.deviceId}" authenticated (peer ${peer.id})`);
 }

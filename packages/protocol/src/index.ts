@@ -18,12 +18,31 @@ export interface VersionEntry {
   receivedAt: number; // server time
 }
 
-// ✅ Added for Phase 3: Mobile Background Sync (HTTP POST Payload)
+// ─── Mobile background flush (sendBeacon) ───────────────────────────────────
+
+/** HTTP path (public port) the plugin beacons pending edits to on background. */
+export const BACKGROUND_SYNC_PATH = "/api/background-sync";
+
+/**
+ * Largest beacon body the plugin will attempt. Browsers cap keepalive/beacon
+ * payloads at 64 KiB in flight; staying under it leaves room for headers. Larger
+ * flushes skip the beacon and rely on the WS flush + confirm-on-reconnect.
+ */
+export const BG_BEACON_MAX_BYTES = 60_000;
+
+/**
+ * Body of POST {@link BACKGROUND_SYNC_PATH}, sent as text/plain JSON. Each entry
+ * is exactly the upload the plugin would have sent over the WebSocket (full
+ * content only — never a delta patch, never a delete). `token` is the device's
+ * `bgToken` from `auth_ok`; the server derives the device from it.
+ */
 export interface BackgroundSyncReq {
-  deviceId: string;
+  v: 1;
+  token: string;
   files: {
     file: FileEntry;
-    content: string; // Base64
+    content: string; // Base64 (ciphertext when E2EE is on)
+    baseSha1?: string;
   }[];
 }
 
@@ -263,6 +282,12 @@ export interface AuthOkMsg {
    * global salt. See SECURITY.md #7.
    */
   e2eeSalt?: string;
+  /**
+   * Device-bound token for the mobile background flush (POST
+   * BACKGROUND_SYNC_PATH). Rotated on every connect; absent from older servers,
+   * in which case the plugin skips the beacon.
+   */
+  bgToken?: string;
 }
 
 export interface AuthErrorMsg {
