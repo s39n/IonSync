@@ -16,6 +16,21 @@ import type { PluginSettings } from "./main.js";
  */
 const USE_INDEXEDDB = true;
 
+/** Parallel file-system calls during the hidden/config scans. */
+const SCAN_CONCURRENCY = 8;
+
+/** Run `fn` over `items` with at most `limit` in flight at once. */
+async function runPool<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const item = items[next++]!;
+      await fn(item);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
 /**
  * Manages local file metadata, vault I/O, Delta-Sync Shadow Copies,
  * and lightning-fast boot tree calculations.
@@ -464,13 +479,16 @@ export class Storage {
    * re-encrypt effectiveMtime logic as computeTree()'s main loop.
    */
   private async _addFilesToTree(paths: string[], exclusionFilter: ExclusionFilter): Promise<void> {
-    for (const path of paths) {
-      if (this.aborted) break;
-      if (exclusionFilter.isExcluded(path)) continue;
+    // Bounded parallelism: each stat is a native round trip on mobile, and this
+    // walks every file under .obsidian/plugins, themes and snippets. Entries are
+    // independent (keyed by path), so order doesn't matter.
+    await runPool(paths, SCAN_CONCURRENCY, async (path) => {
+      if (this.aborted) return;
+      if (exclusionFilter.isExcluded(path)) return;
 
       try {
         const stat = await this.app.vault.adapter.stat(path);
-        if (!stat || stat.type !== "file") continue;
+        if (!stat || stat.type !== "file") return;
 
         const mtime = stat.mtime;
         const size = stat.size;
@@ -478,7 +496,7 @@ export class Storage {
 
         if (stored && stored.mtime === mtime && stored.size === size && stored.sha1) {
           this.tree[path] = stored;
-          continue;
+          return;
         }
 
         let sha1: string | null = "";
@@ -499,7 +517,7 @@ export class Storage {
       } catch {
         // File doesn't exist or can't be read — skip silently
       }
-    }
+    });
   }
 
   /** Recursively lists all files under `dir` and appends their vault-relative paths to `out`. */
@@ -507,7 +525,9 @@ export class Storage {
     try {
       const listing = await this.app.vault.adapter.list(dir);
       for (const f of listing.files) out.push(f);
-      for (const sub of listing.folders) await this._enumerateConfigDir(sub, out);
+      // Subfolders in parallel (bounded): on mobile every list() is a slow
+      // round trip into the native layer, and .obsidian/plugins has dozens.
+      await runPool(listing.folders, SCAN_CONCURRENCY, (sub) => this._enumerateConfigDir(sub, out));
     } catch { /* directory doesn't exist or is unreadable — skip silently */ }
   }
 
@@ -535,9 +555,14 @@ export class Storage {
   async readBinary(path: string): Promise<ArrayBuffer | null> { return this.fsVault.readBinary(path); }
 
   async write(path: string, content: string, entry: FileEntry, withShadow = true): Promise<void> {
+    return this.writeBytes(path, Utils.fromBase64(content), entry, withShadow);
+  }
+
+  /** Text write from raw UTF-8 bytes (the download path — no base64 pass). */
+  async writeBytes(path: string, bytes: Uint8Array, entry: FileEntry, withShadow = true): Promise<void> {
     await this.ensureParentDir(path); // ✅ Call the guard before writing
 
-    const text = new TextDecoder("utf-8").decode(Utils.fromBase64(content));
+    const text = new TextDecoder("utf-8").decode(bytes);
     await this.fsVault.write(path, text, entry.mtime);
 
     // Stat the file after writing to capture the mtime the OS actually assigned.
@@ -556,15 +581,19 @@ export class Storage {
   }
 
   async writeBinary(path: string, content: string, entry: FileEntry): Promise<void> {
+    return this.writeBinaryBytes(path, Utils.fromBase64(content), entry);
+  }
+
+  /** Binary write from raw bytes (the download path — no base64 pass). `bytes`
+   *  may be a view into a larger buffer (e.g. a whole WebSocket frame), so only
+   *  its own range is written. */
+  async writeBinaryBytes(path: string, bytes: Uint8Array, entry: FileEntry): Promise<void> {
     await this.ensureParentDir(path);
 
-    const binaryString = atob(content);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-
-    await this.fsVault.writeBinary(path, bytes.buffer, entry.mtime);
+    const exact = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+      ? bytes.buffer as ArrayBuffer
+      : bytes.slice().buffer;
+    await this.fsVault.writeBinary(path, exact, entry.mtime);
 
     // Same mtime fix as write() above — store the OS-assigned mtime, not the
     // server's, so the fast-path check in _sendFileEvent stays stable.

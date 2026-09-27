@@ -210,6 +210,9 @@ export class IonSyncPlugin extends Plugin {
     if (identitySet) await this.saveSettings();
 
     this.xSync = new XSync(this);
+    // Derive the E2EE key now, while Obsidian is still indexing, so it's ready
+    // by the time sync starts (see prewarmEncryptionKey).
+    if (this.settings.syncEnabled) this.xSync.prewarmEncryptionKey();
 
     const statusBarItem = this.addStatusBarItem();
     this.xSync.xNotify.makeStatusBarItem(statusBarItem);

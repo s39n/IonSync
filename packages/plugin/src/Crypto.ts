@@ -294,7 +294,22 @@ export async function decryptFromBase64(
   const binary = atob(content);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return decryptFromBytes(bytes, password);
+}
 
+/** True when raw bytes carry an E2EE-encrypted blob (our magic header). */
+export function isEncryptedBytes(bytes: Uint8Array): boolean {
+  return readVersion(bytes) !== null;
+}
+
+/**
+ * Decrypts a raw blob (MAGIC + IV + ciphertext) — the binary-frame download
+ * path, with no base64 round trip. `bytes` may be a view into a larger buffer.
+ */
+export async function decryptFromBytes(
+  bytes: Uint8Array,
+  password: string
+): Promise<ArrayBuffer> {
   const version = readVersion(bytes);
   if (version === null) {
     throw new Error("IonSync E2EE: content is not an encrypted blob");

@@ -1,7 +1,9 @@
 import type { SyncCursorMsg } from "@ionsync/protocol";
+import { SYNC_PRIORITY_MAX } from "@ionsync/protocol";
 import type { SyncContext } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 import { drainPushQueue } from "./sync.js";
+import { headSize, readHead } from "../../head.js";
 
 /**
  * A batch is capped by BOTH a file count and a total content-byte budget, so
@@ -70,6 +72,13 @@ export function handleSyncCursor(ctx: SyncContext, peer: SyncPeer, msg: SyncCurs
   // live vault events and since>0 deltas — the audit's safe-by-default stance (S4/S5).
   const includeDeletes = since > 0;
 
+  // The note(s) the user is looking at go first: if one changed since `since`,
+  // push it now as an out-of-band (live-style, non-session) push, ahead of the
+  // ordered batch. The client applies it like any live edit and folds its seq in
+  // at sync_done; when the ordered stream reaches the same file later it is a
+  // no-op (same sha). Skipped for a from-0 bootstrap, which is ordered by design.
+  if (since > 0 && Array.isArray(msg.priority)) pushPriority(ctx, peer, msg.priority, since);
+
   // Deliver ONE bounded batch — capped by count AND total content bytes. The
   // client applies it then requests the next (driven by sync_done.more), so only
   // one bounded chunk of file content is ever in flight.
@@ -105,4 +114,21 @@ export function handleSyncCursor(ctx: SyncContext, peer: SyncPeer, msg: SyncCurs
   // Streams file_push (each with its seq), then sync_done { cursor, more }. An
   // empty queue resolves straight to sync_done via checkSyncDone.
   drainPushQueue(ctx, peer);
+}
+
+/** Push each changed, active priority path as a live (non-session) push. */
+function pushPriority(ctx: SyncContext, peer: SyncPeer, paths: string[], since: number): void {
+  const limitBytes = ctx.config.maxFileSizeMb * 1024 * 1024;
+  for (const p of paths.slice(0, SYNC_PRIORITY_MAX)) {
+    if (typeof p !== "string") continue;
+    const head = ctx.db.getFile(p);
+    if (!head || head.action !== "active" || head.fileType !== "file") continue;
+    const seq = ctx.db.getFileSeq(p);
+    if (!seq || seq <= since) continue; // unchanged since the client's cursor
+    if ((headSize(ctx, p, head.sha1) ?? 0) > limitBytes) continue;
+    const buf = readHead(ctx, p, head.sha1);
+    if (!buf) continue;
+    peer.send({ type: "file_push", file: head, content: "", contentBytes: buf, seq });
+    pushLog(ctx, `[CursorSync] ${peer.deviceId} priority push ${p} (seq ${seq})`);
+  }
 }
