@@ -448,6 +448,17 @@ export class SyncDB {
     return Number(info.lastInsertRowid);
   }
 
+  /** True if an UNRESOLVED conflict already preserves exactly this content for
+   *  this path — recording it again would only duplicate the same bytes. */
+  hasOpenConflict(path: string, sha1: string): boolean {
+    const row = this.db
+      .prepare<[string, string], { n: number }>(
+        "SELECT 1 AS n FROM conflicts WHERE path = ? AND sha1 = ? AND resolved = 0 LIMIT 1"
+      )
+      .get(path, sha1);
+    return row !== undefined;
+  }
+
   /** List conflicts, newest first. Unresolved only unless includeResolved. */
   listConflicts(includeResolved = false): ConflictRecord[] {
     const rows = includeResolved

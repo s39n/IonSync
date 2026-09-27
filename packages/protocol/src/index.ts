@@ -118,7 +118,20 @@ export interface FileDataUploadMsg {
    * last-write-wins by mtime.
    */
   baseSha1?: string;
+  /**
+   * Re-delivery of content the client believes it already sent (the mobile
+   * background replay). The server must never treat it as new information:
+   * if these exact bytes are already known for the path (current head or any
+   * stored version — including one that was since deleted or superseded), it
+   * is dropped with no write, conflict or broadcast, and the uploader is sent
+   * the current head/tombstone to converge. Only sent to servers advertising
+   * {@link BG_RESEND_CAP}.
+   */
+  resend?: boolean;
 }
+
+/** Server capability: understands `resend` uploads (see FileDataUploadMsg). */
+export const BG_RESEND_CAP = "bg_resend";
 
 /** Client requesting a file from the server (server_newer case, or version restore). */
 export interface FileDataRequestMsg {

@@ -139,6 +139,33 @@ export function handleFileUpload(
   msg: FileDataUploadMsg
 ): void {
   const { file, content } = msg;
+
+  // An active file with no content hash is never valid: it's what a client
+  // sends when it failed to read the file (e.g. an iCloud-evicted note), and
+  // accepting it would overwrite the head's sha with "" — after which every
+  // other device's upload looks like a stale-base conflict.
+  if (file.action === "active" && file.fileType === "file" && !file.sha1) {
+    logWarn(ctx, `[file_data] rejected ${file.path} from ${peer.deviceId}: active file with empty sha1`);
+    clearUploadContent(msg);
+    advanceUploadQueue(peer, file.path);
+    return;
+  }
+
+  // A resend re-delivers bytes the client believes it already sent (mobile
+  // background replay). If the server already knows these exact bytes for this
+  // path — as the head, or as any stored version, even one since superseded or
+  // deleted — they carry no new information: drop them. Treating them as new
+  // would resurrect a note another device deleted, or record a spurious
+  // conflict for an edit that already landed. The uploader is sent the
+  // current state so it converges.
+  if (msg.resend && file.action === "active" && file.fileType === "file" && isKnownContent(ctx, file)) {
+    logInfo(ctx, `[file_data] resend of ${file.path} from ${peer.deviceId} is already known — dropped`);
+    clearUploadContent(msg);
+    pushCurrentStateToUploader(ctx, peer, file.path);
+    advanceUploadQueue(peer, file.path);
+    return;
+  }
+
   let isRejected = false;
   let isE2EE = false;
   let savedSize: number | undefined;
@@ -289,6 +316,13 @@ export function storeConflict(
     logWarn(ctx, `[Conflict] ${peer.deviceId} conflict on ${path} with ${buf ? "empty" : "no"} content — head kept, nothing recorded`);
     return;
   }
+  // The same losing content can arrive more than once (a WS upload, its
+  // background beacon/replay, a reconnect retry). One record preserves it;
+  // more would just be noise in the conflicts list.
+  if (ctx.db.hasOpenConflict(path, sha1)) {
+    logInfo(ctx, `[Conflict] ${peer.deviceId} conflict on ${path} already recorded (same content) — not duplicated`);
+    return;
+  }
   const id = ctx.db.recordConflict(path, sha1, mtime, peer.deviceId ?? null);
   ctx.conflicts.write(String(id), mtime, buf);
   logWarn(ctx, `[Conflict] ${peer.deviceId} conflict on ${path} — recorded as conflict #${id} (${buf.length}b), head kept`);
@@ -397,6 +431,27 @@ function pushRenameConvergence(ctx: SyncContext, peer: SyncPeer, fromPath: strin
 function rejectStaleUpload(ctx: SyncContext, peer: SyncPeer, file: FileEntry): void {
   logInfo(ctx, `[Conflict] stale config upload dropped (LWW): ${file.path} from ${peer.deviceId}`);
   pushHeadToUploader(ctx, peer, file.path);
+}
+
+/** True if these exact bytes (by sha1) are already known for the path: the
+ *  current head, or any stored version row (covers superseded and — until the
+ *  version rows are purged — deleted content). */
+function isKnownContent(ctx: SyncContext, file: FileEntry): boolean {
+  const head = ctx.db.getFile(file.path);
+  if (head && head.action === "active" && head.sha1 === file.sha1) return true;
+  return ctx.db.hasVersionSha(file.path, file.sha1);
+}
+
+/** Push whatever the server currently holds for a path — the active head, or
+ *  the deletion tombstone — so the uploader converges on it. */
+function pushCurrentStateToUploader(ctx: SyncContext, peer: SyncPeer, path: string): void {
+  const serverFile = ctx.db.getFile(path);
+  if (!serverFile) return;
+  if (serverFile.action === "deleted") {
+    peer.send({ type: "file_push", file: serverFile, content: "" });
+    return;
+  }
+  pushHeadToUploader(ctx, peer, path);
 }
 
 /** Re-push the server's current head of a path so the uploader's vault converges. */

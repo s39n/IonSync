@@ -8,21 +8,31 @@
  * one delivery path the platform completes after the page is frozen, so the
  * plugin ALSO beacons the same uploads here.
  *
+ * The beacon's only job is to land the latest edit quickly in the common case.
+ * It is deliberately conservative — it never resolves divergence:
+ *
+ *   FAST-FORWARD ONLY. An upload is applied only when it creates a path the
+ *   server has never seen, or when its baseSha1 IS the current head (a plain
+ *   fast-forward). Anything else — the head moved, the path was deleted, the
+ *   bytes are already the head — is skipped ("deferred") and left to the real
+ *   paths: the WS flush (if its bytes arrive) and the plugin's confirm-on-
+ *   reconnect replay, which carry full conflict semantics. So a beacon can never
+ *   resurrect a deleted note, mint a conflict, or reorder against the WS.
+ *
  * Safety model — this is a second write entry point, so it must not be a weaker
  * one than the WebSocket:
  *   - Auth: a random, device-bound token handed out in `auth_ok` over the
  *     already-authenticated socket. Only its SHA-256 is stored; one live token
- *     per device (a reconnect rotates it); expires after BG_TOKEN_TTL_MS; lost on
- *     restart (the plugin's confirm-on-reconnect covers that).
- *   - Every edit goes through `handleFileUpload` — the exact WS apply path, so
- *     conflict detection (baseSha1), the no-op/echo guard, the size limit, SHA1
- *     verification and E2EE handling are identical. Nothing is special-cased.
+ *     per device (a reconnect rotates it); expires after BG_TOKEN_TTL_MS;
+ *     revoked when the device is removed; lost on restart (the replay covers it).
+ *   - Applied uploads go through `handleFileUpload` — the exact WS apply path —
+ *     so the size limit, SHA1 verification, no-op guard and E2EE handling are
+ *     identical. Nothing is special-cased.
  *   - Paths are validated with the same `isValidVaultPath` the WS dispatcher
- *     uses. Only active FILE uploads are accepted: a beacon can never delete,
- *     rename, or create a folder, so it cannot cascade anything.
- *   - Bounded: body size (router), file count, and a per-device rate limit.
- *   - Duplicates are harmless: when the WS flush did drain, the beaconed copy is
- *     a byte-identical resend and is dropped by the no-op guard (no broadcast).
+ *     uses. Only active FILE uploads with a real sha1 are accepted: a beacon can
+ *     never delete, rename, or create a folder.
+ *   - Bounded: body size (router), file count, a per-device rate limit, and a
+ *     per-client limit on failed-auth attempts (checked before parsing).
  */
 import { randomBytes, randomUUID } from "node:crypto";
 import type WebSocket from "ws";
@@ -41,6 +51,8 @@ export const BG_MAX_FILES = 50;
 /** Per-device request budget. */
 export const BG_RATE_LIMIT = 20;
 export const BG_RATE_WINDOW_MS = 60_000;
+/** Per-client budget for requests that fail authentication. */
+export const BG_AUTH_FAIL_LIMIT = 30;
 
 interface TokenRecord { deviceId: string; expiresAt: number }
 
@@ -48,16 +60,11 @@ interface TokenRecord { deviceId: string; expiresAt: number }
 // without widening the SyncContext interface.
 const tokenStores = new WeakMap<SyncContext, Map<string, TokenRecord>>();
 const rateStores = new WeakMap<SyncContext, Map<string, number[]>>();
+const failStores = new WeakMap<SyncContext, Map<string, number[]>>();
 
-function tokensFor(ctx: SyncContext): Map<string, TokenRecord> {
-  let m = tokenStores.get(ctx);
-  if (!m) { m = new Map(); tokenStores.set(ctx, m); }
-  return m;
-}
-
-function ratesFor(ctx: SyncContext): Map<string, number[]> {
-  let m = rateStores.get(ctx);
-  if (!m) { m = new Map(); rateStores.set(ctx, m); }
+function storeFor<V>(stores: WeakMap<SyncContext, Map<string, V>>, ctx: SyncContext): Map<string, V> {
+  let m = stores.get(ctx);
+  if (!m) { m = new Map(); stores.set(ctx, m); }
   return m;
 }
 
@@ -66,7 +73,7 @@ function ratesFor(ctx: SyncContext): Map<string, number[]> {
  * token for the same device is revoked, and expired tokens are swept.
  */
 export function issueBgToken(ctx: SyncContext, deviceId: string, now = Date.now()): string {
-  const store = tokensFor(ctx);
+  const store = storeFor(tokenStores, ctx);
   for (const [h, rec] of store) {
     if (rec.expiresAt <= now || rec.deviceId === deviceId) store.delete(h);
   }
@@ -75,10 +82,16 @@ export function issueBgToken(ctx: SyncContext, deviceId: string, now = Date.now(
   return token;
 }
 
+/** Revoke every background token a device holds (e.g. it was removed). */
+export function revokeBgTokens(ctx: SyncContext, deviceId: string): void {
+  const store = storeFor(tokenStores, ctx);
+  for (const [h, rec] of store) if (rec.deviceId === deviceId) store.delete(h);
+}
+
 /** The device a token belongs to, or null if unknown/expired. */
 export function resolveBgToken(ctx: SyncContext, token: unknown, now = Date.now()): string | null {
   if (typeof token !== "string" || token.length === 0 || token.length > 128) return null;
-  const store = tokensFor(ctx);
+  const store = storeFor(tokenStores, ctx);
   const h = sha256(token);
   const rec = store.get(h);
   if (!rec) return null;
@@ -86,13 +99,13 @@ export function resolveBgToken(ctx: SyncContext, token: unknown, now = Date.now(
   return rec.deviceId;
 }
 
-function rateLimited(ctx: SyncContext, deviceId: string, now: number): boolean {
-  const rates = ratesFor(ctx);
-  const recent = (rates.get(deviceId) ?? []).filter((t) => now - t < BG_RATE_WINDOW_MS);
-  if (recent.length >= BG_RATE_LIMIT) { rates.set(deviceId, recent); return true; }
-  recent.push(now);
-  rates.set(deviceId, recent);
-  return false;
+/** Sliding-window counter. `record=false` only checks the budget. */
+function overBudget(store: Map<string, number[]>, key: string, limit: number, now: number, record: boolean): boolean {
+  const recent = (store.get(key) ?? []).filter((t) => now - t < BG_RATE_WINDOW_MS);
+  const over = recent.length >= limit;
+  if (record && !over) recent.push(now);
+  if (recent.length > 0) store.set(key, recent); else store.delete(key);
+  return over;
 }
 
 /** A peer that is never listening: `send()` is a no-op because its socket is
@@ -139,39 +152,64 @@ function parseUpload(raw: unknown): ParsedUpload | null {
   return { file, content: r.content, ...(typeof r.baseSha1 === "string" ? { baseSha1: r.baseSha1 } : {}) };
 }
 
-export interface BgSyncResult { status: 204 | 400 | 401 | 429; applied: number }
+/** Fast-forward-only gate (see file header). */
+function isFastForward(ctx: SyncContext, u: ParsedUpload): boolean {
+  const head = ctx.db.getFile(u.file.path);
+  if (!head) return true;                              // a path the server has never seen
+  if (head.action !== "active") return false;          // deleted: never resurrect from a beacon
+  if (head.sha1 === u.file.sha1) return false;         // already there (the WS copy landed)
+  return u.baseSha1 !== undefined && head.sha1 === u.baseSha1; // plain fast-forward
+}
+
+export interface BgSyncResult {
+  status: 204 | 400 | 401 | 429;
+  applied: number;
+  deferred: number;
+}
 
 /**
  * Apply a beaconed batch. `rawBody` is the request body as text (beacons are sent
- * as text/plain to stay a CORS "simple request").
+ * as text/plain to stay a CORS "simple request"). `clientKey` (e.g. the remote
+ * address) scopes the failed-auth budget.
  */
-export function handleBackgroundSync(ctx: SyncContext, rawBody: unknown, now = Date.now()): BgSyncResult {
+export function handleBackgroundSync(
+  ctx: SyncContext,
+  rawBody: unknown,
+  clientKey = "unknown",
+  now = Date.now(),
+): BgSyncResult {
+  const none = (status: BgSyncResult["status"]): BgSyncResult => ({ status, applied: 0, deferred: 0 });
+  const fails = storeFor(failStores, ctx);
+  // Checked before any parsing, so junk requests can't buy CPU.
+  if (overBudget(fails, clientKey, BG_AUTH_FAIL_LIMIT, now, false)) return none(429);
+
   let body: unknown;
   try { body = typeof rawBody === "string" ? JSON.parse(rawBody) : rawBody; }
-  catch { return { status: 400, applied: 0 }; }
-  if (!body || typeof body !== "object") return { status: 400, applied: 0 };
+  catch { overBudget(fails, clientKey, BG_AUTH_FAIL_LIMIT, now, true); return none(400); }
+  if (!body || typeof body !== "object") { overBudget(fails, clientKey, BG_AUTH_FAIL_LIMIT, now, true); return none(400); }
   const { token, files } = body as { token?: unknown; files?: unknown };
 
   const deviceId = resolveBgToken(ctx, token, now);
-  if (!deviceId) return { status: 401, applied: 0 };
-  if (rateLimited(ctx, deviceId, now)) return { status: 429, applied: 0 };
-  if (!Array.isArray(files) || files.length === 0 || files.length > BG_MAX_FILES) {
-    return { status: 400, applied: 0 };
-  }
+  if (!deviceId) { overBudget(fails, clientKey, BG_AUTH_FAIL_LIMIT, now, true); return none(401); }
+  if (overBudget(storeFor(rateStores, ctx), deviceId, BG_RATE_LIMIT, now, true)) return none(429);
+  if (!Array.isArray(files) || files.length === 0 || files.length > BG_MAX_FILES) return none(400);
 
   const uploads: ParsedUpload[] = [];
   for (const raw of files) {
     const u = parseUpload(raw);
     if (!u) {
       log(ctx, `[bg-sync] rejected a malformed upload from ${deviceId}`);
-      return { status: 400, applied: 0 }; // all-or-nothing: a bad entry means a bad client
+      return none(400); // all-or-nothing: a bad entry means a bad client
     }
     uploads.push(u);
   }
 
   ctx.db.touchDevice(deviceId);
   const peer = syntheticPeer(ctx, deviceId);
+  let applied = 0;
+  let deferred = 0;
   for (const u of uploads) {
+    if (!isFastForward(ctx, u)) { deferred++; continue; }
     const msg: FileDataUploadMsg = {
       type: "file_data",
       mode: "apply",
@@ -180,9 +218,10 @@ export function handleBackgroundSync(ctx: SyncContext, rawBody: unknown, now = D
       ...(u.baseSha1 ? { baseSha1: u.baseSha1 } : {}),
     };
     handleFileUpload(ctx, peer, msg);
+    applied++;
   }
-  log(ctx, `[bg-sync] ${deviceId}: applied ${uploads.length} background upload(s)`);
-  return { status: 204, applied: uploads.length };
+  log(ctx, `[bg-sync] ${deviceId}: applied ${applied}, deferred ${deferred} background upload(s)`);
+  return { status: 204, applied, deferred };
 }
 
 function log(ctx: SyncContext, msg: string): void {

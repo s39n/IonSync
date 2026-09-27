@@ -13,7 +13,7 @@ import { verifyTOTP, generateSecret, totpUri, createPendingToken, consumePending
 import { sealTotpSecret, openTotpSecret } from "../totpSecret.js";
 import { pushActivity } from "../context.js";
 import { versionMtimeFor } from "../head.js";
-import { handleBackgroundSync } from "../backgroundSync.js";
+import { handleBackgroundSync, revokeBgTokens } from "../backgroundSync.js";
 import { BACKGROUND_SYNC_PATH } from "@ionsync/protocol";
 
 // Coerce an Express query/body value to a string, rejecting array/object forms
@@ -53,7 +53,7 @@ export function buildPublicRouter(ctx: SyncContext): express.Router {
     express.text({ type: () => true, limit: "256kb" }),
     (req: Request, res: Response) => {
       try {
-        const result = handleBackgroundSync(ctx, req.body);
+        const result = handleBackgroundSync(ctx, req.body, req.ip ?? req.socket.remoteAddress ?? "unknown");
         res.status(result.status).end();
       } catch (e: unknown) {
         console.error(`[bg-sync] handler error: ${errMsg(e)}`);
@@ -711,6 +711,9 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     for (const peer of ctx.peers.values()) {
       if (peer.deviceId === id) peer.disconnect("Device removed by admin");
     }
+    // ...and cut off its background-flush path too, or it could keep writing
+    // by beacon until its token expired.
+    revokeBgTokens(ctx, id);
     ctx.db.deleteDevice(id);
     ctx.db.deleteDeviceName(id);
     res.json({ ok: true });
