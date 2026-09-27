@@ -3,7 +3,8 @@ import type {
   ClientMsg,
   VersionCheckResponseMsg,
 } from "@ionsync/protocol";
-import { encodeFrame, decodeFrame, BINARY_FRAMES_CAP } from "@ionsync/protocol";
+import { encodeFrame, decodeFrame, BINARY_FRAMES_CAP, BACKGROUND_SYNC_PATH } from "@ionsync/protocol";
+import type { FileDataUploadMsg } from "@ionsync/protocol";
 import { Platform } from "obsidian";
 import type { IonSyncPlugin, PluginSettings } from "./main.js";
 
@@ -54,6 +55,17 @@ export class WsManager {
    *  Empty until version_check_response arrives, and reset on disconnect so a
    *  reconnect to an older server can't inherit a stale capability. */
   serverCaps: string[] = [];
+  /** Device-bound token for the mobile background flush, from `auth_ok`.
+   *  Kept across a disconnect (the beacon fires as the socket closes); rotated
+   *  by the server on every connect. Null against servers that predate it. */
+  bgToken: string | null = null;
+
+  /** While non-null, full-file uploads passing through send() are also
+   *  recorded here so they can be re-delivered by beacon (see XSync). */
+  private captured: FileDataUploadMsg[] | null = null;
+  /** path → time of the last upload sent for it. Used to find edits whose bytes
+   *  may still have been sitting in the socket buffer when the app backgrounded. */
+  private recentUploads = new Map<string, number>();
 
   private ws: WebSocket | null = null;
   private listeners: Listener[] = [];
@@ -138,6 +150,17 @@ export class WsManager {
   }
 
   send(msg: ClientMsg): void {
+    if (msg.type === "file_data" && (msg.mode === "apply" || msg.mode === "patch")) {
+      this.recentUploads.set(msg.file.path, Date.now());
+      if (this.recentUploads.size > 500) {
+        const cutoff = Date.now() - 60_000;
+        for (const [p, t] of this.recentUploads) if (t < cutoff) this.recentUploads.delete(p);
+      }
+      // Captured before the readyState check: a socket that just dropped is
+      // exactly the case the beacon exists to rescue. Only full uploads are
+      // beaconable (a patch needs the WS path's server-side stitch).
+      if (msg.mode === "apply") this.captured?.push(msg);
+    }
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.log("Sending:", msg.type);
     // encodeFrame emits a binary frame for a content-bearing upload when the
@@ -145,6 +168,42 @@ export class WsManager {
     // raw bytes back into `content`). Falls back automatically against an old
     // server (serverCaps empty).
     this.ws.send(encodeFrame(msg, this.serverCaps.includes(BINARY_FRAMES_CAP)));
+  }
+
+  /** Start recording full-file uploads sent through send(). */
+  beginCapture(): void { this.captured = []; }
+
+  /** Stop recording and return what was captured. */
+  endCapture(): FileDataUploadMsg[] {
+    const out = this.captured ?? [];
+    this.captured = null;
+    return out;
+  }
+
+  /** Paths uploaded within the last `withinMs` — candidates whose bytes may not
+   *  have left the device if the OS froze the app right after. */
+  recentUploadPaths(withinMs: number): string[] {
+    const cutoff = Date.now() - withinMs;
+    const out: string[] = [];
+    for (const [p, t] of this.recentUploads) if (t >= cutoff) out.push(p);
+    return out;
+  }
+
+  /** Base URL of the server for a scheme family, from the same settings the
+   *  socket uses (so the beacon always targets the server we're syncing with). */
+  private _endpoint(family: "ws" | "http"): string {
+    const host = this.settings.host.replace(/\/+$/, ""); // strip any trailing slashes
+    const { port } = this.settings;
+    const scheme = family === "ws"
+      ? (this.settings.tls ? "wss" : "ws")
+      : (this.settings.tls ? "https" : "http");
+    const defaultPort = this.settings.tls ? 443 : 80;
+    return port && port !== defaultPort ? `${scheme}://${host}:${port}` : `${scheme}://${host}`;
+  }
+
+  /** Where the mobile background flush is POSTed. */
+  get backgroundSyncUrl(): string {
+    return this._endpoint("http") + BACKGROUND_SYNC_PATH;
   }
 
   disconnect(): void {
@@ -182,13 +241,7 @@ export class WsManager {
       this.log("Skipping reconnect — a socket is already open/connecting");
       return;
     }
-    const host = this.settings.host.replace(/\/+$/, ""); // strip any trailing slashes
-    const { port } = this.settings;
-    const scheme = this.settings.tls ? "wss" : "ws";
-    const defaultPort = this.settings.tls ? 443 : 80;
-    const url = port && port !== defaultPort
-      ? `${scheme}://${host}:${port}`
-      : `${scheme}://${host}`;
+    const url = this._endpoint("ws");
     this.log("Opening WebSocket to:", url);
 
     try {
@@ -244,6 +297,8 @@ export class WsManager {
         // #7). Fire-and-forget: it only enables v3 reads/writes and never blocks
         // the handshake. Older servers omit it and we stay on the global salt.
         if (msg.e2eeSalt) void this.plugin.applyE2eeSalt(msg.e2eeSalt);
+        // Background-flush token (servers that predate it omit the field).
+        this.bgToken = msg.bgToken ?? null;
         // Advertise binary_frames so the server can push file content as binary
         // frames to us. The server gates on this per-peer; an old server ignores
         // the field and we fall back to base64 (serverCaps stays empty).

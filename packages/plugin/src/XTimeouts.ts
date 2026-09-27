@@ -50,6 +50,11 @@ export class XTimeouts {
     }));
   }
 
+  /** Keys (file paths) with a pending callback. */
+  keys(): string[] {
+    return Array.from(this.timers.keys());
+  }
+
   /** Cancel every pending timer */
   clear(): void {
     for (const { timer } of this.timers.values()) window.clearTimeout(timer);
