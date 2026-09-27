@@ -70,6 +70,8 @@ export class XSync {
   private _forceFullDepth = 0;
   /** Mobile: pending "disconnect after the hide grace period" timer. */
   private _hideDisconnectTimer: number | null = null;
+  /** The background-confirm replay currently running, if any. */
+  private _replayInFlight: Promise<void> | null = null;
 
   private deleteQueue: Record<string, DeleteQueueEntry> = {};
   private isProcessingDeleteQueue = false;
@@ -395,6 +397,10 @@ export class XSync {
         if (mobile && document.visibilityState === "hidden") {
           if (this.ws.isConnected && this.ws.serverCaps.includes(APP_PING_CAP)) {
             this._clearHideDisconnect();
+            // The flush recorded everything it sent. From here until the app is
+            // back (and the socket proven alive) nothing may write through it:
+            // refused sends are queued/recorded exactly as with a closed socket.
+            this.ws.holdOutbound = true;
             this._hideDisconnectTimer = window.setTimeout(() => {
               this._hideDisconnectTimer = null;
               if (document.visibilityState === "hidden") this.ws.disconnect();
@@ -775,7 +781,16 @@ export class XSync {
             } else {
               this._conflictMintsThisPass++;
               this.plugin.log(`[Conflict] ${file.path} modified offline. Backing up.`);
-              await this._createConflictedCopy(file.path, localSha ?? "", capturedContent ?? undefined, localStat.mtime);
+              const preserved = await this._createConflictedCopy(file.path, localSha ?? "", capturedContent ?? undefined, localStat.mtime);
+              if (!preserved) {
+                // The local edit couldn't be sent to the server as a conflict
+                // record, so overwriting it now would lose it. Leave the file
+                // alone and mark the apply failed: the cursor won't advance past
+                // it, and the next sync retries once the socket is usable.
+                this._conflictMintsThisPass--;
+                this._lastApplyFailed = true;
+                return;
+              }
             }
           }
 
@@ -901,28 +916,35 @@ export class XSync {
     localSha: string,
     capturedContent?: string | ArrayBuffer,
     mtime: number = Date.now()
-  ): Promise<void> {
+  ): Promise<boolean> {
     // Preserve the local (losing) side of a conflict by uploading it to the
     // server as a reviewable conflict record (mode:"conflict"). The incoming
     // (winning) version is written locally by the caller afterward. No
     // "(Conflicted Copy).md" is created in the vault — conflicts live on the
     // server and are reviewed from the dashboard Conflicts panel.
-    if (capturedContent == null) return;
+    //
+    // Returns false only when the record could NOT be handed to the socket
+    // (closed, or held during the mobile hide grace). The caller must then NOT
+    // overwrite the local file — that would destroy the only copy of the edit.
+    if (capturedContent == null) return true;
     const e2eeKey = await this._getEncryptionKey();
     let contentBytes: Uint8Array | undefined;
     if (Utils.isBinary(originalPath)) {
       const buf = capturedContent instanceof ArrayBuffer ? capturedContent : null;
-      if (!buf) return;
+      if (!buf) return true;
       contentBytes = e2eeKey ? await encryptToBytes(e2eeKey, buf) : new Uint8Array(buf);
     } else {
       const txt = typeof capturedContent === "string" ? capturedContent : null;
-      if (txt === null) return;
+      if (txt === null) return true;
       const bytes = new TextEncoder().encode(txt);
       contentBytes = e2eeKey ? await encryptToBytes(e2eeKey, bytes) : bytes;
     }
     const entry: FileEntry = { path: originalPath, sha1: localSha, mtime, action: "active", fileType: "file" };
-    this.ws.send({ type: "file_data", mode: "conflict", file: entry, content: "", ...(contentBytes ? { contentBytes } : {}) });
+    if (!this.ws.send({ type: "file_data", mode: "conflict", file: entry, content: "", ...(contentBytes ? { contentBytes } : {}) })) {
+      return false;
+    }
     this.addActivity("up", `conflict: ${originalPath}`);
+    return true;
   }
 
   // ── Sync Engine ───────────────────────────────────────────────────────────
@@ -983,8 +1005,19 @@ export class XSync {
       this._appliedSeq.clear();
       // The open note first: if it changed elsewhere, the server pushes it ahead
       // of the ordered catch-up, so what's on screen is current almost at once.
-      const active = this.plugin.app.workspace.getActiveFile()?.path;
-      const priority = active && !this.exclusionFilter?.isExcluded(active) ? [active] : [];
+      // Not if it has local edits still on their way up (pending debounce,
+      // queued offline edit, or modified since last synced): pulling the remote
+      // version first would force the conflict path on the note being edited.
+      // The ordered stream still delivers it in its turn, exactly as before.
+      const activeFile = this.plugin.app.workspace.getActiveFile();
+      const active = activeFile?.path;
+      const activeMeta = active ? this.storage.readMetadata(active) : null;
+      const activeDirty = !!active && (
+        this.xTimeouts.keys().includes(active) ||
+        active in this.unsentSessionEvents ||
+        !activeMeta || (activeFile?.stat.mtime ?? 0) > activeMeta.mtime
+      );
+      const priority = active && !activeDirty && !this.exclusionFilter?.isExcluded(active) ? [active] : [];
       this.ws.send({
         type: "sync_cursor",
         since: this._lastSyncedSeq,
@@ -1612,7 +1645,7 @@ export class XSync {
           if (txt !== null) newSha1 = (await Utils.getSHA(txt)) ?? "";
         }
         const mtime = stat?.mtime ?? Date.now();
-        this.ws.send({
+        const sent = this.ws.send({
           type: "file_rename",
           from: oldPath,
           to: file.path,
@@ -1621,10 +1654,14 @@ export class XSync {
           ...(oldMeta?.sha1 ? { baseSha1: oldMeta.sha1 } : {}),
           fileType: "file",
         });
-        // Reflect the move locally: drop the old path's metadata, record the new.
-        await this.storage.deleteMetadata(oldPath);
-        await this.storage.writeMetadata({ path: file.path, sha1: newSha1, mtime, ...(typeof stat?.size === "number" ? { size: stat.size } : {}), action: "active", fileType: "file" });
-        return;
+        if (sent) {
+          // Reflect the move locally: drop the old path's metadata, record the new.
+          await this.storage.deleteMetadata(oldPath);
+          await this.storage.writeMetadata({ path: file.path, sha1: newSha1, mtime, ...(typeof stat?.size === "number" ? { size: stat.size } : {}), action: "active", fileType: "file" });
+          return;
+        }
+        // Not sent (socket closed or held): fall through to delete + create,
+        // which both queue safely until the socket is usable again.
       }
 
       // Legacy fallback (server without "file_rename", or a folder move):
@@ -2149,7 +2186,17 @@ export class XSync {
    * replay would look like brand-new content. Entries are cleared only once
    * resolved; unreadable ones (e.g. evicted files) wait for a later connect.
    */
-  private async _replayBackgroundConfirm(): Promise<void> {
+  private _replayBackgroundConfirm(): Promise<void> {
+    // One replay at a time: a reconnect's replay and a resume's replay can
+    // otherwise overlap (hide → show within the grace while the first runs).
+    if (!this._replayInFlight) {
+      this._replayInFlight = this._replayBackgroundConfirmOnce()
+        .finally(() => { this._replayInFlight = null; });
+    }
+    return this._replayInFlight;
+  }
+
+  private async _replayBackgroundConfirmOnce(): Promise<void> {
     if (!this.ws.serverCaps.includes(BG_RESEND_CAP)) return;
     // A device that hasn't finished its first sync has nothing of its own to
     // replay; keep any stale entries until it has.
@@ -2304,7 +2351,9 @@ export class XSync {
 
         const entry = this.deleteQueue[path]!;
         const file: FileEntry = { path, sha1: entry.metadata.sha1 ?? "", mtime: entry.metadata.mtime ?? Date.now(), action: "deleted", fileType: "file" };
-        this.ws.send({ type: "file_data", mode: "apply", file, content: "" });
+        // Not handed to an open socket (closed, or held during the mobile hide
+        // grace): keep it queued for the next drain rather than dropping it.
+        if (!this.ws.send({ type: "file_data", mode: "apply", file, content: "" })) break;
         await this.storage.writeMetadata(file);
         delete this.deleteQueue[path];
       }

@@ -30,7 +30,7 @@ const BURST_MS = 10_000;
 export const HIDE_GRACE_MS = 30_000;
 
 /** How long a returning app waits for a `pong` before reconnecting instead. */
-const RESUME_PROBE_MS = 1_500;
+const RESUME_PROBE_MS = 3_000;
 
 export interface UpdateInfo {
   files: { name: string; content: string }[];
@@ -83,6 +83,10 @@ export class WsManager {
    *  Kept across a disconnect (the beacon fires as the socket closes); rotated
    *  by the server on every connect. Null against servers that predate it. */
   bgToken: string | null = null;
+  /** Mobile hide grace period: refuse state-changing sends (see send()). Set by
+   *  XSync once the hide flush is done; cleared on return and on any socket
+   *  change. */
+  holdOutbound = false;
 
   /** Active capture buffers: full-file uploads passing through send() are also
    *  recorded into each, so they can be re-delivered by beacon (see XSync).
@@ -111,6 +115,8 @@ export class WsManager {
   private knownCaps = new Map<string, string[]>();
   /** version_check already sent on the current socket (pipelined with auth). */
   private versionCheckSent = false;
+  /** version_check_response received on the current socket. */
+  private gotVersionResponse = false;
   private pingSeq = 0;
   private pongWaiters = new Map<number, (alive: boolean) => void>();
 
@@ -195,6 +201,8 @@ export class WsManager {
     }
     if (alive) {
       this.log("Resumed on the existing socket");
+      // Only now is it safe to write through this socket again.
+      this.holdOutbound = false;
       this.emit({ type: "resumed" });
       return;
     }
@@ -260,6 +268,14 @@ export class WsManager {
    * callers that record "this is now synced" must not do so on false.
    */
   send(msg: ClientMsg): boolean {
+    // Hide grace period: the socket is kept open but nothing that changes
+    // server state may leave through it — the hide flush already recorded
+    // everything it sent, and a send made now could sit in the socket buffer
+    // when the OS suspends the app, then die with it, unrecorded. Refusing it
+    // makes the caller treat it like a closed socket (queue it / record it as
+    // unsent for the reconnect replay). Reads (sync_cursor, history, …) and the
+    // liveness ping still go through.
+    if (this.holdOutbound && WsManager._changesServerState(msg)) return false;
     const isUpload = msg.type === "file_data" && (msg.mode === "apply" || msg.mode === "patch");
     // Captured before the readyState check: a socket that just dropped is
     // exactly the case the beacon exists to rescue. Only full, first-time
@@ -294,6 +310,12 @@ export class WsManager {
       }
     }
     return true;
+  }
+
+  /** Uploads, deletes, conflict records, renames: messages that write server state. */
+  private static _changesServerState(msg: ClientMsg): boolean {
+    if (msg.type === "file_data") return msg.mode !== "send";
+    return msg.type === "file_rename" || msg.type === "file_event";
   }
 
   /** Start recording full-file uploads sent through send(). Returns this
@@ -348,6 +370,7 @@ export class WsManager {
     this.log("Disconnecting");
     this._cancelReconnect();
     this._failProbes();
+    this.holdOutbound = false;
     if (this.ws) {
       this.ws.onclose = null;
       this.ws.close();
@@ -383,6 +406,8 @@ export class WsManager {
     const url = this._endpoint("ws");
     this.log("Opening WebSocket to:", url);
     this.versionCheckSent = false;
+    this.gotVersionResponse = false;
+    this.holdOutbound = false; // a fresh socket starts clean
 
     try {
       this.ws = new WebSocket(url);
@@ -419,6 +444,11 @@ export class WsManager {
       this.log("WebSocket closed");
       this.ws = null;
       this._failProbes();
+      this.holdOutbound = false;
+      // A pipelined handshake that died before the version check came back:
+      // don't keep pipelining on the strength of an old answer — the next
+      // connect goes sequential and re-learns the caps.
+      if (this.versionCheckSent && !this.gotVersionResponse) this.knownCaps.delete(url);
       if (this.isConnected) {
         this.isConnected = false;
         this.serverCaps = [];
@@ -496,6 +526,7 @@ export class WsManager {
   }
 
   private _handleVersionCheck(msg: VersionCheckResponseMsg): void {
+    this.gotVersionResponse = true;
     this.knownCaps.set(this._endpoint("ws"), msg.caps ?? []);
     if (!msg.needsUpdate) {
       this.serverCaps = msg.caps ?? [];
