@@ -222,6 +222,60 @@ describe("background sync — WS resend (reconnect replay) semantics", () => {
     a.c.close(); b.c.close(); await srv.stop();
   });
 
+  it("recognises a landed upload even after version cleanup and tombstone purge removed every trace", async () => {
+    const srv = await startTestServer();
+    const a = await connect(srv.port, "devA");
+    const b = await connect(srv.port, "devB");
+    await wsUpload(srv, a.c, entry("T.md", "base", 500));
+    await wsUpload(srv, a.c, entry("T.md", "phone S", 1000, sha1("base")));
+    // The laptop keeps editing; cleanup then trims every non-head version row.
+    let prev = "phone S";
+    for (let i = 1; i <= 6; i++) {
+      const next = `laptop ${i}`;
+      await wsUpload(srv, b.c, entry("T.md", next, 2000 + i, sha1(prev)));
+      prev = next;
+    }
+    for (const row of srv.ctx.db.getVersionRowsToTrim("T.md", 0)) srv.ctx.db.deleteVersionRowById(row.id);
+    assert.equal(srv.ctx.db.hasVersionSha("T.md", sha1("phone S")), false, "precondition: S's row is gone");
+
+    // Replay of S (base = "base", also trimmed): already landed → no conflict.
+    a.c.send({ type: "file_data", mode: "apply", resend: true, ...entry("T.md", "phone S", 1000, sha1("base")) });
+    await wsUpload(srv, a.c, entry("probe1.md", "p", 1)); // ordered behind the resend
+    assert.equal(srv.ctx.db.getFile("T.md")?.sha1, sha1(prev), "head kept");
+    assert.equal(srv.ctx.db.listConflicts().length, 0, "no spurious conflict");
+
+    // Deleted on the laptop, tombstone purged: the replay still must not resurrect it.
+    b.c.send({ type: "file_data", mode: "apply", file: { path: "T.md", sha1: sha1(prev), mtime: 3000, action: "deleted", fileType: "file" }, content: "" });
+    await until(() => srv.ctx.db.getFile("T.md")?.action === "deleted");
+    a.c.send({ type: "file_data", mode: "apply", resend: true, ...entry("T.md", "phone S", 1000, sha1("base")) });
+    await wsUpload(srv, a.c, entry("probe2.md", "p", 1));
+    assert.equal(srv.ctx.db.getFile("T.md")?.action, "deleted", "not resurrected");
+    srv.ctx.db.deleteFileMeta("T.md");
+    a.c.send({ type: "file_data", mode: "apply", resend: true, ...entry("T.md", "phone S", 1000, sha1("base")) });
+    await wsUpload(srv, a.c, entry("probe3.md", "p", 1));
+    assert.ok(!srv.ctx.db.getFile("T.md"), "not resurrected after purge either");
+    a.c.close(); b.c.close(); await srv.stop();
+  });
+
+  it("an E2EE resend of an OLDER ciphertext version never downgrades a re-keyed head", async () => {
+    const srv = await startTestServer();
+    const a = await connect(srv.port, "devA");
+    const blob = (v: number, fill: number) =>
+      Buffer.concat([Buffer.from(`IONENCv${v}`), Buffer.alloc(12, fill), Buffer.alloc(32, fill + 1)]);
+    const plainSha = sha1("secret");
+    const up = (buf: Buffer, mtime: number, resend: boolean) => ({
+      type: "file_data", mode: "apply", ...(resend ? { resend: true } : {}),
+      file: { path: "d.md", sha1: plainSha, mtime, action: "active", fileType: "file", size: buf.length },
+      content: buf.toString("base64"), baseSha1: plainSha,
+    });
+    a.c.send(up(blob(3, 7), 2000, false)); // re-keyed head (v3)
+    await until(() => readHead(srv.ctx, "d.md")?.[7] === 0x33);
+    a.c.send(up(blob(2, 1), 1000, true)); // stale v2 replay from an old device
+    await wsUpload(srv, a.c, entry("probe.md", "p", 1));
+    assert.equal(readHead(srv.ctx, "d.md")?.[7], 0x33, "head stays v3");
+    a.c.close(); await srv.stop();
+  });
+
   it("a resend of a note recreated since (same content, new mtime) is re-added, not dropped", async () => {
     const srv = await startTestServer();
     const a = await connect(srv.port, "devA");

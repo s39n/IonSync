@@ -41,9 +41,11 @@ const BG_RECENT_MS = 10_000;
  *             on the recorded true base, and only if the file still holds sha1.
  *   - false → the socket was already closed; the bytes never left. The replay is
  *             an ordinary upload (metadata was never advanced, so its base is right).
- *   - unset → a debounced edit recorded before the flush ran. Replayed as a
- *             resend only if the metadata says the current content was sent
- *             (it may have been lost); otherwise as an ordinary upload.
+ *   - unset → a debounced edit recorded before the flush ran.
+ * For false/unset entries, `sha1`/`baseSha1`/`originBaseSha1` (if present)
+ * describe the path's earlier possibly-lost send that the entry replaced; the
+ * replay uses them to re-deliver it or to base the newer edit correctly. With
+ * no such send and no content change, there is nothing to replay.
  * `originBaseSha1` is the base the burst of sends began from (see WsManager);
  * the server falls back to it when `baseSha1` itself never arrived.
  */
@@ -1363,8 +1365,11 @@ export class XSync {
     const isBinary = Utils.isBinary(path) || hardcodedBinaryCheck;
 
     const stored = this.storage.readMetadata(path);
-    const entry: FileEntry | null = (this.storage.tree[path] ?? stored) ?? null;
-    if (!entry) return;
+    const source: FileEntry | null = (this.storage.tree[path] ?? stored) ?? null;
+    if (!source) return;
+    // A copy: `source` may be the live metadata object, which must not move to
+    // the new sha unless the send actually succeeds.
+    const entry: FileEntry = { ...source };
 
     let content = "";
     // Raw bytes for a full-file (apply) upload — sent as a binary frame when the
@@ -1423,11 +1428,22 @@ export class XSync {
     entry.sha1 = liveSha1;
     // baseSha1 = the sha we last synced for this path (see _sendFileEvent).
     const sent = this.ws.send({ type: "file_data", mode, file: entry, content, ...(contentBytes ? { contentBytes } : {}), ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}) });
+    const isContent = entry.action === "active" && entry.fileType === "file" && !!entry.sha1;
     if (!sent) {
       // Socket closed under us: leave the shadow and metadata at what the
       // server actually has, and queue the path for the reconnect replay.
-      this._rememberUnconfirmed([{ path, t: Date.now(), sent: false }]);
+      if (isContent) this._rememberUnconfirmed([{ path, t: Date.now(), sent: false }]);
       return;
+    }
+    if (isContent && this._forceFullDepth > 0) {
+      // Sent during a background flush (a catch-up sync still running as the
+      // app hid): record it synchronously, as _sendFileEvent does.
+      const rec = this.ws.recentUploadFor(path);
+      this._rememberUnconfirmed([{
+        path, t: Date.now(), sha1: entry.sha1, sent: true,
+        ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}),
+        ...(rec?.originBaseSha1 ? { originBaseSha1: rec.originBaseSha1 } : {}),
+      }]);
     }
     if (shadowToWrite !== null) await this.storage.writeShadow(path, shadowToWrite);
     this.addActivity("up", path);
@@ -1706,8 +1722,9 @@ export class XSync {
   /**
    * Upload a changed file. `opts` is used by the background replay:
    *   resend     — flag the upload as a re-delivery (server drops it if this
-   *                exact upload already landed). "auto": resend only if the
-   *                metadata says this content was already sent;
+   *                exact upload already landed). "auto": replay of a pending or
+   *                never-sent entry — see the branch below, driven by lastSent;
+   *   lastSent   — ("auto" only) the path's last possibly-lost send;
    *   baseSha1   — the true base to send (overrides stored metadata);
    *   originBaseSha1 — the base the burst started from (server fallback);
    *   expectSha1 — only send if the file still holds exactly this content.
@@ -1717,7 +1734,13 @@ export class XSync {
   private async _sendFileEvent(
     file: TAbstractFile,
     forceChanged: boolean,
-    opts: { resend?: boolean | "auto"; baseSha1?: string; originBaseSha1?: string; expectSha1?: string } = {},
+    opts: {
+      resend?: boolean | "auto";
+      baseSha1?: string;
+      originBaseSha1?: string;
+      expectSha1?: string;
+      lastSent?: { sha1: string; baseSha1?: string; originBaseSha1?: string };
+    } = {},
   ): Promise<SendResult> {
     if (!this.ws.isConnected) return "offline";
     const stat = await this.plugin.app.vault.adapter.stat(file.path);
@@ -1809,22 +1832,27 @@ export class XSync {
     // baseSha1 = the sha we last synced for this path (or, for a replay, the
     // true base recorded when it was first sent). The server uses it to detect
     // concurrent edits (stale base) without trusting device clocks.
-    // "auto" (a debounced edit caught by a background flush): if metadata
-    // already records this content, it was sent before and may have been lost —
-    // re-deliver it as a resend; otherwise it's a fresh edit, sent normally.
-    const resend = opts.resend === "auto" ? stored?.sha1 === sha1 : opts.resend === true;
+    let resend = opts.resend === true;
     let baseSha1 = opts.baseSha1 ?? stored?.sha1;
     let originBaseSha1 = opts.originBaseSha1;
-    if (opts.resend === "auto" && resend) {
-      // Metadata already advanced to this very sha, so it isn't the true base.
-      // Use the base the earlier send was built on, if this session saw it.
-      // Otherwise keep the (self) sha: the server has never held it as a base
-      // unless this upload landed (then it's dropped as known), so it resolves
-      // by recency — unlike sending no base, which would overwrite blindly.
-      const rec = this.ws.recentUploadFor(file.path);
-      if (rec?.sha1 === sha1) {
-        baseSha1 = rec.baseSha1 ?? baseSha1;
-        originBaseSha1 = rec.originBaseSha1;
+    if (opts.resend === "auto") {
+      // Replay of a pending / never-sent entry. `lastSent` is the last send for
+      // this path that may have been lost, if any (see _rememberUnconfirmed).
+      const last = opts.lastSent;
+      if (last && last.sha1 === sha1) {
+        // The pending event changed nothing: re-deliver that possibly-lost send.
+        resend = true;
+        baseSha1 = last.baseSha1 ?? baseSha1;
+        originBaseSha1 = last.originBaseSha1;
+      } else if (last) {
+        // Newer content on top of a possibly-lost send. A resend, so the server
+        // judges it against the burst's origin if that send never arrived.
+        resend = true;
+        originBaseSha1 = last.originBaseSha1 ?? last.baseSha1;
+      } else if (stored?.sha1 === sha1) {
+        // Nothing was sent and nothing changed (a touch, an iCloud re-download):
+        // there is nothing to deliver, and re-sending could mint a conflict.
+        return "unchanged";
       }
     }
     const sent = this.ws.send({
@@ -1971,6 +1999,18 @@ export class XSync {
     for (const n of entries) {
       const old = all.get(n.path);
       if (old && old.t > n.t) continue; // never let a stale record replace a newer one
+      // A pending / never-sent record carries no send of its own. If it replaces
+      // one that DID send (possibly lost), keep that send's sha and bases: the
+      // replay needs them to re-deliver it, or to judge the newer edit against
+      // the base its burst started from (see _sendFileEvent's "auto").
+      if (n.sent !== true && old?.sha1 && !n.sha1) {
+        all.set(n.path, {
+          ...n, sha1: old.sha1,
+          ...(old.baseSha1 ? { baseSha1: old.baseSha1 } : {}),
+          ...(old.originBaseSha1 ? { originBaseSha1: old.originBaseSha1 } : {}),
+        });
+        continue;
+      }
       all.set(n.path, n);
     }
     this._saveUnconfirmed(all);
@@ -2024,12 +2064,14 @@ export class XSync {
    * sync. Each entry is replayed per its `sent` state (see ConfirmEntry):
    *   - may-have-landed → a `resend` on the recorded true base, only if the file
    *     still holds that content. The server silently drops it if this exact
-   *     upload already landed (head, or a version at this mtime — so a note
+   *     upload already landed (head, or its landed-upload record — so a note
    *     deleted or edited elsewhere since is never resurrected or conflicted);
    *     otherwise it lands, or is kept as one conflict record if another device
    *     has since written a newer version.
-   *   - never-sent / pending → the current content: an ordinary upload, or a
-   *     resend if metadata shows it was already sent (see `resend: "auto"`).
+   *   - never-sent / pending → the current content, as a resend when it sits on
+   *     an earlier possibly-lost send (so the server can fall back to that
+   *     burst's origin base), else as an ordinary upload; nothing at all if the
+   *     content never changed (see `resend: "auto"`).
    * Only runs against a server that understands resends: to an older one a
    * replay would look like brand-new content. Entries are cleared only once
    * resolved; unreadable ones (e.g. evicted files) wait for a later connect.
@@ -2058,12 +2100,21 @@ export class XSync {
             ...(e.originBaseSha1 ? { originBaseSha1: e.originBaseSha1 } : {}),
             ...(e.sha1 ? { expectSha1: e.sha1 } : {}),
           })
-          : await this._sendFileEvent(file, true, { resend: "auto" });
+          : await this._sendFileEvent(file, true, {
+            resend: "auto",
+            ...(e.sha1 ? {
+              lastSent: {
+                sha1: e.sha1,
+                ...(e.baseSha1 ? { baseSha1: e.baseSha1 } : {}),
+                ...(e.originBaseSha1 ? { originBaseSha1: e.originBaseSha1 } : {}),
+              },
+            } : {}),
+          });
       } catch (err) {
         this.plugin.log(`[bg-sync] replay failed for ${e.path}: ${Utils.errorMessage(err)}`);
         continue;
       }
-      if (result === "sent" || result === "superseded" || result === "missing") done.set(e.path, e);
+      if (result === "sent" || result === "superseded" || result === "missing" || result === "unchanged") done.set(e.path, e);
       // "unreadable" / "unsent" / "offline" → keep for the next connect.
     }
 

@@ -379,16 +379,45 @@ export class SyncDB {
     return row !== undefined;
   }
 
-  /** True if THIS upload landed: a version row exists for the path at exactly
-   *  this device mtime with this content. Stricter than hasVersionSha — a revert
-   *  or a re-created note has the same bytes as some old version but a new mtime. */
-  hasVersionAt(filePath: string, mtime: number, sha1: string): boolean {
+  // --- Landed-upload ledger (migration v9) ---------------------------------
+  // Which exact uploads (path + device mtime + sha) the server has accepted.
+  // Unlike file_versions it is never trimmed by version cleanup or tombstone
+  // purge — only aged out (pruneLanded) — so a replayed resend can always tell
+  // "this upload already landed" apart from "new content", however many newer
+  // versions or deletes have happened since.
+
+  /** Record that this exact upload landed (idempotent; refreshes its age). */
+  recordLanded(filePath: string, mtime: number, sha1: string, at = Date.now()): void {
+    this.db
+      .prepare("INSERT OR REPLACE INTO landed_uploads (path, mtime, sha1, at) VALUES (?, ?, ?, ?)")
+      .run(filePath, mtime, sha1, at);
+  }
+
+  /** True if THIS upload landed: this content at exactly this device mtime.
+   *  Stricter than a sha match — a revert or a re-created note has the same
+   *  bytes as some old version but a new mtime. */
+  hasLandedAt(filePath: string, mtime: number, sha1: string): boolean {
     const row = this.db
       .prepare<[string, number, string], { n: number }>(
-        "SELECT 1 AS n FROM file_versions WHERE path = ? AND mtime = ? AND sha1 = ? LIMIT 1"
+        "SELECT 1 AS n FROM landed_uploads WHERE path = ? AND mtime = ? AND sha1 = ? LIMIT 1"
       )
       .get(filePath, mtime, sha1);
     return row !== undefined;
+  }
+
+  /** True if this content ever landed for the path, at any mtime. */
+  hasLandedSha(filePath: string, sha1: string): boolean {
+    const row = this.db
+      .prepare<[string, string], { n: number }>(
+        "SELECT 1 AS n FROM landed_uploads WHERE path = ? AND sha1 = ? LIMIT 1"
+      )
+      .get(filePath, sha1);
+    return row !== undefined;
+  }
+
+  /** Drop ledger rows recorded before `olderThan` (ms epoch). Returns count. */
+  pruneLanded(olderThan: number): number {
+    return this.db.prepare("DELETE FROM landed_uploads WHERE at < ?").run(olderThan).changes;
   }
 
   /**
@@ -661,6 +690,9 @@ export class SyncDB {
       this.db.prepare("DELETE FROM file_versions").run();
       this.db.prepare("DELETE FROM files").run();
       this.db.prepare("DELETE FROM devices").run();
+      // A wiped server holds none of those uploads any more; a replay must not
+      // be dropped as "already landed".
+      this.db.prepare("DELETE FROM landed_uploads").run();
     })();
   }
 

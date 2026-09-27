@@ -236,6 +236,7 @@ export function handleFileUpload(
     // any peer. See isNoopResend — this is the echo-amplification cut.
     if (!isRejected && decision === "accept" && isNoopResend(ctx, file, isE2EE, buf)) {
       logInfo(ctx, `[file_data] no-op resend of ${file.path} (sha unchanged) — dropped, no broadcast`);
+      ctx.db.recordLanded(file.path, file.mtime, file.sha1);
       clearUploadContent(msg);
       advanceUploadQueue(peer, file.path);
       return;
@@ -276,6 +277,9 @@ export function handleFileUpload(
   // Only update the database and broadcast if the file was ACTUALLY saved
   if (!isRejected) {
     ctx.db.upsertFile(file, savedSize, peer.deviceId ?? null);
+    if (file.action === "active" && file.fileType === "file" && file.sha1) {
+      ctx.db.recordLanded(file.path, file.mtime, file.sha1);
+    }
     broadcastToPeers(ctx, peer, file);
     logInfo(ctx, `[file_data] saved ${file.path} (action=${file.action}, mtime=${file.mtime})`);
     pushActivity(ctx, { kind: "upload", deviceId: peer.deviceId ?? undefined, path: file.path });
@@ -445,29 +449,32 @@ function rejectStaleUpload(ctx: SyncContext, peer: SyncPeer, file: FileEntry): v
 }
 
 /** True if this exact upload already landed: the active head holds these bytes,
- *  or a version row records this sha at this very mtime (so it landed and was
- *  superseded or deleted since). A same-sha upload at a NEW mtime is a
- *  recreate (e.g. restored from trash) and is not "known". An E2EE upload over
- *  a plaintext head, or over ciphertext of another format version, is the
- *  encryption upgrade / re-key path and must not be dropped either. */
+ *  or the landed-upload ledger records this sha at this very mtime (so it
+ *  landed and was superseded or deleted since — the ledger survives version
+ *  trimming and tombstone purges). A same-sha upload at a NEW mtime is a
+ *  recreate and is not "known". An E2EE upload over a plaintext head, or over
+ *  ciphertext of an OLDER format version, is the encryption upgrade / re-key
+ *  path and must not be dropped either (a lower version never is: replaying it
+ *  would downgrade a re-keyed head). */
 function isKnownContent(ctx: SyncContext, file: FileEntry, uploadBuf: Buffer | null): boolean {
   const head = ctx.db.getFile(file.path);
   const headMatches = !!head && head.action === "active" && head.sha1 === file.sha1;
-  const landedHere = ctx.db.hasVersionAt(file.path, file.mtime, file.sha1);
+  const landedHere = ctx.db.hasLandedAt(file.path, file.mtime, file.sha1);
   if (!headMatches && !landedHere) return false;
   if (headMatches && uploadBuf && isE2eeEncrypted(uploadBuf)) {
     const headBuf = readHead(ctx, file.path);
     if (!headBuf || !isE2eeEncrypted(headBuf)) return false;
-    if (e2eeVersion(headBuf) !== e2eeVersion(uploadBuf)) return false;
+    if ((e2eeVersion(uploadBuf) ?? 0) > (e2eeVersion(headBuf) ?? 0)) return false;
   }
   return true;
 }
 
-/** True if the server has ever held this sha for the path (head or version). */
+/** True if the server has ever held this sha for the path (head, a version
+ *  row, or the landed-upload ledger). */
 function isKnownSha(ctx: SyncContext, path: string, sha1: string): boolean {
   const head = ctx.db.getFile(path);
   if (head && head.sha1 === sha1) return true;
-  return ctx.db.hasVersionSha(path, sha1);
+  return ctx.db.hasVersionSha(path, sha1) || ctx.db.hasLandedSha(path, sha1);
 }
 
 /** Re-push the server's current head of a path so the uploader's vault converges. */
