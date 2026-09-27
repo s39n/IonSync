@@ -459,7 +459,10 @@ function rejectStaleUpload(ctx: SyncContext, peer: SyncPeer, file: FileEntry): v
 function isKnownContent(ctx: SyncContext, file: FileEntry, uploadBuf: Buffer | null): boolean {
   const head = ctx.db.getFile(file.path);
   const headMatches = !!head && head.action === "active" && head.sha1 === file.sha1;
-  const landedHere = ctx.db.hasLandedAt(file.path, file.mtime, file.sha1);
+  const landedHere = ctx.db.hasLandedAt(file.path, file.mtime, file.sha1)
+    // Or it already arrived and was kept as a conflict record (possibly
+    // resolved since): replaying it must not mint that conflict again.
+    || ctx.db.hasConflictAt(file.path, file.mtime, file.sha1);
   if (!headMatches && !landedHere) return false;
   if (headMatches && uploadBuf && isE2eeEncrypted(uploadBuf)) {
     const headBuf = readHead(ctx, file.path);

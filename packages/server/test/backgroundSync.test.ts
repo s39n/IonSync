@@ -368,6 +368,23 @@ describe("background sync — WS resend (reconnect replay) semantics", () => {
     a.c.close(); b.c.close(); await srv.stop();
   });
 
+  it("a replay never re-mints a conflict the user already resolved", async () => {
+    const srv = await startTestServer();
+    const a = await connect(srv.port, "devA");
+    const b = await connect(srv.port, "devB");
+    await wsUpload(srv, a.c, entry("c.md", "v1", 1000));
+    await wsUpload(srv, b.c, entry("c.md", "laptop v2", 3000, sha1("v1")));
+    const stale = entry("c.md", "phone v2", 2000, sha1("v1"));
+    a.c.send({ type: "file_data", mode: "apply", ...stale }); // arrives, becomes a conflict
+    await until(() => srv.ctx.db.listConflicts().length === 1);
+    srv.ctx.db.resolveConflict(srv.ctx.db.listConflicts()[0]!.id); // user dismisses it
+    a.c.send({ type: "file_data", mode: "apply", resend: true, ...stale }); // reconnect replay
+    await wsUpload(srv, a.c, entry("probe.md", "p", 1));
+    assert.equal(srv.ctx.db.listConflicts().length, 0, "not re-minted");
+    assert.equal(srv.ctx.db.listConflicts(true).length, 1);
+    a.c.close(); b.c.close(); await srv.stop();
+  });
+
   it("rejects an active-file upload with an empty sha1 instead of corrupting the head", async () => {
     const srv = await startTestServer();
     const a = await connect(srv.port, "devA");

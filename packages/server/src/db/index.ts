@@ -500,6 +500,18 @@ export class SyncDB {
     return row !== undefined;
   }
 
+  /** True if this exact upload (content at this device mtime) was already
+   *  recorded as a conflict — open OR resolved. A replayed resend of it must
+   *  not re-mint a conflict the user has already dealt with. */
+  hasConflictAt(path: string, mtime: number, sha1: string): boolean {
+    const row = this.db
+      .prepare<[string, number, string], { n: number }>(
+        "SELECT 1 AS n FROM conflicts WHERE path = ? AND mtime = ? AND sha1 = ? LIMIT 1"
+      )
+      .get(path, mtime, sha1);
+    return row !== undefined;
+  }
+
   /** List conflicts, newest first. Unresolved only unless includeResolved. */
   listConflicts(includeResolved = false): ConflictRecord[] {
     const rows = includeResolved
