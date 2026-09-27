@@ -96,6 +96,10 @@ console.error = (...args) => { _error(...args); appendLog("ERROR", args); };
 
 const publicApp = express();
 publicApp.disable("x-powered-by");
+// Honour X-Forwarded-For on the public port too when a trusted proxy fronts it,
+// so per-client limits (background-sync rate limit) key on the real client IP
+// instead of lumping every client in as the proxy.
+if (config.trustProxy) publicApp.set("trust proxy", true);
 publicApp.use(buildPublicRouter(ctx));
 
 const adminApp = express();

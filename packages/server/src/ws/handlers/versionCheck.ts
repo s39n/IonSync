@@ -6,6 +6,7 @@
  * plugin can hot-reload itself — preserving the v1 auto-update feature.
  */
 import type { VersionCheckMsg } from "@ionsync/protocol";
+import { BG_RESEND_CAP } from "@ionsync/protocol";
 import type { SyncContext } from "../../context.js";
 import type { SyncPeer } from "../peer.js";
 import fs from "node:fs";
@@ -47,7 +48,7 @@ const PLUGIN_FILES = ["main.js", "styles.css", "manifest.json"] as const;
 /** Capability tokens this server understands. Lets new plugins feature-detect
  *  (e.g. atomic `file_rename`, binary content frames) without a version-number
  *  handshake. */
-const SERVER_CAPS = ["file_rename", "binary_frames"];
+const SERVER_CAPS = ["file_rename", "binary_frames", BG_RESEND_CAP];
 
 export function handleVersionCheck(
   ctx: SyncContext,

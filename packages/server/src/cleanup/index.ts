@@ -7,6 +7,9 @@
  */
 import type { SyncContext } from "../context.js";
 
+/** How long a landed upload is remembered (plugin replays expire after 7 days). */
+export const LANDED_LEDGER_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+
 export class SyncCleanup {
   private timer: ReturnType<typeof setInterval> | null = null;
 
@@ -75,6 +78,11 @@ export class SyncCleanup {
       }
       db.deleteFileMeta(file.path);
     }
+
+    // 3. Age out the landed-upload ledger. Kept well past the plugin's 7-day
+    //    expiry for unconfirmed uploads, so any replay it can still send finds
+    //    its record here.
+    db.pruneLanded(Date.now() - LANDED_LEDGER_TTL_MS);
 
     if (purgeable.length > 0 || trimmedCount > 0) {
       pushLog(

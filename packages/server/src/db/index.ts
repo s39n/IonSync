@@ -379,6 +379,47 @@ export class SyncDB {
     return row !== undefined;
   }
 
+  // --- Landed-upload ledger (migration v9) ---------------------------------
+  // Which exact uploads (path + device mtime + sha) the server has accepted.
+  // Unlike file_versions it is never trimmed by version cleanup or tombstone
+  // purge — only aged out (pruneLanded) — so a replayed resend can always tell
+  // "this upload already landed" apart from "new content", however many newer
+  // versions or deletes have happened since.
+
+  /** Record that this exact upload landed (idempotent; refreshes its age). */
+  recordLanded(filePath: string, mtime: number, sha1: string, at = Date.now()): void {
+    this.db
+      .prepare("INSERT OR REPLACE INTO landed_uploads (path, mtime, sha1, at) VALUES (?, ?, ?, ?)")
+      .run(filePath, mtime, sha1, at);
+  }
+
+  /** True if THIS upload landed: this content at exactly this device mtime.
+   *  Stricter than a sha match — a revert or a re-created note has the same
+   *  bytes as some old version but a new mtime. */
+  hasLandedAt(filePath: string, mtime: number, sha1: string): boolean {
+    const row = this.db
+      .prepare<[string, number, string], { n: number }>(
+        "SELECT 1 AS n FROM landed_uploads WHERE path = ? AND mtime = ? AND sha1 = ? LIMIT 1"
+      )
+      .get(filePath, mtime, sha1);
+    return row !== undefined;
+  }
+
+  /** True if this content ever landed for the path, at any mtime. */
+  hasLandedSha(filePath: string, sha1: string): boolean {
+    const row = this.db
+      .prepare<[string, string], { n: number }>(
+        "SELECT 1 AS n FROM landed_uploads WHERE path = ? AND sha1 = ? LIMIT 1"
+      )
+      .get(filePath, sha1);
+    return row !== undefined;
+  }
+
+  /** Drop ledger rows recorded before `olderThan` (ms epoch). Returns count. */
+  pruneLanded(olderThan: number): number {
+    return this.db.prepare("DELETE FROM landed_uploads WHERE at < ?").run(olderThan).changes;
+  }
+
   /**
    * Version rows past the newest `keepCount` (by arrival order), EXCLUDING the
    * row that backs the current head — the head's bytes must survive trimming
@@ -446,6 +487,29 @@ export class SyncDB {
       )
       .run(path, sha1, mtime, deviceId, Date.now());
     return Number(info.lastInsertRowid);
+  }
+
+  /** True if an UNRESOLVED conflict already preserves exactly this content for
+   *  this path — recording it again would only duplicate the same bytes. */
+  hasOpenConflict(path: string, sha1: string): boolean {
+    const row = this.db
+      .prepare<[string, string], { n: number }>(
+        "SELECT 1 AS n FROM conflicts WHERE path = ? AND sha1 = ? AND resolved = 0 LIMIT 1"
+      )
+      .get(path, sha1);
+    return row !== undefined;
+  }
+
+  /** True if this exact upload (content at this device mtime) was already
+   *  recorded as a conflict — open OR resolved. A replayed resend of it must
+   *  not re-mint a conflict the user has already dealt with. */
+  hasConflictAt(path: string, mtime: number, sha1: string): boolean {
+    const row = this.db
+      .prepare<[string, number, string], { n: number }>(
+        "SELECT 1 AS n FROM conflicts WHERE path = ? AND mtime = ? AND sha1 = ? LIMIT 1"
+      )
+      .get(path, mtime, sha1);
+    return row !== undefined;
   }
 
   /** List conflicts, newest first. Unresolved only unless includeResolved. */
@@ -638,6 +702,9 @@ export class SyncDB {
       this.db.prepare("DELETE FROM file_versions").run();
       this.db.prepare("DELETE FROM files").run();
       this.db.prepare("DELETE FROM devices").run();
+      // A wiped server holds none of those uploads any more; a replay must not
+      // be dropped as "already landed".
+      this.db.prepare("DELETE FROM landed_uploads").run();
     })();
   }
 

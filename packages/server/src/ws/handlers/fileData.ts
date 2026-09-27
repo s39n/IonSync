@@ -139,6 +139,44 @@ export function handleFileUpload(
   msg: FileDataUploadMsg
 ): void {
   const { file, content } = msg;
+
+  // An active file with no content hash is never valid: it's what a client
+  // sends when it failed to read the file (e.g. an iCloud-evicted note), and
+  // accepting it would overwrite the head's sha with "" — after which every
+  // other device's upload looks like a stale-base conflict.
+  if (file.action === "active" && file.fileType === "file" && !file.sha1) {
+    logWarn(ctx, `[file_data] rejected ${file.path} from ${peer.deviceId}: active file with empty sha1`);
+    clearUploadContent(msg);
+    advanceUploadQueue(peer, file.path);
+    return;
+  }
+
+  // A resend re-delivers bytes the client believes it already sent (mobile
+  // background replay). If THIS upload already landed — the head holds these
+  // bytes, or a version row exists at exactly this mtime+sha — it carries no
+  // new information: drop it silently. Treating it as new would resurrect a
+  // note another device deleted since, or record a spurious conflict for an
+  // edit that already landed. No push: the ordinary reconnect sync converges
+  // the uploader, and a push here could clobber a note it has since recreated.
+  if (msg.resend && file.action === "active" && file.fileType === "file") {
+    const up = msg.contentBytes && msg.contentBytes.length > 0
+      ? Buffer.from(msg.contentBytes.buffer, msg.contentBytes.byteOffset, msg.contentBytes.byteLength)
+      : (content ? Buffer.from(content, "base64") : null);
+    if (isKnownContent(ctx, file, up)) {
+      logInfo(ctx, `[file_data] resend of ${file.path} from ${peer.deviceId} already landed — dropped`);
+      clearUploadContent(msg);
+      advanceUploadQueue(peer, file.path);
+      return;
+    }
+    // The client's latest recorded base may itself have been a send that was
+    // lost with this one (a burst of edits frozen mid-flight). If that base
+    // never reached the server, judge the upload against the base the burst
+    // started from instead, so a fast-forward isn't misread as a conflict.
+    if (msg.originBaseSha1 && msg.baseSha1 && !isKnownSha(ctx, file.path, msg.baseSha1)) {
+      msg.baseSha1 = msg.originBaseSha1;
+    }
+  }
+
   let isRejected = false;
   let isE2EE = false;
   let savedSize: number | undefined;
@@ -198,6 +236,7 @@ export function handleFileUpload(
     // any peer. See isNoopResend — this is the echo-amplification cut.
     if (!isRejected && decision === "accept" && isNoopResend(ctx, file, isE2EE, buf)) {
       logInfo(ctx, `[file_data] no-op resend of ${file.path} (sha unchanged) — dropped, no broadcast`);
+      ctx.db.recordLanded(file.path, file.mtime, file.sha1);
       clearUploadContent(msg);
       advanceUploadQueue(peer, file.path);
       return;
@@ -238,6 +277,9 @@ export function handleFileUpload(
   // Only update the database and broadcast if the file was ACTUALLY saved
   if (!isRejected) {
     ctx.db.upsertFile(file, savedSize, peer.deviceId ?? null);
+    if (file.action === "active" && file.fileType === "file" && file.sha1) {
+      ctx.db.recordLanded(file.path, file.mtime, file.sha1);
+    }
     broadcastToPeers(ctx, peer, file);
     logInfo(ctx, `[file_data] saved ${file.path} (action=${file.action}, mtime=${file.mtime})`);
     pushActivity(ctx, { kind: "upload", deviceId: peer.deviceId ?? undefined, path: file.path });
@@ -287,6 +329,13 @@ export function storeConflict(
 ): void {
   if (!buf || isEmptyUpload(buf)) {
     logWarn(ctx, `[Conflict] ${peer.deviceId} conflict on ${path} with ${buf ? "empty" : "no"} content — head kept, nothing recorded`);
+    return;
+  }
+  // The same losing content can arrive more than once (a WS upload, its
+  // background beacon/replay, a reconnect retry). One record preserves it;
+  // more would just be noise in the conflicts list.
+  if (ctx.db.hasOpenConflict(path, sha1)) {
+    logInfo(ctx, `[Conflict] ${peer.deviceId} conflict on ${path} already recorded (same content) — not duplicated`);
     return;
   }
   const id = ctx.db.recordConflict(path, sha1, mtime, peer.deviceId ?? null);
@@ -397,6 +446,38 @@ function pushRenameConvergence(ctx: SyncContext, peer: SyncPeer, fromPath: strin
 function rejectStaleUpload(ctx: SyncContext, peer: SyncPeer, file: FileEntry): void {
   logInfo(ctx, `[Conflict] stale config upload dropped (LWW): ${file.path} from ${peer.deviceId}`);
   pushHeadToUploader(ctx, peer, file.path);
+}
+
+/** True if this exact upload already landed: the active head holds these bytes,
+ *  or the landed-upload ledger records this sha at this very mtime (so it
+ *  landed and was superseded or deleted since — the ledger survives version
+ *  trimming and tombstone purges). A same-sha upload at a NEW mtime is a
+ *  recreate and is not "known". An E2EE upload over a plaintext head, or over
+ *  ciphertext of an OLDER format version, is the encryption upgrade / re-key
+ *  path and must not be dropped either (a lower version never is: replaying it
+ *  would downgrade a re-keyed head). */
+function isKnownContent(ctx: SyncContext, file: FileEntry, uploadBuf: Buffer | null): boolean {
+  const head = ctx.db.getFile(file.path);
+  const headMatches = !!head && head.action === "active" && head.sha1 === file.sha1;
+  const landedHere = ctx.db.hasLandedAt(file.path, file.mtime, file.sha1)
+    // Or it already arrived and was kept as a conflict record (possibly
+    // resolved since): replaying it must not mint that conflict again.
+    || ctx.db.hasConflictAt(file.path, file.mtime, file.sha1);
+  if (!headMatches && !landedHere) return false;
+  if (headMatches && uploadBuf && isE2eeEncrypted(uploadBuf)) {
+    const headBuf = readHead(ctx, file.path);
+    if (!headBuf || !isE2eeEncrypted(headBuf)) return false;
+    if ((e2eeVersion(uploadBuf) ?? 0) > (e2eeVersion(headBuf) ?? 0)) return false;
+  }
+  return true;
+}
+
+/** True if the server has ever held this sha for the path (head, a version
+ *  row, or the landed-upload ledger). */
+function isKnownSha(ctx: SyncContext, path: string, sha1: string): boolean {
+  const head = ctx.db.getFile(path);
+  if (head && head.sha1 === sha1) return true;
+  return ctx.db.hasVersionSha(path, sha1) || ctx.db.hasLandedSha(path, sha1);
 }
 
 /** Re-push the server's current head of a path so the uploader's vault converges. */

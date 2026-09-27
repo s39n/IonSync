@@ -155,6 +155,25 @@ export const MIGRATIONS: Array<{ version: number; up: (db: Database.Database) =>
       `);
     },
   },
+  {
+    version: 9,
+    up(db) {
+      // Ledger of accepted uploads, so a mobile background replay (a "resend")
+      // can be recognised as already-landed even after version cleanup trimmed
+      // its row or the path was deleted and its tombstone purged. Aged out by
+      // cleanup, never trimmed per file. See Db.recordLanded.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS landed_uploads (
+          path   TEXT    NOT NULL,
+          mtime  INTEGER NOT NULL,
+          sha1   TEXT    NOT NULL,
+          at     INTEGER NOT NULL,
+          PRIMARY KEY (path, mtime, sha1)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS idx_landed_uploads_at ON landed_uploads (at);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

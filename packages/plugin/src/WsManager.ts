@@ -3,11 +3,23 @@ import type {
   ClientMsg,
   VersionCheckResponseMsg,
 } from "@ionsync/protocol";
-import { encodeFrame, decodeFrame, BINARY_FRAMES_CAP } from "@ionsync/protocol";
+import { encodeFrame, decodeFrame, BINARY_FRAMES_CAP, BACKGROUND_SYNC_PATH } from "@ionsync/protocol";
+import type { FileDataUploadMsg } from "@ionsync/protocol";
 import { Platform } from "obsidian";
 import type { IonSyncPlugin, PluginSettings } from "./main.js";
 
 // ---------- Types ----------
+
+/** An upload recently handed to the socket (see WsManager.recentUploads). */
+export interface RecentUpload {
+  t: number;
+  sha1: string;
+  baseSha1?: string;
+  originBaseSha1?: string;
+}
+
+/** Sends of the same path this close together are one burst of edits. */
+const BURST_MS = 10_000;
 
 export interface UpdateInfo {
   files: { name: string; content: string }[];
@@ -54,6 +66,24 @@ export class WsManager {
    *  Empty until version_check_response arrives, and reset on disconnect so a
    *  reconnect to an older server can't inherit a stale capability. */
   serverCaps: string[] = [];
+  /** Device-bound token for the mobile background flush, from `auth_ok`.
+   *  Kept across a disconnect (the beacon fires as the socket closes); rotated
+   *  by the server on every connect. Null against servers that predate it. */
+  bgToken: string | null = null;
+
+  /** Active capture buffers: full-file uploads passing through send() are also
+   *  recorded into each, so they can be re-delivered by beacon (see XSync).
+   *  One buffer per flush, so overlapping flushes (a quick hide→show→hide)
+   *  can't clobber each other's captures. */
+  private captures = new Set<FileDataUploadMsg[]>();
+  /** path → the last upload sent for it: when, its sha1, and the base it was
+   *  built on (the TRUE pre-send base — metadata is overwritten right after
+   *  sending). Used to find, and correctly re-send, edits whose bytes may still
+   *  have been in the socket buffer when the OS froze the app.
+   *  `originBaseSha1` is the base the current burst of sends started from:
+   *  if every send in the burst was lost, the server never saw `baseSha1`, and
+   *  it judges a replay against the origin instead. */
+  private recentUploads = new Map<string, RecentUpload>();
 
   private ws: WebSocket | null = null;
   private listeners: Listener[] = [];
@@ -137,14 +167,93 @@ export class WsManager {
     return this.ws?.bufferedAmount ?? 0;
   }
 
-  send(msg: ClientMsg): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+  /**
+   * Send a message. Returns true only if it was handed to an OPEN socket —
+   * callers that record "this is now synced" must not do so on false.
+   */
+  send(msg: ClientMsg): boolean {
+    const isUpload = msg.type === "file_data" && (msg.mode === "apply" || msg.mode === "patch");
+    // Captured before the readyState check: a socket that just dropped is
+    // exactly the case the beacon exists to rescue. Only full, first-time
+    // uploads are beaconable (a patch needs the WS path's server-side stitch;
+    // a resend's conflict semantics need the WS path's resend handling).
+    if (isUpload && msg.mode === "apply" && !msg.resend) for (const buf of this.captures) buf.push(msg);
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
     this.log("Sending:", msg.type);
     // encodeFrame emits a binary frame for a content-bearing upload when the
     // server advertised "binary_frames"; otherwise a JSON string (base64ing any
     // raw bytes back into `content`). Falls back automatically against an old
     // server (serverCaps empty).
     this.ws.send(encodeFrame(msg, this.serverCaps.includes(BINARY_FRAMES_CAP)));
+    if (isUpload) {
+      // Only uploads that actually went out: these may or may not have left
+      // the device before the OS froze the app. Resends are recorded too — a
+      // replay that is itself frozen mid-flight must be replayable again.
+      const now = Date.now();
+      const prev = this.recentUploads.get(msg.file.path);
+      const origin = prev && now - prev.t <= BURST_MS
+        ? (prev.originBaseSha1 ?? prev.baseSha1)
+        : (msg.originBaseSha1 ?? msg.baseSha1);
+      this.recentUploads.set(msg.file.path, {
+        t: now,
+        sha1: msg.file.sha1,
+        ...(msg.baseSha1 ? { baseSha1: msg.baseSha1 } : {}),
+        ...(origin && origin !== msg.baseSha1 ? { originBaseSha1: origin } : {}),
+      });
+      if (this.recentUploads.size > 500) {
+        const cutoff = Date.now() - 60_000;
+        for (const [p, r] of this.recentUploads) if (r.t < cutoff) this.recentUploads.delete(p);
+      }
+    }
+    return true;
+  }
+
+  /** Start recording full-file uploads sent through send(). Returns this
+   *  flush's own buffer; pass it back to endCapture(). */
+  beginCapture(): FileDataUploadMsg[] {
+    const buf: FileDataUploadMsg[] = [];
+    this.captures.add(buf);
+    return buf;
+  }
+
+  /** Stop recording into `buf` and return it. */
+  endCapture(buf: FileDataUploadMsg[]): FileDataUploadMsg[] {
+    this.captures.delete(buf);
+    return buf;
+  }
+
+  /** Uploads sent within the last `withinMs` — candidates whose bytes may not
+   *  have left the device if the OS froze the app right after — with the sha
+   *  and true base each was sent with. */
+  recentUploadDetails(withinMs: number): (RecentUpload & { path: string })[] {
+    const cutoff = Date.now() - withinMs;
+    const out: (RecentUpload & { path: string })[] = [];
+    for (const [path, r] of this.recentUploads) {
+      if (r.t >= cutoff) out.push({ path, ...r });
+    }
+    return out;
+  }
+
+  /** The last upload handed to the socket for `path`, if any. */
+  recentUploadFor(path: string): RecentUpload | undefined {
+    return this.recentUploads.get(path);
+  }
+
+  /** Base URL of the server for a scheme family, from the same settings the
+   *  socket uses (so the beacon always targets the server we're syncing with). */
+  private _endpoint(family: "ws" | "http"): string {
+    const host = this.settings.host.replace(/\/+$/, ""); // strip any trailing slashes
+    const { port } = this.settings;
+    const scheme = family === "ws"
+      ? (this.settings.tls ? "wss" : "ws")
+      : (this.settings.tls ? "https" : "http");
+    const defaultPort = this.settings.tls ? 443 : 80;
+    return port && port !== defaultPort ? `${scheme}://${host}:${port}` : `${scheme}://${host}`;
+  }
+
+  /** Where the mobile background flush is POSTed. */
+  get backgroundSyncUrl(): string {
+    return this._endpoint("http") + BACKGROUND_SYNC_PATH;
   }
 
   disconnect(): void {
@@ -182,13 +291,7 @@ export class WsManager {
       this.log("Skipping reconnect — a socket is already open/connecting");
       return;
     }
-    const host = this.settings.host.replace(/\/+$/, ""); // strip any trailing slashes
-    const { port } = this.settings;
-    const scheme = this.settings.tls ? "wss" : "ws";
-    const defaultPort = this.settings.tls ? 443 : 80;
-    const url = port && port !== defaultPort
-      ? `${scheme}://${host}:${port}`
-      : `${scheme}://${host}`;
+    const url = this._endpoint("ws");
     this.log("Opening WebSocket to:", url);
 
     try {
@@ -244,6 +347,8 @@ export class WsManager {
         // #7). Fire-and-forget: it only enables v3 reads/writes and never blocks
         // the handshake. Older servers omit it and we stay on the global salt.
         if (msg.e2eeSalt) void this.plugin.applyE2eeSalt(msg.e2eeSalt);
+        // Background-flush token (servers that predate it omit the field).
+        this.bgToken = msg.bgToken ?? null;
         // Advertise binary_frames so the server can push file content as binary
         // frames to us. The server gates on this per-peer; an old server ignores
         // the field and we fall back to base64 (serverCaps stays empty).
