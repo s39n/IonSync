@@ -30,6 +30,9 @@ export const BACKGROUND_SYNC_PATH = "/api/background-sync";
  */
 export const BG_BEACON_MAX_BYTES = 60_000;
 
+/** Most uploads one beacon may carry; the server rejects larger batches. */
+export const BG_BEACON_MAX_FILES = 50;
+
 /**
  * Body of POST {@link BACKGROUND_SYNC_PATH}, sent as text/plain JSON. Each entry
  * is exactly the upload the plugin would have sent over the WebSocket (full

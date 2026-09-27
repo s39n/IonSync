@@ -37,6 +37,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type WebSocket from "ws";
 import type { FileDataUploadMsg, FileEntry } from "@ionsync/protocol";
+import { BG_BEACON_MAX_FILES } from "@ionsync/protocol";
 import type { SyncContext } from "./context.js";
 import { sha256 } from "./crypto.js";
 import { isValidVaultPath } from "./paths.js";
@@ -46,8 +47,9 @@ import { handleFileUpload } from "./ws/handlers/fileData.js";
 /** A token only needs to outlive the session it was issued in (it is rotated on
  *  every connect); 24h is a generous ceiling for a phone left in the background. */
 export const BG_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
-/** Max uploads in one beacon. A beacon is ≤ ~64 KB anyway; this bounds work. */
-export const BG_MAX_FILES = 50;
+/** Max uploads in one beacon (shared with the plugin). A beacon is ≤ ~64 KB
+ *  anyway; this bounds work. */
+export const BG_MAX_FILES = BG_BEACON_MAX_FILES;
 /** Per-device request budget. */
 export const BG_RATE_LIMIT = 20;
 export const BG_RATE_WINDOW_MS = 60_000;

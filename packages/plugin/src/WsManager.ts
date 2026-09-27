@@ -60,12 +60,16 @@ export class WsManager {
    *  by the server on every connect. Null against servers that predate it. */
   bgToken: string | null = null;
 
-  /** While non-null, full-file uploads passing through send() are also
-   *  recorded here so they can be re-delivered by beacon (see XSync). */
-  private captured: FileDataUploadMsg[] | null = null;
-  /** path → time of the last upload sent for it. Used to find edits whose bytes
-   *  may still have been sitting in the socket buffer when the app backgrounded. */
-  private recentUploads = new Map<string, number>();
+  /** Active capture buffers: full-file uploads passing through send() are also
+   *  recorded into each, so they can be re-delivered by beacon (see XSync).
+   *  One buffer per flush, so overlapping flushes (a quick hide→show→hide)
+   *  can't clobber each other's captures. */
+  private captures = new Set<FileDataUploadMsg[]>();
+  /** path → the last upload sent for it: when, its sha1, and the base it was
+   *  built on (the TRUE pre-send base — metadata is overwritten right after
+   *  sending). Used to find, and correctly re-send, edits whose bytes may still
+   *  have been in the socket buffer when the OS froze the app. */
+  private recentUploads = new Map<string, { t: number; sha1: string; baseSha1?: string }>();
 
   private ws: WebSocket | null = null;
   private listeners: Listener[] = [];
@@ -149,43 +153,62 @@ export class WsManager {
     return this.ws?.bufferedAmount ?? 0;
   }
 
-  send(msg: ClientMsg): void {
-    if (msg.type === "file_data" && (msg.mode === "apply" || msg.mode === "patch")) {
-      this.recentUploads.set(msg.file.path, Date.now());
-      if (this.recentUploads.size > 500) {
-        const cutoff = Date.now() - 60_000;
-        for (const [p, t] of this.recentUploads) if (t < cutoff) this.recentUploads.delete(p);
-      }
-      // Captured before the readyState check: a socket that just dropped is
-      // exactly the case the beacon exists to rescue. Only full uploads are
-      // beaconable (a patch needs the WS path's server-side stitch).
-      if (msg.mode === "apply") this.captured?.push(msg);
-    }
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+  /**
+   * Send a message. Returns true only if it was handed to an OPEN socket —
+   * callers that record "this is now synced" must not do so on false.
+   */
+  send(msg: ClientMsg): boolean {
+    const isUpload = msg.type === "file_data" && (msg.mode === "apply" || msg.mode === "patch") && !msg.resend;
+    // Captured before the readyState check: a socket that just dropped is
+    // exactly the case the beacon exists to rescue. Only full uploads are
+    // beaconable (a patch needs the WS path's server-side stitch).
+    if (isUpload && msg.mode === "apply") for (const buf of this.captures) buf.push(msg);
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
     this.log("Sending:", msg.type);
     // encodeFrame emits a binary frame for a content-bearing upload when the
     // server advertised "binary_frames"; otherwise a JSON string (base64ing any
     // raw bytes back into `content`). Falls back automatically against an old
     // server (serverCaps empty).
     this.ws.send(encodeFrame(msg, this.serverCaps.includes(BINARY_FRAMES_CAP)));
+    if (isUpload) {
+      // Only uploads that actually went out: these may or may not have left
+      // the device before the OS froze the app.
+      this.recentUploads.set(msg.file.path, {
+        t: Date.now(),
+        sha1: msg.file.sha1,
+        ...(msg.baseSha1 ? { baseSha1: msg.baseSha1 } : {}),
+      });
+      if (this.recentUploads.size > 500) {
+        const cutoff = Date.now() - 60_000;
+        for (const [p, r] of this.recentUploads) if (r.t < cutoff) this.recentUploads.delete(p);
+      }
+    }
+    return true;
   }
 
-  /** Start recording full-file uploads sent through send(). */
-  beginCapture(): void { this.captured = []; }
-
-  /** Stop recording and return what was captured. */
-  endCapture(): FileDataUploadMsg[] {
-    const out = this.captured ?? [];
-    this.captured = null;
-    return out;
+  /** Start recording full-file uploads sent through send(). Returns this
+   *  flush's own buffer; pass it back to endCapture(). */
+  beginCapture(): FileDataUploadMsg[] {
+    const buf: FileDataUploadMsg[] = [];
+    this.captures.add(buf);
+    return buf;
   }
 
-  /** Paths uploaded within the last `withinMs` — candidates whose bytes may not
-   *  have left the device if the OS froze the app right after. */
-  recentUploadPaths(withinMs: number): string[] {
+  /** Stop recording into `buf` and return it. */
+  endCapture(buf: FileDataUploadMsg[]): FileDataUploadMsg[] {
+    this.captures.delete(buf);
+    return buf;
+  }
+
+  /** Uploads sent within the last `withinMs` — candidates whose bytes may not
+   *  have left the device if the OS froze the app right after — with the sha
+   *  and true base each was sent with. */
+  recentUploadDetails(withinMs: number): { path: string; sha1: string; baseSha1?: string }[] {
     const cutoff = Date.now() - withinMs;
-    const out: string[] = [];
-    for (const [p, t] of this.recentUploads) if (t >= cutoff) out.push(p);
+    const out: { path: string; sha1: string; baseSha1?: string }[] = [];
+    for (const [path, r] of this.recentUploads) {
+      if (r.t >= cutoff) out.push({ path, sha1: r.sha1, ...(r.baseSha1 ? { baseSha1: r.baseSha1 } : {}) });
+    }
     return out;
   }
 
