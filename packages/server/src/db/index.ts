@@ -379,6 +379,18 @@ export class SyncDB {
     return row !== undefined;
   }
 
+  /** True if THIS upload landed: a version row exists for the path at exactly
+   *  this device mtime with this content. Stricter than hasVersionSha — a revert
+   *  or a re-created note has the same bytes as some old version but a new mtime. */
+  hasVersionAt(filePath: string, mtime: number, sha1: string): boolean {
+    const row = this.db
+      .prepare<[string, number, string], { n: number }>(
+        "SELECT 1 AS n FROM file_versions WHERE path = ? AND mtime = ? AND sha1 = ? LIMIT 1"
+      )
+      .get(filePath, mtime, sha1);
+    return row !== undefined;
+  }
+
   /**
    * Version rows past the newest `keepCount` (by arrival order), EXCLUDING the
    * row that backs the current head — the head's bytes must survive trimming

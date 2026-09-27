@@ -122,15 +122,22 @@ export interface FileDataUploadMsg {
    */
   baseSha1?: string;
   /**
-   * Re-delivery of content the client believes it already sent (the mobile
-   * background replay). The server must never treat it as new information:
-   * if these exact bytes are already known for the path (current head or any
-   * stored version — including one that was since deleted or superseded), it
-   * is dropped with no write, conflict or broadcast, and the uploader is sent
-   * the current head/tombstone to converge. Only sent to servers advertising
+   * Re-delivery of an upload the client may already have sent (the mobile
+   * background replay). If THIS upload already landed — the bytes are the
+   * current head, or a version exists at exactly this mtime with this sha —
+   * it is dropped silently: no write, conflict, broadcast or push. (The replay
+   * runs before the catch-up sync, which converges the device.) Otherwise it is
+   * handled as a normal upload. Only sent to servers advertising
    * {@link BG_RESEND_CAP}.
    */
   resend?: boolean;
+  /**
+   * Resends only: the base of the OLDEST unconfirmed upload in the same edit
+   * burst. If `baseSha1` (the previous upload in the burst) never reached the
+   * server either, the server falls back to this one, so a burst lost in full
+   * resolves as a clean fast-forward or a proper conflict — not last-write-wins.
+   */
+  originBaseSha1?: string;
 }
 
 /** Server capability: understands `resend` uploads (see FileDataUploadMsg). */

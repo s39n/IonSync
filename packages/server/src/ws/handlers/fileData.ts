@@ -152,18 +152,29 @@ export function handleFileUpload(
   }
 
   // A resend re-delivers bytes the client believes it already sent (mobile
-  // background replay). If the server already knows these exact bytes for this
-  // path — as the head, or as any stored version, even one since superseded or
-  // deleted — they carry no new information: drop them. Treating them as new
-  // would resurrect a note another device deleted, or record a spurious
-  // conflict for an edit that already landed. The uploader is sent the
-  // current state so it converges.
-  if (msg.resend && file.action === "active" && file.fileType === "file" && isKnownContent(ctx, file)) {
-    logInfo(ctx, `[file_data] resend of ${file.path} from ${peer.deviceId} is already known — dropped`);
-    clearUploadContent(msg);
-    pushCurrentStateToUploader(ctx, peer, file.path);
-    advanceUploadQueue(peer, file.path);
-    return;
+  // background replay). If THIS upload already landed — the head holds these
+  // bytes, or a version row exists at exactly this mtime+sha — it carries no
+  // new information: drop it silently. Treating it as new would resurrect a
+  // note another device deleted since, or record a spurious conflict for an
+  // edit that already landed. No push: the ordinary reconnect sync converges
+  // the uploader, and a push here could clobber a note it has since recreated.
+  if (msg.resend && file.action === "active" && file.fileType === "file") {
+    const up = msg.contentBytes && msg.contentBytes.length > 0
+      ? Buffer.from(msg.contentBytes.buffer, msg.contentBytes.byteOffset, msg.contentBytes.byteLength)
+      : (content ? Buffer.from(content, "base64") : null);
+    if (isKnownContent(ctx, file, up)) {
+      logInfo(ctx, `[file_data] resend of ${file.path} from ${peer.deviceId} already landed — dropped`);
+      clearUploadContent(msg);
+      advanceUploadQueue(peer, file.path);
+      return;
+    }
+    // The client's latest recorded base may itself have been a send that was
+    // lost with this one (a burst of edits frozen mid-flight). If that base
+    // never reached the server, judge the upload against the base the burst
+    // started from instead, so a fast-forward isn't misread as a conflict.
+    if (msg.originBaseSha1 && msg.baseSha1 && !isKnownSha(ctx, file.path, msg.baseSha1)) {
+      msg.baseSha1 = msg.originBaseSha1;
+    }
   }
 
   let isRejected = false;
@@ -433,25 +444,30 @@ function rejectStaleUpload(ctx: SyncContext, peer: SyncPeer, file: FileEntry): v
   pushHeadToUploader(ctx, peer, file.path);
 }
 
-/** True if these exact bytes (by sha1) are already known for the path: the
- *  current head, or any stored version row (covers superseded and — until the
- *  version rows are purged — deleted content). */
-function isKnownContent(ctx: SyncContext, file: FileEntry): boolean {
+/** True if this exact upload already landed: the active head holds these bytes,
+ *  or a version row records this sha at this very mtime (so it landed and was
+ *  superseded or deleted since). A same-sha upload at a NEW mtime is a
+ *  recreate (e.g. restored from trash) and is not "known". An E2EE upload over
+ *  a plaintext head, or over ciphertext of another format version, is the
+ *  encryption upgrade / re-key path and must not be dropped either. */
+function isKnownContent(ctx: SyncContext, file: FileEntry, uploadBuf: Buffer | null): boolean {
   const head = ctx.db.getFile(file.path);
-  if (head && head.action === "active" && head.sha1 === file.sha1) return true;
-  return ctx.db.hasVersionSha(file.path, file.sha1);
+  const headMatches = !!head && head.action === "active" && head.sha1 === file.sha1;
+  const landedHere = ctx.db.hasVersionAt(file.path, file.mtime, file.sha1);
+  if (!headMatches && !landedHere) return false;
+  if (headMatches && uploadBuf && isE2eeEncrypted(uploadBuf)) {
+    const headBuf = readHead(ctx, file.path);
+    if (!headBuf || !isE2eeEncrypted(headBuf)) return false;
+    if (e2eeVersion(headBuf) !== e2eeVersion(uploadBuf)) return false;
+  }
+  return true;
 }
 
-/** Push whatever the server currently holds for a path — the active head, or
- *  the deletion tombstone — so the uploader converges on it. */
-function pushCurrentStateToUploader(ctx: SyncContext, peer: SyncPeer, path: string): void {
-  const serverFile = ctx.db.getFile(path);
-  if (!serverFile) return;
-  if (serverFile.action === "deleted") {
-    peer.send({ type: "file_push", file: serverFile, content: "" });
-    return;
-  }
-  pushHeadToUploader(ctx, peer, path);
+/** True if the server has ever held this sha for the path (head or version). */
+function isKnownSha(ctx: SyncContext, path: string, sha1: string): boolean {
+  const head = ctx.db.getFile(path);
+  if (head && head.sha1 === sha1) return true;
+  return ctx.db.hasVersionSha(path, sha1);
 }
 
 /** Re-push the server's current head of a path so the uploader's vault converges. */

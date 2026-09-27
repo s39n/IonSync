@@ -41,9 +41,13 @@ const BG_RECENT_MS = 10_000;
  *             on the recorded true base, and only if the file still holds sha1.
  *   - false → the socket was already closed; the bytes never left. The replay is
  *             an ordinary upload (metadata was never advanced, so its base is right).
- *   - unset → recorded before the flush ran; treated as a resend (the safe side).
+ *   - unset → a debounced edit recorded before the flush ran. Replayed as a
+ *             resend only if the metadata says the current content was sent
+ *             (it may have been lost); otherwise as an ordinary upload.
+ * `originBaseSha1` is the base the burst of sends began from (see WsManager);
+ * the server falls back to it when `baseSha1` itself never arrived.
  */
-interface ConfirmEntry { path: string; t: number; sha1?: string; baseSha1?: string; sent?: boolean }
+interface ConfirmEntry { path: string; t: number; sha1?: string; baseSha1?: string; originBaseSha1?: string; sent?: boolean }
 
 /** Outcome of _sendFileEvent. */
 type SendResult = "sent" | "unsent" | "unchanged" | "unreadable" | "superseded" | "missing" | "offline";
@@ -333,9 +337,11 @@ export class XSync {
       const mobile = Platform.isMobile;
       if (mobile) {
         const now = Date.now();
+        // Pending (debounced) edits last: for a path with both, the unsent
+        // newer edit is what the replay must deliver.
         this._rememberUnconfirmed([
-          ...this.xTimeouts.keys().map((path) => ({ path, t: now })),
           ...this.ws.recentUploadDetails(BG_RECENT_MS).map((d) => ({ ...d, t: now, sent: true })),
+          ...this.xTimeouts.keys().map((path) => ({ path, t: now })),
         ]);
       }
       void (async () => {
@@ -348,12 +354,9 @@ export class XSync {
             if (capture) {
               this._forceFullDepth--;
               const captured = this.ws.endCapture(capture);
-              // The flush has now sent (or failed to send) everything: record
-              // exactly what went out, each with the true base it was built on.
-              const now = Date.now();
-              this._rememberUnconfirmed(
-                this.ws.recentUploadDetails(BG_RECENT_MS).map((d) => ({ ...d, t: now, sent: true })),
-              );
+              // Each flushed upload was recorded (sent or unsent) the moment
+              // its send resolved — see _sendFileEvent — so there is nothing
+              // left to record here.
               this._beaconUploads(captured);
             }
           }
@@ -1370,6 +1373,8 @@ export class XSync {
     let contentBytes: Uint8Array | undefined;
     let mode: "apply" | "patch" = "apply";
     let liveSha1 = entry.sha1;
+    // Written only after a successful send (see _sendFileEvent).
+    let shadowToWrite: string | null = null;
 
     const e2eeKey = await this._getEncryptionKey();
 
@@ -1409,7 +1414,7 @@ export class XSync {
             } else {
               contentBytes = new TextEncoder().encode(currentText);
             }
-            await this.storage.writeShadow(path, currentText);
+            shadowToWrite = currentText;
           }
         }
       }
@@ -1417,7 +1422,14 @@ export class XSync {
 
     entry.sha1 = liveSha1;
     // baseSha1 = the sha we last synced for this path (see _sendFileEvent).
-    this.ws.send({ type: "file_data", mode, file: entry, content, ...(contentBytes ? { contentBytes } : {}), ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}) });
+    const sent = this.ws.send({ type: "file_data", mode, file: entry, content, ...(contentBytes ? { contentBytes } : {}), ...(stored?.sha1 ? { baseSha1: stored.sha1 } : {}) });
+    if (!sent) {
+      // Socket closed under us: leave the shadow and metadata at what the
+      // server actually has, and queue the path for the reconnect replay.
+      this._rememberUnconfirmed([{ path, t: Date.now(), sent: false }]);
+      return;
+    }
+    if (shadowToWrite !== null) await this.storage.writeShadow(path, shadowToWrite);
     this.addActivity("up", path);
     this.syncUpCount++;
     // Feed the stall watchdog: a large offline reconcile (e.g. a full reseed of a
@@ -1693,8 +1705,11 @@ export class XSync {
 
   /**
    * Upload a changed file. `opts` is used by the background replay:
-   *   resend     — flag the upload as a re-delivery (server drops known bytes);
+   *   resend     — flag the upload as a re-delivery (server drops it if this
+   *                exact upload already landed). "auto": resend only if the
+   *                metadata says this content was already sent;
    *   baseSha1   — the true base to send (overrides stored metadata);
+   *   originBaseSha1 — the base the burst started from (server fallback);
    *   expectSha1 — only send if the file still holds exactly this content.
    * Metadata and the delta shadow advance ONLY when the upload was handed to an
    * open socket; otherwise the change stays unsynced and is queued for replay.
@@ -1702,7 +1717,7 @@ export class XSync {
   private async _sendFileEvent(
     file: TAbstractFile,
     forceChanged: boolean,
-    opts: { resend?: boolean; baseSha1?: string; expectSha1?: string } = {},
+    opts: { resend?: boolean | "auto"; baseSha1?: string; originBaseSha1?: string; expectSha1?: string } = {},
   ): Promise<SendResult> {
     if (!this.ws.isConnected) return "offline";
     const stat = await this.plugin.app.vault.adapter.stat(file.path);
@@ -1720,7 +1735,9 @@ export class XSync {
     let mode: "apply" | "patch" = "apply";
     // Written only after a successful send (see the method doc).
     let shadowToWrite: string | null = null;
-    const full = this._forceFullDepth > 0 || opts.resend === true;
+    // Background flushes and every replay send full content (beaconable, and a
+    // replayed patch could be stitched onto a shadow the server never had).
+    const full = this._forceFullDepth > 0 || opts.resend !== undefined;
 
     const e2eeKey = await this._getEncryptionKey();
 
@@ -1792,19 +1809,49 @@ export class XSync {
     // baseSha1 = the sha we last synced for this path (or, for a replay, the
     // true base recorded when it was first sent). The server uses it to detect
     // concurrent edits (stale base) without trusting device clocks.
-    const baseSha1 = opts.baseSha1 ?? stored?.sha1;
+    // "auto" (a debounced edit caught by a background flush): if metadata
+    // already records this content, it was sent before and may have been lost —
+    // re-deliver it as a resend; otherwise it's a fresh edit, sent normally.
+    const resend = opts.resend === "auto" ? stored?.sha1 === sha1 : opts.resend === true;
+    let baseSha1 = opts.baseSha1 ?? stored?.sha1;
+    let originBaseSha1 = opts.originBaseSha1;
+    if (opts.resend === "auto" && resend) {
+      // Metadata already advanced to this very sha, so it isn't the true base.
+      // Use the base the earlier send was built on, if this session saw it.
+      // Otherwise keep the (self) sha: the server has never held it as a base
+      // unless this upload landed (then it's dropped as known), so it resolves
+      // by recency — unlike sending no base, which would overwrite blindly.
+      const rec = this.ws.recentUploadFor(file.path);
+      if (rec?.sha1 === sha1) {
+        baseSha1 = rec.baseSha1 ?? baseSha1;
+        originBaseSha1 = rec.originBaseSha1;
+      }
+    }
     const sent = this.ws.send({
       type: "file_data", mode, file: entry, content,
       ...(contentBytes ? { contentBytes } : {}),
       ...(baseSha1 ? { baseSha1 } : {}),
-      ...(opts.resend ? { resend: true } : {}),
+      ...(resend ? { resend: true } : {}),
+      ...(resend && originBaseSha1 && originBaseSha1 !== baseSha1 ? { originBaseSha1 } : {}),
     });
     if (!sent) {
       // The socket closed under us. Leave metadata and the delta shadow at the
       // last state the server actually has, so this still reads as unsynced,
       // and queue it for the reconnect replay (as never-sent: an ordinary upload).
-      if (!opts.resend) this._rememberUnconfirmed([{ path: file.path, t: Date.now(), sent: false }]);
+      // A failed replay keeps its own entry (the replay only clears "sent").
+      if (opts.resend === undefined) this._rememberUnconfirmed([{ path: file.path, t: Date.now(), sent: false }]);
       return "unsent";
+    }
+    if (this._forceFullDepth > 0) {
+      // Background flush: record this send NOW, synchronously, before any await
+      // the OS could freeze us in. Its bytes may still be in the socket buffer;
+      // the reconnect replay re-delivers them (as a resend) if they never landed.
+      const rec = this.ws.recentUploadFor(file.path);
+      this._rememberUnconfirmed([{
+        path: file.path, t: Date.now(), sha1, sent: true,
+        ...(baseSha1 ? { baseSha1 } : {}),
+        ...(rec?.originBaseSha1 ? { originBaseSha1: rec.originBaseSha1 } : {}),
+      }]);
     }
     if (shadowToWrite !== null) await this.storage.writeShadow(file.path, shadowToWrite);
     await this.storage.writeMetadata(entry);
@@ -1893,6 +1940,7 @@ export class XSync {
         path: e.path, t: e.t,
         ...(typeof e.sha1 === "string" ? { sha1: e.sha1 } : {}),
         ...(typeof e.baseSha1 === "string" ? { baseSha1: e.baseSha1 } : {}),
+        ...(typeof e.originBaseSha1 === "string" ? { originBaseSha1: e.originBaseSha1 } : {}),
         ...(typeof e.sent === "boolean" ? { sent: e.sent } : {}),
       });
     }
@@ -1912,17 +1960,18 @@ export class XSync {
   /** Merge entries into the persisted "unconfirmed upload" list. Synchronous on
    *  purpose: it runs as the app is being backgrounded, before any await the OS
    *  could freeze us during. Vault-scoped localStorage survives the app being
-   *  killed. Newer details win, except that "never sent" is sticky: once an
-   *  attempt failed to leave the device, the replay must upload current content
-   *  on the metadata base, not treat an older sent copy as the latest. */
+   *  killed. The newer record for a path replaces the older one entirely: it
+   *  describes the latest attempt, which is what the replay must deliver (a
+   *  sent record after an unsent one means that content DID go out; an unsent
+   *  one after a sent one means newer content never left). Within one call,
+   *  later entries win. */
   private _rememberUnconfirmed(entries: ConfirmEntry[]): void {
     if (entries.length === 0) return;
     const all = this._loadUnconfirmed();
     for (const n of entries) {
       const old = all.get(n.path);
-      const merged: ConfirmEntry = { ...(old ?? {}), ...n };
-      if (old?.sent === false || n.sent === false) merged.sent = false;
-      all.set(n.path, merged);
+      if (old && old.t > n.t) continue; // never let a stale record replace a newer one
+      all.set(n.path, n);
     }
     this._saveUnconfirmed(all);
   }
@@ -1974,11 +2023,13 @@ export class XSync {
    * Re-deliver uploads whose arrival was never confirmed, BEFORE the catch-up
    * sync. Each entry is replayed per its `sent` state (see ConfirmEntry):
    *   - may-have-landed → a `resend` on the recorded true base, only if the file
-   *     still holds that content. The server drops it if the bytes are already
-   *     known (head or any version — so a note deleted or edited elsewhere is
-   *     never resurrected or conflicted); otherwise it lands, or is kept as one
-   *     conflict record if another device has since written a newer version.
-   *   - never-sent → an ordinary upload of the current content.
+   *     still holds that content. The server silently drops it if this exact
+   *     upload already landed (head, or a version at this mtime — so a note
+   *     deleted or edited elsewhere since is never resurrected or conflicted);
+   *     otherwise it lands, or is kept as one conflict record if another device
+   *     has since written a newer version.
+   *   - never-sent / pending → the current content: an ordinary upload, or a
+   *     resend if metadata shows it was already sent (see `resend: "auto"`).
    * Only runs against a server that understands resends: to an older one a
    * replay would look like brand-new content. Entries are cleared only once
    * resolved; unreadable ones (e.g. evicted files) wait for a later connect.
@@ -2000,13 +2051,14 @@ export class XSync {
       if (!(file instanceof TFile) || this.exclusionFilter?.isExcluded(e.path)) { done.set(e.path, e); continue; }
       let result: SendResult;
       try {
-        result = e.sent === false
-          ? await this._sendFileEvent(file, true)
-          : await this._sendFileEvent(file, true, {
+        result = e.sent === true
+          ? await this._sendFileEvent(file, true, {
             resend: true,
             ...(e.baseSha1 ? { baseSha1: e.baseSha1 } : {}),
+            ...(e.originBaseSha1 ? { originBaseSha1: e.originBaseSha1 } : {}),
             ...(e.sha1 ? { expectSha1: e.sha1 } : {}),
-          });
+          })
+          : await this._sendFileEvent(file, true, { resend: "auto" });
       } catch (err) {
         this.plugin.log(`[bg-sync] replay failed for ${e.path}: ${Utils.errorMessage(err)}`);
         continue;

@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { BACKGROUND_SYNC_PATH } from "@ionsync/protocol";
 import { connectClient, startTestServer, waitForOpen, TEST_PASSWORD, type TestClient } from "./helpers.js";
 import { BG_AUTH_FAIL_LIMIT, BG_RATE_LIMIT, issueBgToken, resolveBgToken, revokeBgTokens } from "../src/backgroundSync.js";
+import { readHead } from "../src/head.js";
 
 const sha1 = (s: string) => createHash("sha1").update(Buffer.from(s)).digest("hex");
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -197,10 +198,11 @@ describe("background sync — WS resend (reconnect replay) semantics", () => {
     const b = await connect(srv.port, "devB");
     await wsUpload(srv, a.c, entry("n.md", "phone edit", 1000));
     await wsUpload(srv, b.c, entry("n.md", "laptop edit", 3000, sha1("phone edit")));
+    // Drain the broadcast of the laptop edit so only a reply to the resend counts.
+    await a.c.nextMsg<Msg>(isPush("n.md"));
     // Phone reopens and replays its (already-delivered) edit, base = its own sha.
     a.c.send({ type: "file_data", mode: "apply", resend: true, ...entry("n.md", "phone edit", 1000, sha1("phone edit")) });
-    const push = await a.c.nextMsg<Msg>(isPush("n.md"));
-    assert.equal((push.file as { sha1: string }).sha1, sha1("laptop edit"), "uploader converges on the head");
+    await assert.rejects(a.c.nextMsg<Msg>(isPush("n.md"), 400), "dropped silently: no push");
     assert.equal(srv.ctx.db.getFile("n.md")?.sha1, sha1("laptop edit"));
     assert.equal(srv.ctx.db.listConflicts().length, 0, "no spurious conflict");
     a.c.close(); b.c.close(); await srv.stop();
@@ -213,11 +215,75 @@ describe("background sync — WS resend (reconnect replay) semantics", () => {
     await wsUpload(srv, a.c, entry("A.md", "phone edit", 1000));
     b.c.send({ type: "file_data", mode: "apply", file: { path: "A.md", sha1: sha1("phone edit"), mtime: 2000, action: "deleted", fileType: "file" }, content: "" });
     await until(() => srv.ctx.db.getFile("A.md")?.action === "deleted");
+    await a.c.nextMsg<Msg>(isPush("A.md")); // the delete's own broadcast
     a.c.send({ type: "file_data", mode: "apply", resend: true, ...entry("A.md", "phone edit", 1000, sha1("phone edit")) });
-    const push = await a.c.nextMsg<Msg>(isPush("A.md"));
-    assert.equal((push.file as { action: string }).action, "deleted", "uploader gets the tombstone");
+    await assert.rejects(a.c.nextMsg<Msg>(isPush("A.md"), 400), "dropped silently: no push");
     assert.equal(srv.ctx.db.getFile("A.md")?.action, "deleted", "stays deleted");
     a.c.close(); b.c.close(); await srv.stop();
+  });
+
+  it("a resend of a note recreated since (same content, new mtime) is re-added, not dropped", async () => {
+    const srv = await startTestServer();
+    const a = await connect(srv.port, "devA");
+    const b = await connect(srv.port, "devB");
+    await wsUpload(srv, a.c, entry("R.md", "same words", 1000));
+    b.c.send({ type: "file_data", mode: "apply", file: { path: "R.md", sha1: sha1("same words"), mtime: 2000, action: "deleted", fileType: "file" }, content: "" });
+    await until(() => srv.ctx.db.getFile("R.md")?.action === "deleted");
+    // Restored from trash on the phone (new mtime), then frozen mid-send.
+    a.c.send({ type: "file_data", mode: "apply", resend: true, ...entry("R.md", "same words", 5000, sha1("same words")) });
+    await until(() => srv.ctx.db.getFile("R.md")?.action === "active");
+    assert.equal(srv.ctx.db.getFile("R.md")?.sha1, sha1("same words"));
+    a.c.close(); b.c.close(); await srv.stop();
+  });
+
+  it("an E2EE re-key resend (same plaintext sha, new ciphertext version) is stored, not dropped", async () => {
+    const srv = await startTestServer();
+    const a = await connect(srv.port, "devA");
+    const blob = (v: number, fill: number) =>
+      Buffer.concat([Buffer.from(`IONENCv${v}`), Buffer.alloc(12, fill), Buffer.alloc(32, fill + 1)]);
+    const plainSha = sha1("secret note");
+    const up = (buf: Buffer, resend: boolean) => ({
+      type: "file_data", mode: "apply", ...(resend ? { resend: true } : {}),
+      file: { path: "e.md", sha1: plainSha, mtime: 1000, action: "active", fileType: "file", size: buf.length },
+      content: buf.toString("base64"), baseSha1: plainSha,
+    });
+    a.c.send(up(blob(2, 1), false));
+    await until(() => srv.ctx.db.getFile("e.md")?.sha1 === plainSha);
+    // Same bytes again as a resend: already landed → dropped, head untouched.
+    a.c.send(up(blob(2, 1), true));
+    // Re-key to v3 (e.g. frozen during "Re-encrypt all files"), replayed as a resend.
+    a.c.send(up(blob(3, 5), true));
+    await until(() => readHead(srv.ctx, "e.md")?.[7] === 0x33);
+    assert.equal(srv.ctx.db.getFile("e.md")?.sha1, plainSha);
+    a.c.close(); await srv.stop();
+  });
+
+  it("falls back to the burst's origin base when the recorded base never landed", async () => {
+    // Phone: v1 synced; then v2 (base v1) and v3 (base v2) both lost in the
+    // freeze. Meanwhile the laptop edited v1 → L — with a clock BEHIND the
+    // phone's, so recency alone would let the phone's v3 silently win.
+    const srv = await startTestServer();
+    const a = await connect(srv.port, "devA");
+    const b = await connect(srv.port, "devB");
+    await wsUpload(srv, a.c, entry("o.md", "v1", 1000));
+    await wsUpload(srv, b.c, entry("o.md", "laptop L", 1500, sha1("v1")));
+    a.c.send({ type: "file_data", mode: "apply", resend: true, originBaseSha1: sha1("v1"), ...entry("o.md", "v3", 3000, sha1("v2")) });
+    await until(() => srv.ctx.db.listConflicts().length >= 1);
+    assert.equal(srv.ctx.db.getFile("o.md")?.sha1, sha1("laptop L"), "the laptop's edit is not overwritten");
+    assert.equal(srv.ctx.db.listConflicts()[0]!.sha1, sha1("v3"), "the phone's edit is preserved as a conflict");
+    a.c.close(); b.c.close(); await srv.stop();
+  });
+
+  it("keeps the recorded base when it did land (earlier send arrived, later one lost)", async () => {
+    const srv = await startTestServer();
+    const a = await connect(srv.port, "devA");
+    await wsUpload(srv, a.c, entry("f.md", "v1", 1000));
+    await wsUpload(srv, a.c, entry("f.md", "v2", 2000, sha1("v1"))); // landed
+    // v3 (base v2) was lost; its burst began at v1.
+    a.c.send({ type: "file_data", mode: "apply", resend: true, originBaseSha1: sha1("v1"), ...entry("f.md", "v3", 3000, sha1("v2")) });
+    await until(() => srv.ctx.db.getFile("f.md")?.sha1 === sha1("v3"));
+    assert.equal(srv.ctx.db.listConflicts().length, 0, "a fast-forward, not a conflict");
+    a.c.close(); await srv.stop();
   });
 
   it("a resend of genuinely lost bytes lands (fast-forward on the true base)", async () => {
