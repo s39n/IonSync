@@ -61,4 +61,6 @@ services:
       IONSYNC_E2EE_PASSWORD: ${IONSYNC_E2EE_PASSWORD:-}
       # Set to 1 when the API sits behind a reverse proxy / Cloudflare tunnel.
       IONSYNC_API_TRUST_PROXY: ${IONSYNC_API_TRUST_PROXY:-0}
+      # Optional: base URL advertised in /v1/openapi.json (default: from the request).
+      IONSYNC_API_PUBLIC_URL: ${IONSYNC_API_PUBLIC_URL:-}
     restart: unless-stopped

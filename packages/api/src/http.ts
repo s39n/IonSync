@@ -45,6 +45,15 @@ export function createHttpServer(cfg: ApiConfig, vault: Vault): http.Server {
     return req.socket.remoteAddress ?? "unknown";
   }
 
+  /** Base URL callers reach us at — put in the OpenAPI spec so importers need no manual setup. */
+  function publicUrl(req: http.IncomingMessage): string {
+    if (cfg.publicUrl) return cfg.publicUrl;
+    const fwd = req.headers["x-forwarded-proto"];
+    const proto = cfg.trustProxy && typeof fwd === "string" && fwd ? fwd.split(",")[0]!.trim() : "http";
+    const host = req.headers.host ?? `localhost:${cfg.port}`;
+    return `${proto === "https" ? "https" : "http"}://${host}`;
+  }
+
   function authenticate(req: http.IncomingMessage): Role {
     const ip = clientIp(req);
     const now = Date.now();
@@ -74,7 +83,7 @@ export function createHttpServer(cfg: ApiConfig, vault: Vault): http.Server {
     if (method === "GET" && p === "/v1/health") {
       return json(res, 200, { ok: vault.connected && vault.synced, connected: vault.connected, synced: vault.synced });
     }
-    if (method === "GET" && p === "/v1/openapi.json") return json(res, 200, openApiSpec());
+    if (method === "GET" && p === "/v1/openapi.json") return json(res, 200, openApiSpec(publicUrl(req)));
 
     const role = authenticate(req);
     const needWrite = (): void => {
@@ -92,6 +101,12 @@ export function createHttpServer(cfg: ApiConfig, vault: Vault): http.Server {
       const all = [...vault.notes.values()].filter((n) => n.path.startsWith(prefix));
       all.sort(byRecent ? (a, b) => b.mtime - a.mtime : (a, b) => a.path.localeCompare(b.path));
       return json(res, 200, { total: all.length, offset, notes: all.slice(offset, offset + limit).map(summary) });
+    }
+
+    if (method === "GET" && p === "/v1/tree") {
+      const prefix = url.searchParams.get("prefix") ?? "";
+      const depth = clampInt(url.searchParams.get("depth"), 3, 1, 32);
+      return json(res, 200, folderTree(vault.notes.values(), prefix, depth));
     }
 
     if (method === "GET" && p === "/v1/search") {
@@ -125,7 +140,18 @@ export function createHttpServer(cfg: ApiConfig, vault: Vault): http.Server {
 
       if (method === "GET") {
         const note = vault.requireText(path);
-        return json(res, 200, { ...summary(note), content: note.text });
+        const lines = note.text.split("\n");
+        if (url.searchParams.get("outline") === "1") {
+          return json(res, 200, { ...summary(note), totalLines: lines.length, outline: outline(lines) });
+        }
+        // Optional line window, so a long note need not be pulled whole.
+        if (url.searchParams.has("from") || url.searchParams.has("lines")) {
+          const from = clampInt(url.searchParams.get("from"), 1, 1, Number.MAX_SAFE_INTEGER);
+          const count = clampInt(url.searchParams.get("lines"), 200, 1, 100_000);
+          const slice = lines.slice(from - 1, from - 1 + count);
+          return json(res, 200, { ...summary(note), totalLines: lines.length, from, lines: slice.length, content: slice.join("\n") });
+        }
+        return json(res, 200, { ...summary(note), totalLines: lines.length, content: note.text });
       }
       if (method === "PUT") {
         needWrite();
@@ -175,6 +201,49 @@ export function createHttpServer(cfg: ApiConfig, vault: Vault): http.Server {
 
 function summary(n: Note): Record<string, unknown> {
   return { path: n.path, sha1: n.sha1, mtime: n.mtime, size: n.size, kind: n.kind };
+}
+
+/** Markdown headings with their line numbers (code fences skipped). */
+function outline(lines: string[]): { line: number; level: number; heading: string }[] {
+  const out: { line: number; level: number; heading: string }[] = [];
+  let inFence = false;
+  lines.forEach((l, i) => {
+    if (/^\s*(```|~~~)/.test(l)) inFence = !inFence;
+    if (inFence) return;
+    const m = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(l);
+    if (m) out.push({ line: i + 1, level: m[1]!.length, heading: m[2]! });
+  });
+  return out;
+}
+
+/**
+ * Folder overview: every folder under `prefix` down to `depth` levels, with how
+ * many files sit directly in it and in total beneath it. Lets a model get its
+ * bearings in a large vault without listing thousands of paths.
+ */
+export function folderTree(notes: Iterable<Note>, prefix: string, depth: number): Record<string, unknown> {
+  const base = prefix.replace(/\/+$/, "");
+  const baseDepth = base === "" ? 0 : base.split("/").length;
+  const folders = new Map<string, { files: number; total: number; latestMtime: number }>();
+  let total = 0;
+  for (const n of notes) {
+    if (base !== "" && !n.path.startsWith(base + "/")) continue;
+    total++;
+    const segs = n.path.split("/");
+    segs.pop();
+    for (let d = baseDepth; d <= segs.length && d <= baseDepth + depth; d++) {
+      const key = segs.slice(0, d).join("/");
+      let f = folders.get(key);
+      if (!f) folders.set(key, (f = { files: 0, total: 0, latestMtime: 0 }));
+      f.total++;
+      if (d === segs.length) f.files++;
+      if (n.mtime > f.latestMtime) f.latestMtime = n.mtime;
+    }
+  }
+  const list = [...folders.entries()]
+    .map(([path, f]) => ({ path: path === "" ? "/" : path + "/", ...f }))
+    .sort((a, b) => a.path.localeCompare(b.path));
+  return { prefix: base === "" ? "" : base + "/", depth, totalFiles: total, folders: list };
 }
 
 /** Validate a caller-supplied vault path. */

@@ -15,6 +15,8 @@ export interface ApiConfig {
   readToken: string | null;
   port: number;
   host: string;
+  /** Externally visible base URL for the OpenAPI spec; null = derive from the request. */
+  publicUrl: string | null;
   /** Trust CF-Connecting-IP / X-Forwarded-For for per-client rate limiting. */
   trustProxy: boolean;
   deviceId: string;
@@ -55,6 +57,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig | { 
     readToken: readToken || null,
     port: Number(env["IONSYNC_API_PORT"] ?? 3002),
     host: env["IONSYNC_API_HOST"] ?? "0.0.0.0",
+    publicUrl: (env["IONSYNC_API_PUBLIC_URL"] ?? "").replace(/\/+$/, "") || null,
     trustProxy: env["IONSYNC_API_TRUST_PROXY"] === "1",
     deviceId: env["IONSYNC_API_DEVICE_ID"] ?? defaultDeviceId(password),
     deviceName: env["IONSYNC_API_DEVICE_NAME"] ?? "LLM API",

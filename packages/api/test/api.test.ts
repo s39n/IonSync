@@ -31,6 +31,7 @@ async function startApi(srv: TestServer, overrides: Partial<ApiConfig> = {}): Pr
     readToken: READ_TOKEN,
     port: 0,
     host: "127.0.0.1",
+    publicUrl: null,
     trustProxy: false,
     deviceId: "llm-api-test",
     deviceName: "LLM API",
@@ -109,6 +110,28 @@ test("bootstrap: notes already on the server are readable, listed and searchable
     assert.equal(found.body.results[0].snippets[0].text, "Churned vanilla.");
 
     assert.equal((await api.call("GET", `/v1/notes/${enc("Nope.md")}`)).status, 404);
+
+    // Cheap ways to look around: folder tree, outline, line window.
+    await deviceWrite(dev, "Projects/Sub/Deep.md", "# A\none\n## B\ntwo\nthree\n");
+    await until(() => api!.gw.vault.get("Projects/Sub/Deep.md") !== undefined);
+    const tree = await api.call("GET", "/v1/tree");
+    assert.equal(tree.body.totalFiles, 3);
+    assert.deepEqual(
+      tree.body.folders.map((f: { path: string; files: number; total: number }) => [f.path, f.files, f.total]),
+      [["/", 0, 3], ["Daily/", 1, 1], ["Projects/", 1, 2], ["Projects/Sub/", 1, 1]]
+    );
+    const sub = await api.call("GET", "/v1/tree?prefix=Projects/&depth=1");
+    assert.deepEqual(sub.body.folders.map((f: { path: string }) => f.path), ["Projects/", "Projects/Sub/"]);
+
+    const ol = await api.call("GET", `/v1/notes/${enc("Projects/Sub/Deep.md")}?outline=1`);
+    assert.deepEqual(ol.body.outline, [{ line: 1, level: 1, heading: "A" }, { line: 3, level: 2, heading: "B" }]);
+    assert.equal(ol.body.content, undefined);
+    const win = await api.call("GET", `/v1/notes/${enc("Projects/Sub/Deep.md")}?from=3&lines=2`);
+    assert.equal(win.body.content, "## B\ntwo");
+    assert.equal(win.body.totalLines, 6);
+
+    const spec = await api.call("GET", "/v1/openapi.json", undefined, null);
+    assert.match(spec.body.servers[0].url, /^http:\/\/127\.0\.0\.1:\d+$/);
   } finally {
     await api?.gw.close();
     dev.close();

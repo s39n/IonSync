@@ -24,6 +24,7 @@ The `ionsync-api` service ships in `docker-compose.yml` and idles until it has a
    | `IONSYNC_API_READ_TOKEN` | no | A second token that can only list, read and search. |
    | `IONSYNC_API_PORT` | no | Host port (default `3002`). |
    | `IONSYNC_API_TRUST_PROXY` | behind a proxy/tunnel | Set to `1` so rate limiting sees the real client address (`CF-Connecting-IP` / `X-Forwarded-For`). |
+   | `IONSYNC_API_PUBLIC_URL` | no | Base URL written into the OpenAPI spec (`servers`). By default it is taken from the request, which is right in most setups. |
    | `IONSYNC_API_E2EE_VERSION` | no | Force the encryption format for writes (`2` or `3`). By default the API writes the newest format already present in the vault, so it never produces notes an older device cannot read. |
    | `IONSYNC_API_MAX_DELETES_PER_HOUR` | no | Runaway-deletion guard (default `60`). |
 
@@ -40,8 +41,9 @@ All calls except `health` and `openapi.json` need `Authorization: Bearer <token>
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/v1/search?q=…&prefix=…&limit=…` | Full-text search. Every word must match; `"quoted phrases"` supported. Ranked, with matching lines. |
+| `GET` | `/v1/tree?prefix=…&depth=…` | Folder overview: file counts per folder. The cheap way to get oriented in a big vault. |
 | `GET` | `/v1/notes?prefix=…&sort=mtime&limit=…&offset=…` | List notes (metadata only). |
-| `GET` | `/v1/notes/{path}` | Read a note: `{ path, content, sha1, mtime, size }`. |
+| `GET` | `/v1/notes/{path}` | Read a note: `{ path, content, sha1, mtime, size, totalLines }`. Add `?outline=1` for just the headings, or `?from=40&lines=60` for a line window. |
 | `PUT` | `/v1/notes/{path}` | Create or replace. Body: `{ content, createOnly?, expectedSha1? }`. |
 | `PATCH` | `/v1/notes/{path}` | Targeted edits. Body: `{ operations: [...], expectedSha1? }`. All-or-nothing. |
 | `DELETE` | `/v1/notes/{path}` | Delete a note. |
@@ -73,6 +75,16 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json
 curl -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"operations":[{"op":"append","text":"- follow up"}]}' "$API/v1/notes/Inbox/Idea.md"
 ```
+
+## Connecting an LLM tool
+
+Any assistant that can import an OpenAPI spec or make HTTP calls can use this directly:
+
+1. Import `https://<your-host>/v1/openapi.json` (no token needed to fetch it). The spec's `servers` entry is filled in from the address you fetched it from, and each operation carries a description written for a model.
+2. Set authentication to **Bearer token** with `IONSYNC_API_TOKEN` (or the read-only token for a look-but-don't-touch setup).
+3. Optional instruction for the assistant: *"Use getVaultTree to get oriented, searchNotes to find notes, and readNote with outline=1 before reading long notes. Add notes with writeNote and createOnly: true; change existing notes with editNote."*
+
+On your home network use `http://<nas-ip>:3002`; from outside use the HTTPS hostname. Both work at once with the same token.
 
 ## What it will not do
 

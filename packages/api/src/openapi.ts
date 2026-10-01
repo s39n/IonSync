@@ -2,7 +2,7 @@
  * OpenAPI description, served at /v1/openapi.json. Written for a model to read:
  * the descriptions say when and how to use each call, not just its shape.
  */
-export function openApiSpec(): Record<string, unknown> {
+export function openApiSpec(serverUrl: string): Record<string, unknown> {
   const pathParam = {
     name: "path",
     in: "path",
@@ -34,9 +34,11 @@ export function openApiSpec(): Record<string, unknown> {
       description:
         "Read, search, create and edit notes in an Obsidian vault synced by IonSync. " +
         "Changes appear on every synced device within seconds and are kept in version history. " +
-        "Typical flow: search or list to find a note, read it, then PATCH for small changes (preferred) or PUT to replace the whole note. " +
+        "Typical flow: getVaultTree for orientation, searchNotes to find a note, readNote (use outline or a line window for long notes), then editNote for small changes (preferred) or writeNote to create or replace. " +
+        "To add a new note, call writeNote with createOnly: true and a path ending in .md. " +
         "Notes are Markdown; link between notes with [[Note Name]].",
     },
+    servers: [{ url: serverUrl }],
     security: [{ bearer: [] }],
     components: { securitySchemes: { bearer: { type: "http", scheme: "bearer" } } },
     paths: {
@@ -51,6 +53,18 @@ export function openApiSpec(): Record<string, unknown> {
             { name: "limit", in: "query", schema: { type: "integer", default: 20, maximum: 100 } },
           ],
           responses: { "200": { description: "Ranked results with snippets." }, default: err },
+        },
+      },
+      "/v1/tree": {
+        get: {
+          operationId: "getVaultTree",
+          summary: "Folder overview of the vault",
+          description: "Each folder with the number of files directly in it, the total beneath it, and when it last changed. Start here to learn how the vault is organised; far cheaper than listing every note.",
+          parameters: [
+            { name: "prefix", in: "query", description: 'Only this folder and below, e.g. "Projects/".', schema: { type: "string" } },
+            { name: "depth", in: "query", description: "How many folder levels to return.", schema: { type: "integer", default: 3 } },
+          ],
+          responses: { "200": { description: "{ prefix, depth, totalFiles, folders: [{ path, files, total, latestMtime }] }" }, default: err },
         },
       },
       "/v1/notes": {
@@ -70,7 +84,13 @@ export function openApiSpec(): Record<string, unknown> {
         parameters: [pathParam],
         get: {
           operationId: "readNote",
-          summary: "Read a note's full content",
+          summary: "Read a note (whole, a line window, or just its outline)",
+          description: "With no query parameters, returns the full content. For long notes, first ask for outline=1 (headings with line numbers), then fetch only the lines you need with from/lines.",
+          parameters: [
+            { name: "outline", in: "query", description: "Set to 1 to return only the headings and their line numbers.", schema: { type: "string", enum: ["1"] } },
+            { name: "from", in: "query", description: "First line to return (1-based).", schema: { type: "integer" } },
+            { name: "lines", in: "query", description: "How many lines to return (default 200 when from is given).", schema: { type: "integer" } },
+          ],
           responses: { "200": { description: "Note metadata plus `content`.", content: { "application/json": { schema: { ...noteMeta, properties: { ...noteMeta.properties, content: { type: "string" } } } } } }, default: err },
         },
         put: {
