@@ -36,3 +36,29 @@ services:
       timeout: 10s
       retries: 5
       start_period: 20s
+
+  # ── LLM API (optional) ────────────────────────────────────────────────────
+  # Token-authenticated REST API that lets an LLM search, read, write and edit
+  # notes. It connects to the server above as an ordinary sync device, so the
+  # server itself never sees plaintext when the vault is end-to-end encrypted.
+  # Stays idle (no port opened) until IONSYNC_API_TOKEN is set.
+  # See packages/api/README.md.
+  ionsync-api:
+    image: ionsync:latest
+    entrypoint: ["node", "--enable-source-maps", "api/dist/index.js"]
+    depends_on:
+      - ionsync
+    ports:
+      - "${IONSYNC_API_PORT:-3002}:3002"
+    environment:
+      IONSYNC_API_SERVER_URL: ws://ionsync:3000
+      IONSYNC_PASSWORD: ${IONSYNC_PASSWORD:?Create a .env file and set IONSYNC_PASSWORD}
+      # Long random secret (24+ chars), e.g. `openssl rand -hex 32`.
+      IONSYNC_API_TOKEN: ${IONSYNC_API_TOKEN:-}
+      # Optional second token that can only read and search.
+      IONSYNC_API_READ_TOKEN: ${IONSYNC_API_READ_TOKEN:-}
+      # The vault's encryption password, if E2EE is on in the plugin.
+      IONSYNC_E2EE_PASSWORD: ${IONSYNC_E2EE_PASSWORD:-}
+      # Set to 1 when the API sits behind a reverse proxy / Cloudflare tunnel.
+      IONSYNC_API_TRUST_PROXY: ${IONSYNC_API_TRUST_PROXY:-0}
+    restart: unless-stopped

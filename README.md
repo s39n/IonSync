@@ -230,6 +230,14 @@ The dashboard auto-refreshes every 5 seconds. Authentication uses the same passw
 
 ---
 
+## LLM API
+
+IonSync can expose your vault to an LLM through a small REST API: search, list, read, create, edit, move and delete notes. It runs as a second container (`ionsync-api`) that connects to the server as an ordinary sync device, so its changes reach every device like any other edit and the server stays zero-knowledge when end-to-end encryption is on.
+
+It is off until you set `IONSYNC_API_TOKEN`. Setup, endpoints and security notes: [packages/api/README.md](packages/api/README.md).
+
+---
+
 ## Project structure
 
 ```
