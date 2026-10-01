@@ -23,13 +23,16 @@ v2/
     │   ├── client/           # dashboard.html + built plugin files (served at /dashboard)
     │   ├── test/
     │   └── config.example.js
-    └── plugin/               # Obsidian plugin (TypeScript, bundled by esbuild)
+    ├── plugin/               # Obsidian plugin (TypeScript, bundled by esbuild)
+    │   ├── src/
+    │   ├── manifest.json
+    │   └── esbuild.config.mjs
+    └── api/                  # LLM REST API — a headless sync client (see "packages/api")
         ├── src/
-        ├── manifest.json
-        └── esbuild.config.mjs
+        └── test/
 ```
 
-The three packages share a single `node_modules` tree via npm workspaces. `@ionsync/protocol` is referenced with the version `"*"` so npm resolves it from the workspace without a publish step.
+The four packages share a single `node_modules` tree via npm workspaces. `@ionsync/protocol` is referenced with the version `"*"` so npm resolves it from the workspace without a publish step.
 
 ---
 
@@ -368,6 +371,52 @@ Post-build plugin (`postBuildPlugin`):
 5. Optionally copies to `$OBSIDIAN_PLUGIN_DIR` for local dev convenience.
 
 The `alias` option points `@ionsync/protocol` directly at the protocol `src/index.ts` so esbuild bundles it without a separate compile step.
+
+---
+
+### `packages/api` — LLM REST API
+
+A separate process (second compose service `ionsync-api`, same image) that lets an
+LLM search/read/write/edit/move/delete notes over token-authenticated HTTP. User
+docs: `packages/api/README.md`.
+
+**It is a sync CLIENT, not part of the server.** `Vault` (`src/vault.ts`) logs in
+over the normal WebSocket as a device (`llm-api-<hash>`, name "LLM API"), bootstraps
+with `sync_cursor { since: 0 }`, and keeps an in-memory, decrypted mirror of the
+vault's text notes, updated by live `file_push`. This is deliberate: with E2EE the
+server only holds ciphertext, so the server cannot serve or search notes. The
+gateway holds the E2EE password (`IONSYNC_E2EE_PASSWORD`); the server never does.
+Plaintext is never written to disk — the mirror is rebuilt from the server on
+every start.
+
+- **Writes use the plugin's own messages** (`file_data mode:"apply"` with
+  `baseSha1`, `file_rename`, delete = `apply` with `action:"deleted"`), so they go
+  through `decideUpload`, version history, attribution and broadcast. Do not add
+  server-side shortcuts for the API.
+- **The server sends no ack for a successful upload.** `Vault.upload` confirms by
+  sending `file_history` right after: the socket is ordered, so any
+  `file_event_result: "conflict"` arrives before the history response. Deletes and
+  moves confirm with `file_data mode:"send"`. Mutations are serialised
+  (`exclusive`) so a confirmation can only belong to one operation.
+- **Conflicts → HTTP 409.** The losing content is stored as a server conflict
+  record (existing behaviour); the caller re-reads and retries. `expectedSha1`
+  gives callers optimistic concurrency before anything is sent.
+- **E2EE** (`src/e2ee.ts`) is a node:crypto port of `plugin/src/Crypto.ts` and must
+  stay byte-compatible — `test/unit.test.ts` cross-checks it against the plugin's
+  implementation in both directions. Writes use the highest format version seen in
+  the vault (else v2), or `IONSYNC_API_E2EE_VERSION`. The same "never change an
+  existing version's iterations/salt" rule applies.
+- **Fences:** dot-paths (`.obsidian/**`) are invisible and unwritable; only text
+  extensions (`src/paths.ts`) are read/written; binaries are metadata-only;
+  deletes are capped per hour (`IONSYNC_API_MAX_DELETES_PER_HOUR`); bearer tokens
+  are compared as SHA-256 digests with `timingSafeEqual`; failed auth is
+  rate-limited per client address.
+- **Disabled = idle, not exited.** With no `IONSYNC_API_TOKEN` the process logs and
+  sleeps, so the always-present compose service does not restart-loop.
+- Tests (`npm test -w packages/api`) boot the real server via
+  `packages/server/test/helpers.ts`, so they need better-sqlite3 like the server
+  suite. When adding an endpoint, update `src/openapi.ts` too — that spec is what
+  LLM tools are generated from.
 
 ---
 

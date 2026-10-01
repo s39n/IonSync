@@ -6,9 +6,9 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace=packages/protocol && npm run build --workspace=packages/plugin && npm run build --workspace=packages/server",
-    "test": "npm test --workspace=packages/server",
-    "typecheck": "npm run typecheck --workspace=packages/protocol && npm run typecheck --workspace=packages/server",
+    "build": "npm run build --workspace=packages/protocol && npm run build --workspace=packages/plugin && npm run build --workspace=packages/server && npm run build --workspace=packages/api",
+    "test": "npm test --workspace=packages/server && npm test --workspace=packages/api",
+    "typecheck": "npm run typecheck --workspace=packages/protocol && npm run typecheck --workspace=packages/server && npm run typecheck --workspace=packages/api",
     "lint": "eslint ."
   },
   "devDependencies": {

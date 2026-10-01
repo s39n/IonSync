@@ -47,9 +47,9 @@ export default [
     },
   },
 
-  // Server + protocol are Node, not a mobile plugin: drop the mobile/DOM rules.
+  // Server, protocol + LLM API are Node, not a mobile plugin: drop the mobile/DOM rules.
   {
-    files: ["packages/server/**/*.ts", "packages/protocol/**/*.ts"],
+    files: ["packages/server/**/*.ts", "packages/protocol/**/*.ts", "packages/api/**/*.ts"],
     rules: {
       "obsidianmd/no-nodejs-modules": "off",
       "obsidianmd/prefer-window-timers": "off",
@@ -59,6 +59,8 @@ export default [
       "obsidianmd/prefer-create-el": "off",
       "obsidianmd/validate-manifest": "off",
       "obsidianmd/validate-license": "off",
+      // Matches any `.delete()` on a class named Vault — the API's own Vault class.
+      "obsidianmd/prefer-file-manager-trash-file": "off",
       // Server logging is legitimate; the wrapper only re-emits no-console here.
       "obsidianmd/rule-custom-message": "off",
       "no-console": "off",

@@ -1,0 +1,24 @@
+{
+	"name": "@ionsync/api",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"main": "./dist/index.js",
+	"scripts": {
+		"build": "tsc",
+		"typecheck": "tsc --noEmit",
+		"start": "node --enable-source-maps dist/index.js",
+		"dev": "tsx src/index.ts",
+		"test": "node --import tsx/esm --test --test-timeout=30000 test/api.test.ts test/unit.test.ts"
+	},
+	"dependencies": {
+		"@ionsync/protocol": "*",
+		"ws": "^8.17.1"
+	},
+	"devDependencies": {
+		"@types/node": "^20.14.2",
+		"@types/ws": "^8.5.10",
+		"tsx": "^4.15.4",
+		"typescript": "^5.4.5"
+	}
+}

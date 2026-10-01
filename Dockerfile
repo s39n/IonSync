@@ -11,6 +11,7 @@ COPY package.json package-lock.json ./
 COPY packages/protocol/package.json ./packages/protocol/
 COPY packages/server/package.json   ./packages/server/
 COPY packages/plugin/package.json   ./packages/plugin/
+COPY packages/api/package.json      ./packages/api/
 
 RUN npm ci
 
@@ -19,6 +20,7 @@ COPY tsconfig.base.json ./
 COPY packages/protocol/  ./packages/protocol/
 COPY packages/server/    ./packages/server/
 COPY packages/plugin/    ./packages/plugin/
+COPY packages/api/       ./packages/api/
 
 # Compile protocol, then server, then the plugin bundle. The plugin build's
 # post-build step copies main.js/styles.css/manifest.json/build_info.json into
@@ -28,6 +30,7 @@ COPY packages/plugin/    ./packages/plugin/
 ARG IONSYNC_SIGN_KEY=""
 RUN npm run build -w packages/protocol
 RUN npm run build -w packages/server
+RUN npm run build -w packages/api
 RUN IONSYNC_SIGN_KEY="$IONSYNC_SIGN_KEY" npm run build -w packages/plugin
 
 # Drop dev dependencies before we copy node_modules to the runtime stage
@@ -50,6 +53,11 @@ COPY --from=builder /build/packages/protocol/package.json ./node_modules/@ionsyn
 # Server artefacts
 COPY --from=builder /build/packages/server/dist  ./dist
 COPY --from=builder /build/packages/server/client ./client
+
+# LLM API (optional second service — see docker-compose.yml, packages/api/README.md).
+# Shipped in the same image so one build serves both containers.
+COPY --from=builder /build/packages/api/dist         ./api/dist
+COPY --from=builder /build/packages/api/package.json ./api/package.json
 
 # Entrypoint — generates /app/config.js from env vars when no file is mounted
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
