@@ -9,6 +9,7 @@
 		"typecheck": "tsc --noEmit",
 		"start": "node --enable-source-maps dist/index.js",
 		"dev": "tsx src/index.ts",
+		"demo": "tsx scripts/demo.ts",
 		"test": "node --import tsx/esm --test --test-timeout=30000 test/api.test.ts test/unit.test.ts"
 	},
 	"dependencies": {
