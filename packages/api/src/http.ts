@@ -10,6 +10,7 @@ import { ApiError } from "./errors.js";
 import { isHiddenPath, isTextPath, isValidVaultPath } from "./paths.js";
 import { parseEditOps } from "./edits.js";
 import { searchNotes } from "./search.js";
+import { matchesFilter, noteMeta, parseFilter, tagCounts } from "./meta.js";
 import { openApiSpec } from "./openapi.js";
 
 type Role = "write" | "read";
@@ -98,7 +99,8 @@ export function createHttpServer(cfg: ApiConfig, vault: Vault): http.Server {
       const limit = clampInt(url.searchParams.get("limit"), 200, 1, 1000);
       const offset = clampInt(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
       const byRecent = url.searchParams.get("sort") === "mtime";
-      const all = [...vault.notes.values()].filter((n) => n.path.startsWith(prefix));
+      const filter = parseFilter(url.searchParams);
+      const all = [...vault.notes.values()].filter((n) => n.path.startsWith(prefix) && (!filter || matchesFilter(n, filter)));
       all.sort(byRecent ? (a, b) => b.mtime - a.mtime : (a, b) => a.path.localeCompare(b.path));
       return json(res, 200, { total: all.length, offset, notes: all.slice(offset, offset + limit).map(summary) });
     }
@@ -111,13 +113,21 @@ export function createHttpServer(cfg: ApiConfig, vault: Vault): http.Server {
 
     if (method === "GET" && p === "/v1/search") {
       const q = url.searchParams.get("q") ?? "";
-      if (!q.trim()) throw new ApiError(400, "bad_request", 'Query parameter "q" is required.');
+      const filter = parseFilter(url.searchParams);
+      if (!q.trim() && !filter) {
+        throw new ApiError(400, "bad_request", 'Give a text query "q", a filter (tag, frontmatter, date, dateFrom, dateTo), or both.');
+      }
       const prefix = url.searchParams.get("prefix");
       const results = searchNotes(vault.notes.values(), q, {
         limit: clampInt(url.searchParams.get("limit"), 20, 1, 100),
+        filter,
         ...(prefix ? { prefix } : {}),
       });
       return json(res, 200, { query: q, results });
+    }
+
+    if (method === "GET" && p === "/v1/tags") {
+      return json(res, 200, { tags: tagCounts(vault.notes.values(), url.searchParams.get("prefix") ?? "") });
     }
 
     if (method === "POST" && p === "/v1/move") {
@@ -141,6 +151,10 @@ export function createHttpServer(cfg: ApiConfig, vault: Vault): http.Server {
       if (method === "GET") {
         const note = vault.requireText(path);
         const lines = note.text.split("\n");
+        if (url.searchParams.get("meta") === "1") {
+          const m = noteMeta(note);
+          return json(res, 200, { ...summary(note), totalLines: lines.length, tags: m.tags, date: m.date, dateSource: m.dateSource, frontmatter: m.frontmatter });
+        }
         if (url.searchParams.get("outline") === "1") {
           return json(res, 200, { ...summary(note), totalLines: lines.length, outline: outline(lines) });
         }

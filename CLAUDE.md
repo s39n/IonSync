@@ -411,6 +411,13 @@ every start.
   deletes are capped per hour (`IONSYNC_API_MAX_DELETES_PER_HOUR`); bearer tokens
   are compared as SHA-256 digests with `timingSafeEqual`; failed auth is
   rate-limited per client address.
+- **Search filters** (`src/meta.ts`): tag / frontmatter / date scoping shared by
+  `/v1/search` and `/v1/notes`. Metadata is parsed lazily from the decrypted text
+  and cached in a `WeakMap` keyed by the mirror entry (a changed note is a new
+  entry). The frontmatter parser is a small hand-written YAML subset on purpose —
+  no YAML dependency. "Note date" = frontmatter `date`/`created`, else
+  `YYYY-MM-DD` in the file name, else mtime; mtime is last because sync and
+  re-encrypt migrations rewrite it. Days use the process time zone (`TZ`).
 - **Disabled = idle, not exited.** With no `IONSYNC_API_TOKEN` the process logs and
   sleeps, so the always-present compose service does not restart-loop.
 - Tests (`npm test -w packages/api`) boot the real server via

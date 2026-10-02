@@ -1,9 +1,13 @@
 import type { Note } from "./vault.js";
+import { noteMeta, matchesFilter, type NoteFilter } from "./meta.js";
 
 export interface SearchHit {
   path: string;
   score: number;
   mtime: number;
+  /** The note's own date (frontmatter, else filename, else last modified). */
+  date: string;
+  tags: string[];
   snippets: { line: number; text: string }[];
 }
 
@@ -31,14 +35,19 @@ function countOccurrences(hay: string, needle: string): number {
   return n;
 }
 
-export function searchNotes(notes: Iterable<Note>, query: string, opts: { prefix?: string; limit?: number } = {}): SearchHit[] {
+/**
+ * Text search, filter-only browse, or both. With no query terms every note
+ * passing the filter is returned, newest note date first.
+ */
+export function searchNotes(notes: Iterable<Note>, query: string, opts: { prefix?: string; limit?: number; filter?: NoteFilter | null } = {}): SearchHit[] {
   const terms = parseQuery(query);
-  if (terms.length === 0) return [];
+  if (terms.length === 0 && !opts.filter) return [];
   const hits: SearchHit[] = [];
 
   for (const note of notes) {
     if (note.kind !== "text" || note.text === null) continue;
     if (opts.prefix && !note.path.startsWith(opts.prefix)) continue;
+    if (opts.filter && !matchesFilter(note, opts.filter)) continue;
     const body = note.text.toLowerCase();
     const path = note.path.toLowerCase();
 
@@ -62,10 +71,11 @@ export function searchNotes(notes: Iterable<Note>, query: string, opts: { prefix
       if (!term) continue;
       snippets.push({ line: i + 1, text: clip(lines[i]!, lower.indexOf(term)) });
     }
-    hits.push({ path: note.path, score, mtime: note.mtime, snippets });
+    const meta = noteMeta(note);
+    hits.push({ path: note.path, score, mtime: note.mtime, date: meta.date, tags: meta.tags, snippets });
   }
 
-  hits.sort((a, b) => b.score - a.score || b.mtime - a.mtime || a.path.localeCompare(b.path));
+  hits.sort((a, b) => b.score - a.score || b.date.localeCompare(a.date) || b.mtime - a.mtime || a.path.localeCompare(b.path));
   return hits.slice(0, opts.limit ?? 20);
 }
 
