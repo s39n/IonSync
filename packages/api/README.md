@@ -2,6 +2,10 @@
 
 A small REST API that lets an LLM (or any script) work with your vault: **search, list, read, create, edit, move and delete notes**. Changes show up on every synced device within seconds and land in IonSync's version history like any other edit.
 
+![Example session against a sample vault](../../docs/llm-api-demo.png)
+
+*Real output from `npm run demo -w packages/api` (a throwaway server and sample vault — it never touches your data).*
+
 ## How it works
 
 The API is a separate process that logs in to the IonSync server as an ordinary sync device (it appears in the dashboard as **"LLM API"**). It keeps a decrypted copy of your text notes **in memory only** and sends writes with the same messages the Obsidian plugin uses.
@@ -19,11 +23,12 @@ The `ionsync-api` service ships in `docker-compose.yml` and idles until it has a
 
    | Variable | Required | Description |
    |---|---|---|
-   | `IONSYNC_API_TOKEN` | yes | Bearer token with full access. At least 24 characters. |
+   | `IONSYNC_API_TOKEN` | yes | Bearer token with full access: read, write, edit, move and delete. At least 24 characters. |
    | `IONSYNC_E2EE_PASSWORD` | if the vault is encrypted | The encryption password set in the plugin. Without it, encrypted notes are reported as unreadable and cannot be overwritten. |
    | `IONSYNC_API_READ_TOKEN` | no | A second token that can only list, read and search. |
    | `IONSYNC_API_PORT` | no | Host port (default `3002`). |
    | `IONSYNC_API_TRUST_PROXY` | behind a proxy/tunnel | Set to `1` so rate limiting sees the real client address (`CF-Connecting-IP` / `X-Forwarded-For`). |
+   | `IONSYNC_API_TZ` | no | Time zone for date filters, e.g. `America/Los_Angeles` (default `UTC`). |
    | `IONSYNC_API_PUBLIC_URL` | no | Base URL written into the OpenAPI spec (`servers`). By default it is taken from the request, which is right in most setups. |
    | `IONSYNC_API_E2EE_VERSION` | no | Force the encryption format for writes (`2` or `3`). By default the API writes the newest format already present in the vault, so it never produces notes an older device cannot read. |
    | `IONSYNC_API_MAX_DELETES_PER_HOUR` | no | Runaway-deletion guard (default `60`). |

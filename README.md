@@ -24,6 +24,7 @@ Self-hosted, end-to-end vault synchronization for [Obsidian](https://obsidian.md
 - **Versioned storage** — server keeps N historical versions per file (configurable)
 - **Auto-update** — server distributes new plugin builds to clients on connect
 - **Web dashboard** — monitor peers, devices, stored files, and server logs at `/dashboard`
+- **LLM API** (optional) — let an AI assistant search, read, write and edit your notes over a token-protected REST API, without the server ever seeing plaintext. See [LLM API](#llm-api)
 
 ---
 
@@ -232,9 +233,50 @@ The dashboard auto-refreshes every 5 seconds. Authentication uses the same passw
 
 ## LLM API
 
-IonSync can expose your vault to an LLM through a small REST API: search, list, read, create, edit, move and delete notes. It runs as a second container (`ionsync-api`) that connects to the server as an ordinary sync device, so its changes reach every device like any other edit and the server stays zero-knowledge when end-to-end encryption is on.
+An optional REST API that lets an AI assistant (or any script) work with your vault: **search, list, read, create, edit, move and delete notes**. Changes reach every synced device within seconds and are kept in version history like any other edit.
 
-It is off until you set `IONSYNC_API_TOKEN`. Setup, endpoints and security notes: [packages/api/README.md](packages/api/README.md).
+![Example session against a sample vault: a filtered search, a targeted edit, the tag list, and the ciphertext the sync server stores](docs/llm-api-demo.png)
+
+*Real output from `npm run demo -w packages/api`, which runs the API against a throwaway server and a sample vault.*
+
+```
+┌────────────┐  HTTPS + bearer token  ┌──────────────┐  WebSocket (as a device)  ┌──────────────┐
+│ LLM / tool │ ─────────────────────► │ ionsync-api  │ ◄───────────────────────► │ IonSync      │
+└────────────┘                        │ decrypts in  │      ciphertext only      │ Server       │
+                                      │ memory       │                           └──────────────┘
+                                      └──────────────┘
+```
+
+It runs as a second container (`ionsync-api`, same image) that logs in to the server as an ordinary sync device named "LLM API":
+
+- **End-to-end encryption stays intact.** The vault password lives only in the API container; the sync server still stores ciphertext, and plaintext is never written to disk.
+- **No silent overwrites.** Writes go through the same conflict handling as the plugin. A write that races another device returns `409` and the losing text is kept as a reviewable conflict.
+- **Search with filters.** Full-text search plus tag, frontmatter and date scoping: `q=sermon&date=2026-09`, `tag=prayer`, `frontmatter=type:sermon`.
+- **Built for models.** An OpenAPI 3.1 spec at `/v1/openapi.json` with descriptions written for an LLM, targeted edits (`append`, `replace`, `insert_under_heading`), a folder overview, and outline or line-window reads for long notes.
+- **Fenced.** `.obsidian/` and other dot-folders are invisible, deletes are rate-capped, and an optional second token is read-only.
+
+### Enable it
+
+The API is off until it has a token.
+
+```bash
+# .env
+IONSYNC_API_TOKEN=$(openssl rand -hex 32)     # full access: read, write, edit, move, delete
+IONSYNC_E2EE_PASSWORD=your-vault-encryption-password   # only if E2EE is on in the plugin
+# IONSYNC_API_READ_TOKEN=...                  # optional: a token that can only read and search
+# IONSYNC_API_PORT=3002                       # host port
+# IONSYNC_API_TZ=America/Los_Angeles          # time zone for date filters
+# IONSYNC_API_TRUST_PROXY=1                   # when behind a reverse proxy / tunnel
+```
+
+```bash
+docker compose up -d
+curl http://localhost:3002/v1/health          # {"ok":true,"connected":true,"synced":true}
+```
+
+Then point your assistant at `http://<host>:3002/v1/openapi.json` and give it the token as a Bearer token. To reach it from outside your network, put it behind HTTPS (a reverse proxy or tunnel) — never expose the port over plain HTTP.
+
+Full reference — every endpoint, filter, edit operation and limit: **[packages/api/README.md](packages/api/README.md)**.
 
 ---
 
@@ -245,7 +287,8 @@ v2/
 ├── packages/
 │   ├── protocol/   # Shared TypeScript message types (wire protocol)
 │   ├── server/     # Node.js WebSocket + HTTP server
-│   └── plugin/     # Obsidian plugin (esbuild bundle)
+│   ├── plugin/     # Obsidian plugin (esbuild bundle)
+│   └── api/        # Optional LLM REST API (headless sync client)
 ├── Dockerfile
 ├── docker-compose.yml
 └── CLAUDE.md       # Developer reference
