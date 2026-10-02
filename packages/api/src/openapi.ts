@@ -24,6 +24,14 @@ export function openApiSpec(serverUrl: string): Record<string, unknown> {
       kind: { type: "string", enum: ["text", "binary", "unreadable"] },
     },
   };
+  const filterParams = [
+    { name: "tag", in: "query", description: 'Only notes with this tag (frontmatter `tags` or inline #tag), without the "#". Repeat the parameter to require several. A tag also matches its nested tags: "sermon" matches "sermon/2026". See listTags for what exists.', schema: { type: "string" } },
+    { name: "frontmatter", in: "query", description: 'Only notes with a frontmatter property. "key" means the property exists; "key:value" means its value contains that text (case-insensitive), e.g. "type:sermon" or "speaker:smith". Repeatable.', schema: { type: "string" } },
+    { name: "date", in: "query", description: 'Only notes dated within this year, month or day: "2026", "2026-09" or "2026-09-14". The note date is the frontmatter date/created property, else a YYYY-MM-DD in the file name, else the last-modified day.', schema: { type: "string" } },
+    { name: "dateFrom", in: "query", description: "Start of a date range (inclusive); same formats as date.", schema: { type: "string" } },
+    { name: "dateTo", in: "query", description: "End of a date range (inclusive); same formats as date.", schema: { type: "string" } },
+    { name: "dateBy", in: "query", description: 'Which date the date filters use: "note" (default, described under date) or "modified" (last-modified day only).', schema: { type: "string", enum: ["note", "modified"] } },
+  ];
   const err = { description: "Error. Body: { error: { code, message } }. The message says how to recover." };
 
   return {
@@ -34,7 +42,7 @@ export function openApiSpec(serverUrl: string): Record<string, unknown> {
       description:
         "Read, search, create and edit notes in an Obsidian vault synced by IonSync. " +
         "Changes appear on every synced device within seconds and are kept in version history. " +
-        "Typical flow: getVaultTree for orientation, searchNotes to find a note, readNote (use outline or a line window for long notes), then editNote for small changes (preferred) or writeNote to create or replace. " +
+        "Typical flow: getVaultTree for orientation, searchNotes to find a note (by text, tag, frontmatter property and/or date), readNote (use outline or a line window for long notes), then editNote for small changes (preferred) or writeNote to create or replace. " +
         "To add a new note, call writeNote with createOnly: true and a path ending in .md. " +
         "Notes are Markdown; link between notes with [[Note Name]].",
     },
@@ -45,10 +53,11 @@ export function openApiSpec(serverUrl: string): Record<string, unknown> {
       "/v1/search": {
         get: {
           operationId: "searchNotes",
-          summary: "Full-text search across note titles and bodies",
-          description: 'Case-insensitive. Every word must appear in the note; wrap an exact phrase in double quotes. Results are ranked (title matches first) and include matching lines.',
+          summary: "Find notes by text, tag, frontmatter and date",
+          description: 'Text matching is case-insensitive: every word must appear in the note; wrap an exact phrase in double quotes. Results are ranked (title matches first) and include matching lines, tags and the note date. Filters narrow the search, and work on their own with no q — e.g. tag=prayer lists notes tagged prayer, newest first; q=sermon&date=2026-09 finds sermon notes from September 2026.',
           parameters: [
-            { name: "q", in: "query", required: true, schema: { type: "string" } },
+            { name: "q", in: "query", description: "Text to search for. Optional when a filter is given.", schema: { type: "string" } },
+            ...filterParams,
             { name: "prefix", in: "query", description: 'Only search under this folder, e.g. "Projects/".', schema: { type: "string" } },
             { name: "limit", in: "query", schema: { type: "integer", default: 20, maximum: 100 } },
           ],
@@ -67,11 +76,22 @@ export function openApiSpec(serverUrl: string): Record<string, unknown> {
           responses: { "200": { description: "{ prefix, depth, totalFiles, folders: [{ path, files, total, latestMtime }] }" }, default: err },
         },
       },
+      "/v1/tags": {
+        get: {
+          operationId: "listTags",
+          summary: "All tags in use, with note counts",
+          description: "Most used first. Check this before filtering by tag so you use tags that exist.",
+          parameters: [{ name: "prefix", in: "query", description: "Only count notes under this folder.", schema: { type: "string" } }],
+          responses: { "200": { description: "{ tags: [{ tag, notes }] }" }, default: err },
+        },
+      },
       "/v1/notes": {
         get: {
           operationId: "listNotes",
           summary: "List notes and attachments",
+          description: "Metadata only. Accepts the same tag, frontmatter and date filters as searchNotes.",
           parameters: [
+            ...filterParams,
             { name: "prefix", in: "query", description: 'Folder to list, e.g. "Daily/".', schema: { type: "string" } },
             { name: "sort", in: "query", description: '"mtime" lists most recently changed first; default is by path.', schema: { type: "string", enum: ["path", "mtime"] } },
             { name: "limit", in: "query", schema: { type: "integer", default: 200, maximum: 1000 } },
@@ -87,6 +107,7 @@ export function openApiSpec(serverUrl: string): Record<string, unknown> {
           summary: "Read a note (whole, a line window, or just its outline)",
           description: "With no query parameters, returns the full content. For long notes, first ask for outline=1 (headings with line numbers), then fetch only the lines you need with from/lines.",
           parameters: [
+            { name: "meta", in: "query", description: "Set to 1 to return only the note's tags, date and frontmatter properties.", schema: { type: "string", enum: ["1"] } },
             { name: "outline", in: "query", description: "Set to 1 to return only the headings and their line numbers.", schema: { type: "string", enum: ["1"] } },
             { name: "from", in: "query", description: "First line to return (1-based).", schema: { type: "integer" } },
             { name: "lines", in: "query", description: "How many lines to return (default 200 when from is given).", schema: { type: "integer" } },

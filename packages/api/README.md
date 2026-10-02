@@ -40,16 +40,40 @@ All calls except `health` and `openapi.json` need `Authorization: Bearer <token>
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/v1/search?q=…&prefix=…&limit=…` | Full-text search. Every word must match; `"quoted phrases"` supported. Ranked, with matching lines. |
+| `GET` | `/v1/search?q=…&tag=…&frontmatter=…&date=…` | Find notes by text and/or filters (see below). Ranked, with matching lines, tags and note date. |
+| `GET` | `/v1/tags` | Every tag in use with its note count. |
 | `GET` | `/v1/tree?prefix=…&depth=…` | Folder overview: file counts per folder. The cheap way to get oriented in a big vault. |
 | `GET` | `/v1/notes?prefix=…&sort=mtime&limit=…&offset=…` | List notes (metadata only). |
-| `GET` | `/v1/notes/{path}` | Read a note: `{ path, content, sha1, mtime, size, totalLines }`. Add `?outline=1` for just the headings, or `?from=40&lines=60` for a line window. |
+| `GET` | `/v1/notes/{path}` | Read a note: `{ path, content, sha1, mtime, size, totalLines }`. Add `?outline=1` for just the headings, `?meta=1` for tags, date and frontmatter, or `?from=40&lines=60` for a line window. |
 | `PUT` | `/v1/notes/{path}` | Create or replace. Body: `{ content, createOnly?, expectedSha1? }`. |
 | `PATCH` | `/v1/notes/{path}` | Targeted edits. Body: `{ operations: [...], expectedSha1? }`. All-or-nothing. |
 | `DELETE` | `/v1/notes/{path}` | Delete a note. |
 | `POST` | `/v1/move` | Rename/move. Body: `{ from, to }`. History follows the note. |
 | `GET` | `/v1/openapi.json` | OpenAPI 3.1 spec — import this to generate LLM tools. |
 | `GET` | `/v1/health` | `{ ok, connected, synced }`. |
+
+### Search filters
+
+`/v1/search` and `/v1/notes` take the same filters. On search they combine with `q`, or stand alone: with no `q` you get every matching note, newest first.
+
+| Parameter | Meaning |
+|---|---|
+| `tag=prayer` | Has the tag, from frontmatter `tags` or an inline `#prayer`. Repeat to require several. A tag matches its nested tags too (`sermon` matches `sermon/2026`). |
+| `frontmatter=type:sermon` | The property's value contains the text (case-insensitive). `frontmatter=speaker` alone means the property exists. Repeatable. |
+| `date=2026-09` | Dated within that year (`2026`), month (`2026-09`) or day (`2026-09-14`). |
+| `dateFrom=…` / `dateTo=…` | An inclusive range, same formats. |
+| `dateBy=modified` | Filter on the last-modified day instead of the note date. |
+
+The **note date** is the first of: a frontmatter `date` or `created` property, a `YYYY-MM-DD` in the file name, the last-modified day. Results say which one was used when you read a note with `?meta=1`. Last-modified is the weakest signal (any edit, on any device, moves it), so date your notes in frontmatter or the file name if you filter by date a lot. Days are computed in the container's time zone (`IONSYNC_API_TZ`, default UTC).
+
+```bash
+# Sermon notes from September
+curl -H "Authorization: Bearer $TOKEN" "$API/v1/search?q=sermon&date=2026-09"
+# Everything tagged prayer
+curl -H "Authorization: Bearer $TOKEN" "$API/v1/search?tag=prayer"
+```
+
+Frontmatter parsing covers what Obsidian writes for properties (text, lists, dates, links); nested YAML maps are ignored.
 
 Edit operations:
 

@@ -63,4 +63,6 @@ services:
       IONSYNC_API_TRUST_PROXY: ${IONSYNC_API_TRUST_PROXY:-0}
       # Optional: base URL advertised in /v1/openapi.json (default: from the request).
       IONSYNC_API_PUBLIC_URL: ${IONSYNC_API_PUBLIC_URL:-}
+      # Time zone for date filters ("notes from September"), e.g. America/Los_Angeles.
+      TZ: ${IONSYNC_API_TZ:-UTC}
     restart: unless-stopped

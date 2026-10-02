@@ -130,6 +130,22 @@ test("bootstrap: notes already on the server are readable, listed and searchable
     assert.equal(win.body.content, "## B\ntwo");
     assert.equal(win.body.totalLines, 6);
 
+    // Filters: tag, frontmatter and date, with or without a text query.
+    await deviceWrite(dev, "Sermons/2026-09-06 Grace.md", "---\ntype: sermon\ntags: [sermon]\n---\nGrace abounds. #prayer\n");
+    await deviceWrite(dev, "Sermons/2026-08-30 Faith.md", "---\ntype: sermon\n---\nFaith.\n");
+    await until(() => api!.gw.vault.get("Sermons/2026-08-30 Faith.md") !== undefined);
+    const sept = await api.call("GET", "/v1/search?frontmatter=type:sermon&date=2026-09");
+    assert.deepEqual(sept.body.results.map((r: { path: string }) => r.path), ["Sermons/2026-09-06 Grace.md"]);
+    assert.deepEqual(sept.body.results[0].tags, ["prayer", "sermon"]);
+    assert.equal(sept.body.results[0].date, "2026-09-06");
+    assert.equal((await api.call("GET", "/v1/search?q=faith&tag=prayer")).body.results.length, 0);
+    assert.equal((await api.call("GET", "/v1/notes?tag=prayer")).body.total, 1);
+    assert.deepEqual((await api.call("GET", "/v1/tags")).body.tags, [{ tag: "prayer", notes: 1 }, { tag: "sermon", notes: 1 }]);
+    const meta = await api.call("GET", `/v1/notes/${enc("Sermons/2026-09-06 Grace.md")}?meta=1`);
+    assert.deepEqual([meta.body.dateSource, meta.body.frontmatter.type], ["filename", ["sermon"]]);
+    assert.equal((await api.call("GET", "/v1/search")).status, 400);
+    assert.equal((await api.call("GET", "/v1/search?date=nope")).status, 400);
+
     const spec = await api.call("GET", "/v1/openapi.json", undefined, null);
     assert.match(spec.body.servers[0].url, /^http:\/\/127\.0\.0\.1:\d+$/);
   } finally {
