@@ -32,7 +32,12 @@ export function attachWebSocketServer(
   ctx: SyncContext,
   httpServer: import("node:http").Server | import("node:https").Server
 ): WebSocketServer {
-  const wss = new WebSocketServer({ server: httpServer, maxPayload: 50 * 1024 * 1024 });
+  // A file travels base64-encoded inside a JSON frame (~4/3 its size), so the
+  // frame cap must track the configured file limit or large files are dropped
+  // at the socket before the size check ever runs. 8 MB headroom covers the
+  // JSON envelope; never go below the old fixed 50 MB.
+  const maxPayload = Math.max(50, Math.ceil(ctx.config.maxFileSizeMb * 4 / 3) + 8) * 1024 * 1024;
+  const wss = new WebSocketServer({ server: httpServer, maxPayload });
 
   const isAlive = new WeakMap<WebSocket, boolean>();
   const rateLimiter = new ConnectionRateLimiter();
