@@ -48,12 +48,14 @@ export class Storage {
   private deleteQueueData: Record<string, { metadata: Partial<FileEntry>; timestamp: number }> = {};
 
   constructor(private app: App, private settings: PluginSettings, private pluginDir: string) {
-    this.fsVault = new FSAdapter(app, "");
+    this.fsVault = new FSAdapter(app, "", pluginDir.replace(/^\//, "") + "/data/partial");
     this.fsInternal = new FSAdapter(app, pluginDir + "/");
   }
 
   async init(): Promise<void> {
     await this.ensureDataDir();
+    // Drop temp files from a chunked write that was interrupted (app killed).
+    await this.fsVault.cleanupTemp();
 
     if (USE_INDEXEDDB && IndexStore.isSupported()) {
       try {

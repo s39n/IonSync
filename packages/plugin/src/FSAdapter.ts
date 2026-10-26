@@ -1,8 +1,104 @@
-import { normalizePath, TFile, type App, TFolder } from "obsidian";
+import { normalizePath, Platform, TFile, type App, TFolder } from "obsidian";
 import Utils from "./Utils.js";
 
+/**
+ * Large-file writes on mobile.
+ *
+ * Obsidian on Android hands every adapter.write()/writeBinary() to the native
+ * side as ONE JSON message (binary as base64). Java parses that message into a
+ * single StringBuilder, so a ~40 MB file needs a ~150 MB allocation and the app
+ * dies with OutOfMemoryError before the write happens (seen 2026-10-26 with a
+ * 39 MB text file). Above LARGE_WRITE_BYTES we instead write the content in
+ * CHUNK-sized pieces (write + append) to a temp file inside the plugin's own
+ * data dir — never synced, never a vault event — and move it into place only
+ * once it is complete, so a crash mid-write can never leave a truncated vault
+ * file that would later be uploaded as a "local edit".
+ */
+export const LARGE_WRITE_BYTES = 8 * 1024 * 1024;
+export const WRITE_CHUNK = 4 * 1024 * 1024;
+
+/** Split a string into ~size-unit pieces without cutting a surrogate pair. */
+export function chunkString(s: string, size: number): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < s.length) {
+    let end = Math.min(i + size, s.length);
+    if (end < s.length) {
+      const c = s.charCodeAt(end - 1);
+      if (c >= 0xd800 && c <= 0xdbff) end--; // high surrogate: keep the pair together
+    }
+    out.push(s.slice(i, end));
+    i = end;
+  }
+  return out;
+}
+
 export class FSAdapter {
-  constructor(private app: App, private basePath: string) {}
+  /**
+   * @param tempDir vault-relative folder for staging chunked writes (the plugin's
+   *   data dir). When absent, chunked writing is disabled for this adapter.
+   */
+  constructor(private app: App, private basePath: string, private tempDir?: string) {}
+
+  /** True when a write of `size` bytes/chars will be staged in chunks. */
+  usesChunkedWrite(size: number): boolean {
+    return !!this.tempDir && Platform.isMobile && size > LARGE_WRITE_BYTES;
+  }
+
+  private async tempPath(): Promise<string> {
+    const dir = normalizePath(this.tempDir as string);
+    const a = this.app.vault.adapter;
+    if (!(await a.exists(dir))) await a.mkdir(dir);
+    return `${dir}/part-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  /** Move a completed temp file over `p` (vault path). */
+  private async moveInto(tmp: string, p: string): Promise<void> {
+    const a = this.app.vault.adapter;
+    if (await a.exists(p)) await a.remove(p);
+    await a.rename(tmp, p);
+  }
+
+  private async writeLargeText(p: string, data: string): Promise<void> {
+    const a = this.app.vault.adapter;
+    const tmp = await this.tempPath();
+    try {
+      const parts = chunkString(data, WRITE_CHUNK);
+      await a.write(tmp, parts[0] ?? "");
+      for (let i = 1; i < parts.length; i++) await a.append(tmp, parts[i] as string);
+      await this.moveInto(tmp, p);
+    } catch (e) {
+      try { await a.remove(tmp); } catch { /* best-effort cleanup */ }
+      throw Utils.toError(e);
+    }
+  }
+
+  private async writeLargeBinary(p: string, data: ArrayBuffer): Promise<void> {
+    const a = this.app.vault.adapter;
+    const tmp = await this.tempPath();
+    try {
+      await a.writeBinary(tmp, data.slice(0, WRITE_CHUNK));
+      for (let off = WRITE_CHUNK; off < data.byteLength; off += WRITE_CHUNK) {
+        await a.appendBinary(tmp, data.slice(off, off + WRITE_CHUNK));
+      }
+      await this.moveInto(tmp, p);
+    } catch (e) {
+      try { await a.remove(tmp); } catch { /* best-effort cleanup */ }
+      throw Utils.toError(e);
+    }
+  }
+
+  /** Remove temp files left behind by a write that was interrupted (app killed). */
+  async cleanupTemp(): Promise<void> {
+    if (!this.tempDir) return;
+    const a = this.app.vault.adapter;
+    const dir = normalizePath(this.tempDir);
+    try {
+      if (!(await a.exists(dir))) return;
+      const { files } = await a.list(dir);
+      for (const f of files) { try { await a.remove(f); } catch { /* ignore */ } }
+    } catch { /* ignore */ }
+  }
 
   private norm(path: string): string {
     let full = normalizePath(this.basePath + "/" + path);
@@ -57,6 +153,11 @@ export class FSAdapter {
       await this.makeFolder(folderParts.slice(0, -1).join("/"));
     }
 
+    if (this.usesChunkedWrite(data.length)) {
+      await this.writeLargeText(p, data);
+      return;
+    }
+
     const opts = mtime ? { mtime } : undefined;
     
     try {
@@ -101,6 +202,11 @@ export class FSAdapter {
     const folderParts = p.split("/");
     if (folderParts.length > 1) {
       await this.makeFolder(folderParts.slice(0, -1).join("/"));
+    }
+
+    if (this.usesChunkedWrite(data.byteLength) && typeof this.app.vault.adapter.appendBinary === "function") {
+      await this.writeLargeBinary(p, data);
+      return;
     }
 
     const opts = mtime ? { mtime } : undefined;
