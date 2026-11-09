@@ -1,0 +1,52 @@
+# IonSync from the prebuilt image - no clone, no build.
+#
+#   1. Save this file as docker-compose.yml in an empty folder
+#   2. Next to it, create .env containing:  IONSYNC_PASSWORD=your-secret-password
+#   3. docker compose up -d
+#   4. Dashboard: http://<server>:3001/dashboard   Plugin connects to port 3000
+#
+# Update later with:  docker compose pull && docker compose up -d
+# (The docker-compose.yml in the repository builds from source instead.)
+
+services:
+  ionsync:
+    image: ghcr.io/s39n/ionsync:latest
+    ports:
+      - "${IONSYNC_PORT:-3000}:3000" # sync (the plugin connects here)
+      - "${IONSYNC_DASH:-3001}:3001" # dashboard
+    volumes:
+      - ${IONSYNC_DATA:-ionsync_data}:/data
+    environment:
+      IONSYNC_PASSWORD: ${IONSYNC_PASSWORD:?Create a .env file and set IONSYNC_PASSWORD}
+      MAX_FILE_SIZE_MB: ${IONSYNC_MAX_FILE_SIZE_MB:-50}
+      NODE_OPTIONS: "--max-old-space-size=4096"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/dashboard', r => process.exit(r.statusCode===200?0:1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # Optional LLM API. Stays idle until IONSYNC_API_TOKEN is set in .env.
+  # Delete this service if you do not want it. See packages/api/README.md.
+  ionsync-api:
+    image: ghcr.io/s39n/ionsync:latest
+    entrypoint: ["node", "--enable-source-maps", "api/dist/index.js"]
+    depends_on:
+      - ionsync
+    ports:
+      - "${IONSYNC_API_PORT:-3002}:3002"
+    environment:
+      IONSYNC_API_SERVER_URL: ws://ionsync:3000
+      IONSYNC_PASSWORD: ${IONSYNC_PASSWORD:?Create a .env file and set IONSYNC_PASSWORD}
+      IONSYNC_API_TOKEN: ${IONSYNC_API_TOKEN:-}
+      IONSYNC_API_READ_TOKEN: ${IONSYNC_API_READ_TOKEN:-}
+      IONSYNC_E2EE_PASSWORD: ${IONSYNC_E2EE_PASSWORD:-}
+      IONSYNC_API_TRUST_PROXY: ${IONSYNC_API_TRUST_PROXY:-0}
+      IONSYNC_API_PUBLIC_URL: ${IONSYNC_API_PUBLIC_URL:-}
+      TZ: ${IONSYNC_API_TZ:-UTC}
+    restart: unless-stopped
+
+volumes:
+  ionsync_data:
