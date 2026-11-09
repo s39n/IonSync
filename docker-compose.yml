@@ -68,3 +68,9 @@ services:
       # Time zone for date filters ("notes from September"), e.g. America/Los_Angeles.
       TZ: ${IONSYNC_API_TZ:-UTC}
     restart: unless-stopped
+
+# The default data volume. Without this declaration `docker compose up` fails
+# with "undefined volume ionsync_data" unless IONSYNC_DATA is a host path.
+# Unused (and harmless) when IONSYNC_DATA points at a host directory.
+volumes:
+  ionsync_data:
