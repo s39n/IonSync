@@ -25,6 +25,9 @@ services:
       NODE_OPTIONS: "--max-old-space-size=4096"
       # Largest file (MB) the server accepts and sends. Set in the stack .env.
       MAX_FILE_SIZE_MB: ${IONSYNC_MAX_FILE_SIZE_MB:-50}
+      # The host port devices connect to (same value as the mapping above), so
+      # the dashboard's "Add a device" link is pre-filled with the right port.
+      IONSYNC_PUBLIC_PORT: ${IONSYNC_PORT:-3000}
       # IONSYNC_PORT: 3000
       # IONSYNC_HOST: 0.0.0.0
       # IONSYNC_LOG_LEVEL: 3          # 0=silent 1=error 2=warn 3=info

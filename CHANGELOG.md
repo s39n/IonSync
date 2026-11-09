@@ -11,10 +11,18 @@ landed before. Earlier history is in `git log`.
   REST API to search, list, read, create, edit, move and delete notes. Runs as a
   sync client, so the server stays zero-knowledge with E2EE. Tag, frontmatter and
   date filters; folder tree; outline and line-window reads; OpenAPI 3.1 spec.
+- **Add a device by link or QR code.** The dashboard's Devices tab builds an
+  `obsidian://ionsync-setup` link; the plugin validates it and asks for
+  confirmation before pointing the vault at the server. The password is
+  optional in the link and is never read back from the server.
+- Prebuilt multi-arch server image on GHCR (`ghcr.io/s39n/ionsync`) and a
+  pull-only `docker-compose.image.yml`.
 - `IONSYNC_MAX_FILE_SIZE_MB` — configurable max file size in Docker; the
   WebSocket frame cap follows it.
 
 ### Fixed
+- `docker compose up` with the default settings failed with "undefined volume
+  ionsync_data"; the volume is now declared.
 - Plugin writes large files in chunks on mobile, avoiding Android out-of-memory
   crashes.
 
