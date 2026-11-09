@@ -263,6 +263,15 @@ export function buildAdminRouter(ctx: SyncContext): express.Router {
     res.json({ salt: ctx.db.getOrCreateE2eeSalt() });
   });
 
+  // Defaults for the dashboard's "Add a device" setup link (host comes from the
+  // browser's address bar). Deliberately does NOT return the sync password: a
+  // stolen dashboard session must not be able to read it back. The user types
+  // it into the dialog if they want it in the link, and it never leaves the page.
+  router.get("/api/pairing", (req, res) => {
+    if (!checkAuth(req, res)) return;
+    res.json({ port: ctx.config.publicPort, tls: Boolean(ctx.config.tls) });
+  });
+
   // Dashboard HTML — served with a fresh script nonce stamped into every
   // <script> tag so the CSP can drop 'unsafe-inline' for scripts entirely.
   router.get("/dashboard", (_req, res) => {

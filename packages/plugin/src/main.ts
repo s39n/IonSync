@@ -1,7 +1,8 @@
-import { Plugin, Platform, TFile } from "obsidian";
+import { Notice, Plugin, Platform, TFile } from "obsidian";
 import { XSync } from "./XSync.js";
 import { IonSyncSettingsTab } from "./SettingsTab.js";
-import { VersionHistoryModal, ConflictsModal } from "./modals/index.js";
+import { VersionHistoryModal, ConflictsModal, PairingModal } from "./modals/index.js";
+import { PAIRING_ACTION, parsePairingParams, type PairingRequest } from "./pairing.js";
 import { setInstallSalt, setWriteVersion, hasInstallSalt } from "./Crypto.js";
 
 // Stamped by the esbuild post-build plugin — lets you confirm in the dev console
@@ -289,6 +290,18 @@ export class IonSyncPlugin extends Plugin {
 
     this.addSettingTab(new IonSyncSettingsTab(this.app, this));
 
+    // Setup links (obsidian://ionsync-setup?…) from the server dashboard's
+    // "Add a device" link / QR code. Untrusted input: validated, then shown in
+    // a confirmation dialog — nothing is applied without the user's consent.
+    this.registerObsidianProtocolHandler(PAIRING_ACTION, (params) => {
+      const parsed = parsePairingParams(params);
+      if (!parsed.ok) {
+        new Notice(`Setup link not accepted: ${parsed.error}`);
+        return;
+      }
+      new PairingModal(this, parsed.request).open();
+    });
+
     // Defer the first connect/sync until BOTH the layout is ready AND the vault's
     // metadata indexing has settled — so the plugin doesn't compete with the
     // indexer (which crawls slow devices) and the first reconcile sees a complete
@@ -389,6 +402,30 @@ export class IonSyncPlugin extends Plugin {
       // Connect/disconnect immediately so Pause/Resume actually takes effect.
       this.xSync.ws.setEnabled(this.settings.syncEnabled);
     }
+  }
+
+  /**
+   * Apply a confirmed setup link: point this vault at the server, store the
+   * password if the link carried one, and (re)connect. Called only from
+   * PairingModal after the user confirmed the address.
+   */
+  async applyPairing(req: PairingRequest): Promise<void> {
+    // Drop any socket to the previous endpoint first so the reconnect below
+    // cannot be skipped as "already connected".
+    this.xSync?.ws.setEnabled(false);
+
+    this.settings.host = req.host;
+    this.settings.port = req.port;
+    this.settings.tls = req.tls;
+    if (req.password) this.setPassword(req.password);
+    this.settings.syncEnabled = true;
+    await this.saveSettings(); // persists, then connects (syncEnabled is true)
+
+    new Notice(
+      this.getPassword()
+        ? "Server settings saved. Connecting…"
+        : "Server settings saved. Enter the server password in settings to connect."
+    );
   }
 
   // ── Keychain helpers ──────────────────────────────────────────────────────

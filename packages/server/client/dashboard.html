@@ -251,6 +251,11 @@
     .auto-refresh { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
     .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
     .toolbar .spacer { flex: 1; }
+    .pair-input {
+      margin-top: 4px; padding: 6px 10px; border-radius: 5px; border: 1px solid var(--border);
+      background: var(--bg3); color: var(--text); font-size: 13px; font-family: inherit;
+    }
+    .pair-input:focus { border-color: var(--accent); outline: none; }
     .text-muted { color: var(--muted); }
     .file-size { color: var(--muted); font-family: var(--mono); font-size: 12px; }
 
@@ -566,7 +571,34 @@
         <div class="toolbar">
           <h2 style="margin:0">Known Devices</h2>
           <div class="spacer"></div>
+          <button class="btn primary" data-action="pair-toggle">＋ Add a device</button>
           <button class="btn" data-action="refresh-all">↻ Refresh</button>
+        </div>
+        <!-- Setup link / QR code: fills in the plugin's connection settings on a
+             new device. Built entirely in the browser; the password field is
+             never sent to the server or stored. -->
+        <div class="card" id="pair-card" style="display:none">
+          <div class="card-header"><h3>Add a device</h3></div>
+          <div style="padding:16px;display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start">
+            <div style="flex:1 1 220px;min-width:0;display:flex;flex-direction:column;gap:10px;font-size:13px">
+              <div style="color:var(--muted)">Install the IonSync plugin on the new device, then scan the code with its camera or open the link there. Obsidian asks for confirmation before connecting.</div>
+              <label>Server address (as the device reaches it)<br>
+                <input type="text" class="pair-input" id="pair-host" autocomplete="off" spellcheck="false" style="width:100%"></label>
+              <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap">
+                <label>Sync port<br><input type="text" class="pair-input" id="pair-port" inputmode="numeric" autocomplete="off" style="width:90px"></label>
+                <label style="padding-bottom:7px"><input type="checkbox" id="pair-tls"> Use TLS (wss://)</label>
+              </div>
+              <label>Server password (optional)<br>
+                <input type="password" class="pair-input" id="pair-pw" autocomplete="off" style="width:100%"></label>
+              <div style="color:var(--muted);font-size:12px">Leave the password empty to type it on the device instead. If you include it, treat the code and link like the password itself. An encryption password is never included.</div>
+              <div style="display:flex;gap:8px">
+                <input type="text" class="pair-input" id="pair-link" readonly style="flex:1;min-width:0;font-family:monospace;font-size:11px">
+                <button class="btn" data-action="pair-copy">Copy link</button>
+              </div>
+              <div class="login-error" id="pair-error"></div>
+            </div>
+            <div id="pair-qr" style="background:#fff;padding:12px;border-radius:10px;line-height:0"></div>
+          </div>
         </div>
         <div class="card">
           <table>
@@ -1036,6 +1068,80 @@ async function loadPeers() {
   S.peers = await r.json();
   renderPeers();
   updateOverview();
+}
+
+// ── Add a device (setup link + QR) ───────────────────────────────
+// Builds obsidian://ionsync-setup?host=…&port=…&tls=…[&pw=…], which the plugin
+// validates and shows in a confirmation dialog (plugin/src/pairing.ts — keep
+// the two in step). Everything happens in this page: the password is typed
+// here, goes only into the link/QR, and is never sent to the server or stored.
+const PAIR_HOST_RE = /^([a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?|\[[0-9a-f:.]{2,45}\])$/i;
+let pairLoaded = false;
+
+async function togglePairCard() {
+  const card = document.getElementById('pair-card');
+  const show = card.style.display === 'none';
+  card.style.display = show ? '' : 'none';
+  if (!show) { document.getElementById('pair-pw').value = ''; return; }
+  if (!pairLoaded) {
+    pairLoaded = true;
+    // Remembered address (never the password) wins over the server's guess,
+    // since only the user knows how devices actually reach this server.
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('pair-defaults') || '{}') || {}; } catch { saved = {}; }
+    let guess = { port: '', tls: false };
+    try { guess = await (await api('/api/pairing')).json(); } catch { /* older server: leave blank */ }
+    const loc = location.hostname.includes(':') ? `[${location.hostname.replace(/^\[|\]$/g, '')}]` : location.hostname;
+    document.getElementById('pair-host').value = typeof saved.host === 'string' ? saved.host : loc;
+    document.getElementById('pair-port').value = saved.port !== undefined ? saved.port : String(guess.port || '');
+    document.getElementById('pair-tls').checked = typeof saved.tls === 'boolean' ? saved.tls : Boolean(guess.tls);
+  }
+  renderPairLink();
+}
+
+function buildPairLink() {
+  const host = document.getElementById('pair-host').value.trim();
+  const port = document.getElementById('pair-port').value.trim();
+  const tls = document.getElementById('pair-tls').checked;
+  const pw = document.getElementById('pair-pw').value;
+  if (!host) return { error: 'Enter the server address.' };
+  if (!PAIR_HOST_RE.test(host)) return { error: 'Address must be a host name or IP only — no ws://, port or path.' };
+  if (port && !(/^\d{1,5}$/.test(port) && Number(port) >= 1 && Number(port) <= 65535)) return { error: 'Port must be a number from 1 to 65535.' };
+  const q = ['host=' + encodeURIComponent(host)];
+  if (port) q.push('port=' + Number(port));
+  q.push('tls=' + (tls ? 1 : 0));
+  if (pw) q.push('pw=' + encodeURIComponent(pw));
+  return { link: 'obsidian://ionsync-setup?' + q.join('&'), host, port, tls };
+}
+
+function renderPairLink() {
+  const out = document.getElementById('pair-link');
+  const qr = document.getElementById('pair-qr');
+  const err = document.getElementById('pair-error');
+  const built = buildPairLink();
+  qr.textContent = '';
+  if (built.error) { out.value = ''; err.textContent = built.error; qr.style.display = 'none'; return; }
+  err.textContent = '';
+  out.value = built.link;
+  try { localStorage.setItem('pair-defaults', JSON.stringify({ host: built.host, port: built.port, tls: built.tls })); } catch { /* private mode */ }
+  // qrcodejs comes from a CDN; without internet access the link still works.
+  if (typeof QRCode === 'undefined') { qr.style.display = 'none'; err.textContent = 'QR code unavailable (could not load the QR library) — use the link instead.'; return; }
+  qr.style.display = '';
+  try {
+    new QRCode(qr, { text: built.link, width: 200, height: 200, correctLevel: QRCode.CorrectLevel.M });
+  } catch {
+    qr.style.display = 'none';
+    err.textContent = 'Too long for a QR code — use the link, or leave the password out.';
+  }
+}
+
+function copyPairLink() {
+  const link = document.getElementById('pair-link').value;
+  if (!link) return;
+  navigator.clipboard.writeText(link).then(
+    () => toast('Setup link copied'),
+    () => { document.getElementById('pair-link').select(); toast('Copy failed — select the link and copy it manually', 'error'); }
+  );
 }
 
 async function loadDevices() {
@@ -2052,6 +2158,8 @@ const ACTIONS = {
   'back-to-password':      () => backToPassword(),
   'toggle-recovery':       () => toggleRecoveryMode(),
   'refresh-all':           () => refreshAll(),
+  'pair-toggle':           () => togglePairCard(),
+  'pair-copy':             () => copyPairLink(),
   'load-activity':         () => loadActivity(),
   'load-files':            () => loadFiles(),
   'load-logs':             () => loadLogs(),
@@ -2127,7 +2235,9 @@ document.addEventListener('input', (e) => {
   if (el.id === 'file-search') debouncedRenderFileTree();
   else if (el.id === 'db-search') debouncedDbRenderFiles();
   else if (el.id === 'global-e2ee-pw') sessionStorage.setItem('e2ee-pw', el.value);
+  else if (el.id === 'pair-host' || el.id === 'pair-port' || el.id === 'pair-pw') renderPairLink();
 });
+document.getElementById('pair-tls').addEventListener('change', () => renderPairLink());
 
 // ── Event wiring ───────────────────────────────────────────────────────────
 document.getElementById('login-btn').addEventListener('click', login);

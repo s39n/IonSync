@@ -42,6 +42,8 @@ docker compose up -d
 #    http://localhost:3001/dashboard
 ```
 
+No clone needed: save [`docker-compose.image.yml`](docker-compose.image.yml) as `docker-compose.yml` to run the prebuilt image (`ghcr.io/s39n/ionsync`, amd64 and arm64) instead of building from source.
+
 Two ports are published: **`3000` for sync** (what the plugin connects to) and **`3001` for the dashboard**. Then install the plugin on each device — see [Plugin installation](#plugin-installation).
 
 Data (SQLite database + file versions) is stored in a Docker named volume so it survives container restarts. Automatic SQLite backups are written to `<dataDir>/backups/` (a `pre-migrate` snapshot on every startup, plus periodic `daily` snapshots via `VACUUM INTO`); tune them with the `backup` config block or the `BACKUP_INTERVAL_HOURS` / `BACKUP_RETAIN` env vars.
@@ -216,6 +218,8 @@ npm run dev
 | Use TLS (wss://) | On only if the server is reached over HTTPS/TLS (see [Remote access](#remote-access)) |
 
 Turn on **Enable sync** and the status bar shows the connection. Repeat on each device. To encrypt notes end to end, turn on **Enable E2EE** and set the same **Encryption password** on every device.
+
+**Skip the typing: setup link / QR code.** With the plugin installed, open the dashboard → **Devices** → **Add a device**. It shows a QR code and an `obsidian://ionsync-setup` link carrying the server address, port and TLS setting (and the password, if you choose to include it). Scan the code with the phone's camera, or open the link on the device; Obsidian shows the server address and asks you to confirm before anything changes. Check that the address is one the *device* can reach — the dashboard pre-fills the address you opened it with. An encryption password is never part of the link.
 
 **Manual install** (for development, or without the store):
 

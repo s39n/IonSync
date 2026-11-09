@@ -19,6 +19,7 @@ services:
     environment:
       IONSYNC_PASSWORD: ${IONSYNC_PASSWORD:?Create a .env file and set IONSYNC_PASSWORD}
       MAX_FILE_SIZE_MB: ${IONSYNC_MAX_FILE_SIZE_MB:-50}
+      IONSYNC_PUBLIC_PORT: ${IONSYNC_PORT:-3000}
       NODE_OPTIONS: "--max-old-space-size=4096"
     restart: unless-stopped
     healthcheck:

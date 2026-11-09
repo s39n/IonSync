@@ -49,9 +49,16 @@ export interface Config {
   logs: { level: number };
   maxFileSizeMb: number;
   backup: { intervalHours: number; retain: number };
+  /**
+   * The sync port as devices reach it, which differs from `port` when Docker
+   * publishes it on another host port (`IONSYNC_PORT=3778` → container 3000).
+   * Only used to pre-fill the dashboard's "Add a device" setup link; the user
+   * can still edit it there. Env `IONSYNC_PUBLIC_PORT`; defaults to `port`.
+   */
+  publicPort: number;
 }
 
-const DEFAULTS: Omit<Config, "password" | "adminPort"> = {
+const DEFAULTS: Omit<Config, "password" | "adminPort" | "publicPort"> = {
   port: 3000,
   host: "0.0.0.0",
   adminHost: "127.0.0.1",
@@ -106,9 +113,17 @@ export function mergeConfig(raw: Record<string, unknown>): Config {
       : (typeof backupRaw.retain === "number" && backupRaw.retain > 0 ? backupRaw.retain : DEFAULTS.backup.retain),
   };
 
+  const isPort = (n: unknown): n is number =>
+    typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= 65535;
+  const envPublicPort = process.env.IONSYNC_PUBLIC_PORT ? parseInt(process.env.IONSYNC_PUBLIC_PORT, 10) : NaN;
+  const publicPort = isPort(envPublicPort) ? envPublicPort
+    : isPort(raw["publicPort"]) ? raw["publicPort"]
+      : port;
+
   const result: Config = {
     password: raw["password"],
     port,
+    publicPort,
     host: typeof raw["host"] === "string" ? raw["host"] : DEFAULTS.host,
     adminHost: typeof raw["adminHost"] === "string" ? raw["adminHost"] : DEFAULTS.adminHost,
     adminPort: typeof raw["adminPort"] === "number" ? raw["adminPort"] : port + 1,
