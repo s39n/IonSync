@@ -1,0 +1,114 @@
+name: Docker image
+
+# Builds the server image and publishes it to GitHub Container Registry so a
+# new user can `docker compose up` without cloning or compiling anything:
+#
+#     ghcr.io/s39n/ionsync:latest      newest main
+#     ghcr.io/s39n/ionsync:<version>   newest build of that plugin version
+#     ghcr.io/s39n/ionsync:sha-<sha>   one exact commit (for pinning / rollback)
+#
+# Pull requests only BUILD (both architectures, nothing pushed, no secrets) so a
+# broken Dockerfile is caught before it reaches main.
+#
+# This is additive: the Dockerfile and docker-compose.yml are unchanged, so a
+# build-from-git deployment (Dockhand) keeps working exactly as before.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker-entrypoint.sh
+      - "docker-compose*.yml"
+      - package.json
+      - package-lock.json
+      - "packages/**"
+      - .github/workflows/docker-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/s39n/ionsync
+  # The signing key travels as a build argument. Keep it out of everything the
+  # action would otherwise publish about the build (job summary and the
+  # downloadable build record both list build arguments).
+  DOCKER_BUILD_SUMMARY: "false"
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+
+jobs:
+  image:
+    name: Build${{ github.event_name != 'pull_request' && ' & publish' || '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Catches compose mistakes (bad interpolation, undefined volumes) for the
+      # default named volume and for a host-path data directory.
+      - name: Validate compose files
+        env:
+          IONSYNC_PASSWORD: ci-check
+        run: |
+          docker compose -f docker-compose.yml config -q
+          docker compose -f docker-compose.image.yml config -q
+          IONSYNC_DATA=/srv/ionsync docker compose -f docker-compose.yml config -q
+          IONSYNC_DATA=/srv/ionsync docker compose -f docker-compose.image.yml config -q
+
+      - name: Read version
+        id: version
+        run: echo "version=$(node -p "require('./packages/plugin/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.version.outputs.version }},enable={{is_default_branch}}
+            type=sha
+          labels: |
+            org.opencontainers.image.title=IonSync
+            org.opencontainers.image.description=Self-hosted vault sync server for Obsidian
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+
+      # IONSYNC_SIGN_KEY (optional repo secret) signs the plugin auto-update
+      # bundle inside the image. It is only an ARG of the discarded builder
+      # stage, so it is not in the published image or its history. Without the
+      # secret the image still works; it just ships an unsigned bundle.
+      #
+      # provenance/sbom are off and no build cache is exported on purpose:
+      # provenance attestations record build arguments, which would publish the
+      # key. Do not turn them on while the key is passed as a build argument.
+      - name: Build${{ github.event_name != 'pull_request' && ' and push' || '' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            IONSYNC_SIGN_KEY=${{ github.event_name != 'pull_request' && secrets.IONSYNC_SIGN_KEY || '' }}
+          provenance: false
+          sbom: false
