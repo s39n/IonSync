@@ -20,7 +20,8 @@ Self-hosted, end-to-end vault synchronization for [Obsidian](https://obsidian.md
      Device B
 ```
 
-- **Last-write-wins** conflict resolution by client-reported mtime
+- **No silent overwrites** — every upload carries the version it was based on, so a concurrent edit is detected regardless of device clocks. The losing edit is kept as a reviewable conflict (in the plugin and the dashboard) instead of being dropped
+- **End-to-end encryption** (optional) — with an encryption password set in the plugin, the server only ever stores ciphertext
 - **Versioned storage** — server keeps N historical versions per file (configurable)
 - **Auto-update** — server distributes new plugin builds to clients on connect
 - **Web dashboard** — monitor peers, devices, stored files, and server logs at `/dashboard`
@@ -37,11 +38,13 @@ echo "IONSYNC_PASSWORD=your-secret-password" > .env
 # 2. Start the server
 docker compose up -d
 
-# 3. Open the dashboard
-open http://localhost:3000/dashboard
+# 3. Open the dashboard in a browser
+#    http://localhost:3001/dashboard
 ```
 
-The server listens on port `3000` by default. Data (SQLite database + file versions) is stored in a Docker named volume so it survives container restarts. Automatic SQLite backups are written to `<dataDir>/backups/` (a `pre-migrate` snapshot on every startup, plus periodic `daily` snapshots via `VACUUM INTO`); tune them with the `backup` config block or the `BACKUP_INTERVAL_HOURS` / `BACKUP_RETAIN` env vars.
+Two ports are published: **`3000` for sync** (what the plugin connects to) and **`3001` for the dashboard**. Then install the plugin on each device — see [Plugin installation](#plugin-installation).
+
+Data (SQLite database + file versions) is stored in a Docker named volume so it survives container restarts. Automatic SQLite backups are written to `<dataDir>/backups/` (a `pre-migrate` snapshot on every startup, plus periodic `daily` snapshots via `VACUUM INTO`); tune them with the `backup` config block or the `BACKUP_INTERVAL_HOURS` / `BACKUP_RETAIN` env vars.
 
 ---
 
@@ -54,7 +57,10 @@ Set these in your `.env` file or directly in `docker-compose.yml`:
 | Variable | Default | Description |
 |---|---|---|
 | `IONSYNC_PASSWORD` | **required** | Shared password — used by the plugin and the dashboard |
-| `IONSYNC_PORT` | `3000` | Host port (maps to container port 3000) |
+| `IONSYNC_PORT` | `3000` | Host port for sync (maps to container port 3000) |
+| `IONSYNC_DASH` | `3001` | Host port for the dashboard (maps to container port 3001) |
+| `IONSYNC_DATA` | `ionsync_data` | Where data is stored: a named volume, or a host path such as `/volume1/docker/ionsync` |
+| `IONSYNC_MAX_FILE_SIZE_MB` | `50` | Largest file the server accepts and sends |
 | `IONSYNC_LOG_LEVEL` | `3` | `0` silent · `1` errors · `2` warnings · `3` info |
 | `IONSYNC_VERSIONS_PER_FILE` | `5` | Maximum stored versions per file path |
 | `IONSYNC_CLEANUP_INTERVAL` | `3600` | Cleanup job interval in seconds |
@@ -130,18 +136,40 @@ trustProxy: true,   // trusts X-Forwarded-Proto — enable ONLY behind such a pr
 
 ---
 
+## Remote access
+
+On your home network the plugin connects straight to `ws://<server-ip>:3000`. To sync away from home, pick one of these. In every case only the **sync port** needs to be reachable — keep the dashboard port (`3001`) on your LAN.
+
+**Private network (simplest).** Install [Tailscale](https://tailscale.com) or WireGuard on the server and on each device. Use the server's private-network address as *Server host*, port `3000`, TLS off — the tunnel already encrypts the traffic. Nothing is exposed to the internet.
+
+**Reverse proxy with HTTPS.** Point a domain at your server and let the proxy terminate TLS. With [Caddy](https://caddyserver.com), which obtains the certificate and handles WebSockets automatically:
+
+```
+sync.example.com {
+    reverse_proxy localhost:3000
+}
+```
+
+In the plugin: *Server host* `sync.example.com`, *Server port* `443`, *Use TLS* on. nginx and Traefik work the same way as long as WebSocket upgrades are passed through.
+
+**Tunnel.** A Cloudflare Tunnel (or similar) pointed at `http://localhost:3000` gives you an HTTPS hostname without opening a router port. Plugin settings are the same as for a reverse proxy: the hostname, port `443`, TLS on.
+
+Don't forward port `3000` from your router as plain `ws://` — the password handshake is safe, but unencrypted notes would cross the internet in the clear unless end-to-end encryption is on.
+
+---
+
 ## Manual setup (without Docker)
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 20+
 - npm 9+
 
 ### Install
 
 ```bash
-git clone <repo>
-cd v2
+git clone https://github.com/s39n/IonSync.git
+cd IonSync
 npm install
 ```
 
@@ -178,7 +206,18 @@ npm run dev
 
 ## Plugin installation
 
-The plugin is not yet published to the Obsidian Community Plugin directory. Install it manually:
+**From the community store (recommended).** In Obsidian open Settings → Community plugins → Browse, search for **IonSync**, install and enable it. Then in Settings → IonSync set:
+
+| Setting | Value |
+|---|---|
+| Server host | Your server's address, e.g. `192.168.1.50` or `sync.example.com` (no `ws://`) |
+| Server port | The sync port — `3000` unless you changed `IONSYNC_PORT` |
+| Password | Same as `IONSYNC_PASSWORD` |
+| Use TLS (wss://) | On only if the server is reached over HTTPS/TLS (see [Remote access](#remote-access)) |
+
+Turn on **Enable sync** and the status bar shows the connection. Repeat on each device. To encrypt notes end to end, turn on **Enable E2EE** and set the same **Encryption password** on every device.
+
+**Manual install** (for development, or without the store):
 
 1. **Build the plugin** (requires the server to already be set up):
    ```bash
@@ -197,9 +236,7 @@ The plugin is not yet published to the Obsidian Community Plugin directory. Inst
 
 3. **Enable the plugin** in Obsidian → Settings → Community plugins.
 
-4. **Configure** in Settings → IonSync:
-   - Server URL: `ws://your-server:3000` (or `wss://` with TLS)
-   - Password: same as `IONSYNC_PASSWORD`
+4. **Configure** in Settings → IonSync using the table above.
 
 ### Auto-update
 
@@ -217,7 +254,7 @@ In Dockhand, set `IONSYNC_SIGN_KEY` as a **build** environment variable on the s
 
 ## Dashboard
 
-Visit `http[s]://your-server:3000/dashboard` to access the web dashboard.
+Visit `http[s]://your-server:3001/dashboard` to access the web dashboard. It runs on its own port (`IONSYNC_DASH`), separate from sync, so you can keep it on your LAN while exposing only the sync port.
 
 | Tab | What it shows |
 |---|---|
@@ -283,7 +320,7 @@ Full reference — every endpoint, filter, edit operation and limit: **[packages
 ## Project structure
 
 ```
-v2/
+IonSync/
 ├── packages/
 │   ├── protocol/   # Shared TypeScript message types (wire protocol)
 │   ├── server/     # Node.js WebSocket + HTTP server
