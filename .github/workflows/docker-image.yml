@@ -7,11 +7,15 @@ name: Docker image
 #     ghcr.io/s39n/ionsync:<version>   newest build of that plugin version
 #     ghcr.io/s39n/ionsync:sha-<sha>   one exact commit (for pinning / rollback)
 #
+# Each architecture is built on a NATIVE runner (no QEMU) and the two images
+# are then joined into one multi-arch tag. The emulated arm64 build took 20-25
+# minutes and once hung until GitHub's 6-hour limit; native builds take a few
+# minutes, and every job has a timeout.
+#
 # Pull requests only BUILD (both architectures, nothing pushed, no secrets) so a
 # broken Dockerfile is caught before it reaches main.
 #
-# This is additive: the Dockerfile and docker-compose.yml are unchanged, so a
-# build-from-git deployment (Dockhand) keeps working exactly as before.
+# This is additive: a build-from-git deployment (Dockhand) is unaffected.
 
 on:
   push:
@@ -46,9 +50,18 @@ env:
   DOCKER_BUILD_RECORD_UPLOAD: "false"
 
 jobs:
-  image:
-    name: Build${{ github.event_name != 'pull_request' && ' & publish' || '' }}
-    runs-on: ubuntu-latest
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
@@ -68,7 +81,6 @@ jobs:
         id: version
         run: echo "version=$(node -p "require('./packages/plugin/package.json').version")" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
@@ -79,15 +91,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Image tags and labels
+      - name: Image labels
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ steps.version.outputs.version }},enable={{is_default_branch}}
-            type=sha
           labels: |
             org.opencontainers.image.title=IonSync
             org.opencontainers.image.description=Self-hosted vault sync server for Obsidian
@@ -101,15 +109,89 @@ jobs:
       # provenance/sbom are off and no build cache is exported on purpose:
       # provenance attestations record build arguments, which would publish the
       # key. Do not turn them on while the key is passed as a build argument.
-      - name: Build${{ github.event_name != 'pull_request' && ' and push' || '' }}
+      #
+      # On main the image is pushed by digest only (no tag yet); the merge job
+      # below joins both architectures under the real tags.
+      - name: Build
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          platforms: linux/${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
+          outputs: ${{ github.event_name != 'pull_request' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) || 'type=cacheonly' }}
           build-args: |
             IONSYNC_SIGN_KEY=${{ github.event_name != 'pull_request' && secrets.IONSYNC_SIGN_KEY || '' }}
           provenance: false
           sbom: false
+
+      # Hand the digest to the merge job as an empty file named after it.
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish multi-arch tags
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: echo "version=$(node -p "require('./packages/plugin/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.version.outputs.version }},enable={{is_default_branch}}
+            type=sha
+
+      - name: Create and push the multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          count=$(ls | wc -l)
+          if [ "$count" -ne 2 ]; then
+            echo "::error::expected 2 architecture digests, found $count"; exit 1
+          fi
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
+
+      - name: Inspect
+        run: docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}"
