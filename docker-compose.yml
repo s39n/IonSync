@@ -1,6 +1,9 @@
 services:
   ionsync:
-    image: ionsync:latest
+    # A second stack on the same Docker host (e.g. staging) MUST set
+    # IONSYNC_IMAGE to its own name, or its build would overwrite the image
+    # tag production runs from. See docs/STAGING.md.
+    image: ${IONSYNC_IMAGE:-ionsync:latest}
     build:
       context: .
       dockerfile: Dockerfile
@@ -49,7 +52,7 @@ services:
   # Stays idle (no port opened) until IONSYNC_API_TOKEN is set.
   # See packages/api/README.md.
   ionsync-api:
-    image: ionsync:latest
+    image: ${IONSYNC_IMAGE:-ionsync:latest}
     entrypoint: ["node", "--enable-source-maps", "api/dist/index.js"]
     depends_on:
       - ionsync
