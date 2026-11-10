@@ -22,6 +22,9 @@ interface BuildInfo {
 }
 
 // Cached build info loaded once at startup
+/** Log the "unsigned bundle, auto-update off" notice once per process. */
+let warnedUnsigned = false;
+
 let cachedBuildInfo: BuildInfo | null = null;
 let cachedClientDir = "";
 
@@ -75,6 +78,28 @@ export function handleVersionCheck(
     msg.version !== serverBuild.version || String(msg.build) !== String(serverBuild.build);
 
   if (!needsUpdate) {
+    peer.send({ type: "version_check_response", needsUpdate: false, caps: SERVER_CAPS });
+    return;
+  }
+
+  // An UNSIGNED bundle is never offered. Every current plugin pins the update
+  // public key and refuses a bundle without a valid signature (SECURITY.md #4),
+  // so offering one cannot update anybody — it only shows the user a "Blocked an
+  // unsigned plugin update" warning on every connect. That is the normal state
+  // for anyone who builds the image themselves or runs the public one (only a
+  // build given IONSYNC_SIGN_KEY is signed): their devices simply keep the
+  // plugin version installed from the community store. A signed build is
+  // unaffected and auto-updates exactly as before.
+  if (!serverBuild.sig) {
+    if (!warnedUnsigned) {
+      warnedUnsigned = true;
+      const line = `[${new Date().toISOString()}] [version_check] plugin bundle is unsigned - auto-update is off; devices keep their installed plugin version`;
+      if (ctx.config.logs.level >= 3) {
+        console.log(line);
+        ctx.logBuffer.push(line);
+        if (ctx.logBuffer.length > 200) ctx.logBuffer.shift();
+      }
+    }
     peer.send({ type: "version_check_response", needsUpdate: false, caps: SERVER_CAPS });
     return;
   }
