@@ -6,6 +6,12 @@ landed before. Earlier history is in `git log`.
 
 ## Unreleased
 
+### Changed
+- A server whose bundled plugin build is unsigned (a self-built or the public
+  image) no longer offers it to devices. Clients always refused it, so the only
+  effect was a "Blocked an unsigned plugin update" warning on every connect.
+  Signed builds auto-update as before.
+
 ## 2.0.13 — 2026-11-10
 
 ### Added

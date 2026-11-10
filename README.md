@@ -252,7 +252,7 @@ Once connected, the server compares the plugin's `version` and `build` against t
 docker build --build-arg IONSYNC_SIGN_KEY=<hex-private-key> -t ionsync .
 ```
 
-In Dockhand, set `IONSYNC_SIGN_KEY` as a **build** environment variable on the stack. The plugin pins the matching **public** key in `packages/plugin/src/updateKey.ts` (to rotate, change both). If no key is provided the build is unsigned and clients that pin a key will **refuse** to auto-update — a safe, loud failure, never remote code execution. The private key never enters the runtime image.
+In Dockhand, set `IONSYNC_SIGN_KEY` as a **build** environment variable on the stack. The plugin pins the matching **public** key in `packages/plugin/src/updateKey.ts` (to rotate, change both). If no key is provided the build is unsigned, and the server does not offer it to devices at all: auto-update is simply off, and devices keep the plugin version installed from the community store (update it there as usual). This is the normal state when you build the image yourself or run the public one. A client would refuse an unsigned bundle anyway — never remote code execution. The private key never enters the runtime image.
 
 ---
 
