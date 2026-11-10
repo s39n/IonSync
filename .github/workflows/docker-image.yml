@@ -62,6 +62,7 @@ jobs:
           docker compose -f docker-compose.image.yml config -q
           IONSYNC_DATA=/srv/ionsync docker compose -f docker-compose.yml config -q
           IONSYNC_DATA=/srv/ionsync docker compose -f docker-compose.image.yml config -q
+          IONSYNC_DATA=/srv/ionsync IONSYNC_IMAGE=ionsync-staging:latest docker compose -p ionsync-staging -f docker-compose.staging.yml config -q
 
       - name: Read version
         id: version

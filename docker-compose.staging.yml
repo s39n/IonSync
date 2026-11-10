@@ -1,0 +1,20 @@
+# Staging stack: the normal compose file plus an explicit network subnet.
+#
+# Why this file exists: Docker hands each compose project a network from a
+# fixed set of default address pools (31 on a stock install). On a host that
+# already runs that many stacks, a new project fails with
+#   "all predefined address pools have been fully subnetted".
+# Giving the staging network its own subnet outside those pools sidesteps the
+# limit without touching the Docker daemon or the production stack.
+#
+# Used only by the staging stack (see docs/STAGING.md). Production keeps using
+# docker-compose.yml directly and is not affected by anything here.
+
+include:
+  - docker-compose.yml
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${IONSYNC_STAGING_SUBNET:-10.202.0.0/24}
