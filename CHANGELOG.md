@@ -6,6 +6,8 @@ landed before. Earlier history is in `git log`.
 
 ## Unreleased
 
+## 2.0.13 — 2026-11-10
+
 ### Added
 - **LLM API** (`packages/api`, optional `ionsync-api` service): token-protected
   REST API to search, list, read, create, edit, move and delete notes. Runs as a
