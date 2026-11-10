@@ -7,6 +7,7 @@ the real vault. Production is not involved: it keeps deploying from `main`.
 | | Production | Staging |
 |---|---|---|
 | Dockhand stack | `ionsync` | `ionsync-staging` |
+| Compose file | `docker-compose.yml` | `docker-compose.staging.yml` (includes the normal file, adds a fixed network subnet) |
 | Branch | `main` (auto, daily) | whichever branch is under test (manual deploy) |
 | Image (`IONSYNC_IMAGE`) | `ionsync:latest` | `ionsync-staging:latest` |
 | Sync port (`IONSYNC_PORT`) | 3778 | 3878 |
@@ -26,6 +27,15 @@ the real vault. Production is not involved: it keeps deploying from `main`.
 - **Never point a real vault at staging.** It has the same password and a copy of
   the same notes; a real device that syncs with it and then with production would
   carry staging's state back. Use a throwaway test vault.
+
+## Why staging has its own compose file
+
+The NAS already uses all 31 of Docker's default network address pools, so a new
+compose project cannot get a network ("all predefined address pools have been
+fully subnetted"). `docker-compose.staging.yml` includes the normal compose file
+and pins the staging network to `10.202.0.0/24` (override with
+`IONSYNC_STAGING_SUBNET`), which is outside those pools. A branch under test
+must contain this file, i.e. be based on a `main` that has it.
 
 ## Testing a change
 
