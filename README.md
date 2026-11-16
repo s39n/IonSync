@@ -244,6 +244,8 @@ Turn on **Enable sync** and the status bar shows the connection. Repeat on each 
 
 ### Auto-update
 
+**Off by default** in `docker-compose.yml` (`IONSYNC_PLUGIN_AUTOUPDATE=0`): devices sync on the plugin version they have and update through the community store. A device that is offered a server update does not sync until it has applied the update and Obsidian has been restarted, so only set `IONSYNC_PLUGIN_AUTOUPDATE=1` if you want the server to distribute its own signed build and can restart every device. The rest of this section describes that mode.
+
 Once connected, the server compares the plugin's `version` and `build` against the files in `packages/server/client/`. If they differ, the server pushes new plugin files to the client and the plugin hot-reloads itself. This means you only need to manually install once — future updates propagate automatically when you rebuild and redeploy.
 
 **Signed updates.** Because the plugin hot-reloads server-pushed code, update bundles are **ed25519-signed** so a rogue or man-in-the-middle server cannot push arbitrary code (this works over `ws://` and `wss://` alike — no TLS required). Provide the private key to the image build as the `IONSYNC_SIGN_KEY` build argument (raw 32-byte ed25519 key, hex):

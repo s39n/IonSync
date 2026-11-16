@@ -7,6 +7,10 @@ landed before. Earlier history is in `git log`.
 ## Unreleased
 
 ### Changed
+- `IONSYNC_PLUGIN_AUTOUPDATE` switch; the compose file now defaults it to off.
+  A device offered a server plugin update did not sync until it had applied it
+  and been restarted, which left devices that never applied it unsynced. With
+  the switch off every device syncs on the build it has.
 - A server whose bundled plugin build is unsigned (a self-built or the public
   image) no longer offers it to devices. Clients always refused it, so the only
   effect was a "Blocked an unsigned plugin update" warning on every connect.

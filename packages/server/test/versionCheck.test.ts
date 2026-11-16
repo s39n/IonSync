@@ -74,6 +74,19 @@ test("a signed build is offered to an out-of-date client, with its signatures", 
   }
 });
 
+test("with auto-update switched off, even a signed build is not offered", async () => {
+  const srv = await startTestServer({ pluginAutoUpdate: false });
+  try {
+    installBuild(srv, { version: "9.9.9", build: "newer-build", sig: "c2lnbmF0dXJl", filesSig: "ZmlsZXNTaWc=" });
+    const res = await versionCheck(srv, "2.0.0", "old-build");
+    assert.equal(res.needsUpdate, false);
+    assert.equal(res.files, undefined);
+    assert.ok(Array.isArray(res.caps) && (res.caps as string[]).length > 0);
+  } finally {
+    await srv.stop();
+  }
+});
+
 test("a signed build is not offered to a client already on that build", async () => {
   const srv = await startTestServer();
   try {

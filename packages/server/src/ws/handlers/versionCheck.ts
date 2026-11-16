@@ -82,6 +82,15 @@ export function handleVersionCheck(
     return;
   }
 
+  // Auto-update switched off (IONSYNC_PLUGIN_AUTOUPDATE=0): never offer. A
+  // client that is offered an update does not start syncing until it has
+  // applied it and been restarted, so this is the switch that lets every
+  // device sync on the build it already has.
+  if (!ctx.config.pluginAutoUpdate) {
+    peer.send({ type: "version_check_response", needsUpdate: false, caps: SERVER_CAPS });
+    return;
+  }
+
   // An UNSIGNED bundle is never offered. Every current plugin pins the update
   // public key and refuses a bundle without a valid signature (SECURITY.md #4),
   // so offering one cannot update anybody — it only shows the user a "Blocked an
