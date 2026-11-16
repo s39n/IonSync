@@ -56,9 +56,17 @@ export interface Config {
    * can still edit it there. Env `IONSYNC_PUBLIC_PORT`; defaults to `port`.
    */
   publicPort: number;
+  /**
+   * Offer the server's bundled (signed) plugin build to devices running a
+   * different build. A device that is offered an update does NOT sync until it
+   * has applied it and been restarted, so turning this off lets every device
+   * sync on the build it already has (plugin updates then come from the
+   * community store only). Env `IONSYNC_PLUGIN_AUTOUPDATE=0`; default on.
+   */
+  pluginAutoUpdate: boolean;
 }
 
-const DEFAULTS: Omit<Config, "password" | "adminPort" | "publicPort"> = {
+const DEFAULTS: Omit<Config, "password" | "adminPort" | "publicPort" | "pluginAutoUpdate"> = {
   port: 3000,
   host: "0.0.0.0",
   adminHost: "127.0.0.1",
@@ -124,6 +132,9 @@ export function mergeConfig(raw: Record<string, unknown>): Config {
     password: raw["password"],
     port,
     publicPort,
+    pluginAutoUpdate: /^(0|off|false|no)$/i.test((process.env.IONSYNC_PLUGIN_AUTOUPDATE ?? "").trim())
+      ? false
+      : typeof raw["pluginAutoUpdate"] === "boolean" ? raw["pluginAutoUpdate"] : true,
     host: typeof raw["host"] === "string" ? raw["host"] : DEFAULTS.host,
     adminHost: typeof raw["adminHost"] === "string" ? raw["adminHost"] : DEFAULTS.adminHost,
     adminPort: typeof raw["adminPort"] === "number" ? raw["adminPort"] : port + 1,
